@@ -1,6 +1,6 @@
 # Package Map
 
-Groundwork ships 25 public packages. Most applications reference **two or three**. This page tells
+Groundwork ships 26 public packages. Most applications reference **two or three**. This page tells
 you which, and explains the layering — because the layering is what the whole design rests on.
 
 ## The dependency rule
@@ -49,7 +49,7 @@ framework, so the layering is proved for the `net8.0` and the `net10.0` assembli
 
 | Group | Target | Packages |
 | --- | --- | --- |
-| Runtime | `net8.0`, `net10.0` | The providers, `Groundwork.Store`, `Groundwork.Kernel`, `Groundwork.Records`, `Groundwork.Records.Store`, `Groundwork.Documents`, `Groundwork.Extensions.DependencyInjection`, `Groundwork.Testing`, both substrates, `Groundwork.Diagnostics`, `Groundwork.Query.Linq.Execution`, `Groundwork.Query.Linq.Sqlite` |
+| Runtime | `net8.0`, `net10.0` | The providers, `Groundwork.Store`, `Groundwork.Kernel`, `Groundwork.Records`, `Groundwork.Records.Store`, `Groundwork.Documents`, `Groundwork.EntityFrameworkCore`, `Groundwork.Extensions.DependencyInjection`, `Groundwork.Testing`, both substrates, `Groundwork.Diagnostics`, `Groundwork.Query.Linq.Execution`, `Groundwork.Query.Linq.Sqlite` |
 | Portable | `netstandard2.0` | `Groundwork.Query.Model`, `Groundwork.Query.Linq`, `Groundwork.Query.Planning`, `Groundwork.Schema`, `Groundwork.Analyzers`, `Groundwork.Schema.Generator` |
 | Tooling | `net8.0`, `net10.0` | `Groundwork.Tool` — a `dotnet tool` runs on the deployment host's own runtime |
 | Build task | `net10.0` | `Groundwork.SchemaTool.MSBuild` — its task loads into the SDK's MSBuild process, not your application |
@@ -71,6 +71,7 @@ literal framework of its own, and `Groundwork.Packaging.Tests` enforces that.
 | **`Groundwork.Records.Store`** | You want typed rows (`RecordTable<T>`) — **this is the one to reference**, not `Groundwork.Records` | Records + Store |
 | **`Groundwork.Documents`** | You want typed JSON documents with schema versioning | Records + Store |
 | **`Groundwork.Extensions.DependencyInjection`** | You are hosting Groundwork in an ASP.NET Core or generic host | Store, Kernel, `Microsoft.Extensions.*` — **no provider** |
+| **`Groundwork.EntityFrameworkCore`** | You are scaffolding Groundwork declarations from an existing EF Core model | Kernel + EF Core relational metadata — **no provider and no application assembly loading** |
 
 > **Common mistake:** referencing `Groundwork.Records` directly. That package deliberately has *no*
 > provider dependency, so it has no `table.Open(connection)`. Reference **`Groundwork.Records.Store`**,
@@ -97,6 +98,7 @@ literal framework of its own, and `Groundwork.Packaging.Tests` enforces that.
 | `Groundwork.Schema.Generator` | Source generator producing the canonical schema + fingerprint as an assembly attribute |
 | `Groundwork.Tool` | The `groundwork` CLI (`plan`/`validate`/`status`/`apply`/`schema emit`). Assembly and namespace remain `Groundwork.SchemaTool`. |
 | `Groundwork.SchemaTool.MSBuild` | Fails the build on portability refusals and uncovered queries |
+| `Groundwork.EntityFrameworkCore` | Design-time importer for `DbContext.Model`, a compiled `IModel`, or a migrations snapshot model; emits kernel declarations and a structured refusal/alternative report |
 
 ### Provider-author and diagnostic packages
 

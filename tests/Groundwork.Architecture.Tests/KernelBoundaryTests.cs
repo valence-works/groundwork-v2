@@ -159,6 +159,26 @@ public sealed class KernelBoundaryTests
     }
 
     [Fact]
+    public void Ef_import_adapter_reaches_groundwork_only_through_the_kernel()
+    {
+        using var universe = AssemblyUniverse.Load();
+        var adapter = universe.Assemblies.Single(assembly => string.Equals(
+            assembly.GetName().Name, "Groundwork.EntityFrameworkCore", StringComparison.Ordinal));
+        var violations = universe.NonBclReferenceClosure(adapter)
+            .Where(reference => reference.Name.StartsWith("Groundwork.", StringComparison.Ordinal))
+            .Where(reference => !string.Equals(reference.Name, "Groundwork.Kernel", StringComparison.Ordinal) &&
+                                !string.Equals(reference.Name, "Groundwork.Query.Model", StringComparison.Ordinal))
+            .Select(reference => reference.Path)
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.True(violations.Length == 0,
+            "Groundwork.EntityFrameworkCore must produce kernel declarations without reaching a " +
+            "provider, substrate, runtime store, or contract family:" + Environment.NewLine +
+            string.Join(Environment.NewLine, violations));
+    }
+
+    [Fact]
     public void Store_public_lifetime_contract_keeps_resource_ownership_explicit()
     {
         Assert.True(typeof(IDisposable).IsAssignableFrom(typeof(IStorageProviderConnection)));
@@ -177,6 +197,7 @@ public sealed class KernelBoundaryTests
         var name = assembly.GetName().Name;
         return IsKernelAssembly(name) || IsSubstrateAssembly(name) || IsProviderAssembly(assembly) ||
                IsContractFamily(assembly) ||
+               HasMetadata(assembly, "Groundwork.Adapter", "true") ||
                HasMetadata(assembly, "Groundwork.Tool", "true") ||
                string.Equals(name, "Groundwork.Store", StringComparison.Ordinal) ||
                string.Equals(name, "Groundwork.Diagnostics", StringComparison.Ordinal) ||

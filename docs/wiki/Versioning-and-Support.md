@@ -119,7 +119,7 @@ access for scoped units.
 A release is not published until all of it is green:
 
 1. Built from a **tagged commit**.
-2. Packs the **explicit public-project allowlist** (23 packages; samples and benchmarks are not
+2. Packs the **explicit public-project allowlist** (26 packages; samples and benchmarks are not
    release artifacts).
 3. Emits **Source Link** and **symbol packages**, asserted against the packed artifacts rather
    than against the project settings meant to produce them.

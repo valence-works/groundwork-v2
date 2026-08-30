@@ -7,7 +7,7 @@
     <WarningsAsErrors>$(WarningsAsErrors);IL2026;IL2055;IL2060;IL2072;IL2087;IL2090;IL3050</WarningsAsErrors>
   </PropertyGroup>
 
-  <!-- Release contract for every public package, declared once rather than repeated 24 times.
+  <!-- Release contract for every public package, declared once rather than repeated 26 times.
        Source Link is in-box in the .NET 8+ SDK; Microsoft.SourceLink.GitHub stays referenced so a
        build on an older SDK still embeds the same commit metadata. Groundwork.Packaging.Tests packs
        for real and asserts the resulting nupkg and snupkg carry all of it. -->

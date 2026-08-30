@@ -64,6 +64,7 @@ A typical application references:
 | Deployment-time schema tooling | `Groundwork.Tool` (a `dotnet tool`) and/or `Groundwork.SchemaTool.MSBuild` |
 | Provider authoring / conformance | `Groundwork.Testing` |
 | Hosting in ASP.NET Core or a generic host | add `Groundwork.Extensions.DependencyInjection` |
+| Scaffold declarations from an EF Core model | `Groundwork.EntityFrameworkCore` |
 
 See **[Package Map](Package-Map)** for the full list and the dependency rules.
 
@@ -81,7 +82,7 @@ reference them.
 
 | Packages | Target | Why |
 | --- | --- | --- |
-| Providers, `Groundwork.Store`, `Groundwork.Kernel`, `Groundwork.Records*`, `Groundwork.Documents`, `Groundwork.Testing`, the substrates, `Groundwork.Diagnostics`, `Groundwork.Query.Linq.Sqlite` | `net8.0`, `net10.0` | Referenced by your application |
+| Providers, `Groundwork.Store`, `Groundwork.Kernel`, `Groundwork.Records*`, `Groundwork.Documents`, `Groundwork.EntityFrameworkCore`, `Groundwork.Testing`, the substrates, `Groundwork.Diagnostics`, `Groundwork.Query.Linq.Sqlite` | `net8.0`, `net10.0` | Referenced by your application or design-time scaffolder |
 | `Groundwork.Analyzers`, `Groundwork.Schema.Generator`, `Groundwork.Schema`, `Groundwork.Query.Model`, `Groundwork.Query.Linq`, `Groundwork.Query.Planning` | `netstandard2.0` | Loaded by Roslyn and by build hosts |
 | `Groundwork.Tool` | `net8.0`, `net10.0` | A `dotnet tool` runs on the deployment host's own runtime |
 | `Groundwork.SchemaTool.MSBuild` | `net10.0` | See below |

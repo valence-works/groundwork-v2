@@ -28,7 +28,7 @@ for required in \
   Groundwork.Query.Planning Groundwork.Schema \
   Groundwork.Records Groundwork.Store Groundwork.Records.Store Groundwork.Diagnostics \
   Groundwork.Substrate.Relational Groundwork.Sqlite Groundwork.MySql Groundwork.Documents \
-  Groundwork.Testing; do
+  Groundwork.EntityFrameworkCore Groundwork.Testing; do
   test -f "$feed/$required.$version.nupkg" || {
     echo "The local feed is missing $required.$version." >&2
     exit 1
