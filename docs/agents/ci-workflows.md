@@ -77,18 +77,31 @@ performance workflow.
 
 ## Performance evidence
 
-`.github/workflows/performance.yml` (`Performance evidence`) is manual-only. Run it for the final
-performance phase, a release milestone, or an explicit investigation—not during ordinary feature
-iteration:
+`.github/workflows/performance.yml` (`Performance evidence`) remains a manual-only diagnostic lane
+for Native AOT startup, Records, and provider round-trip evidence. Its hosted runner is not stable
+enough to publish comparative latency baselines. Do not run it during ordinary feature iteration:
 
 ```bash
 head=$(git rev-parse origin/main)
-gh workflow run performance.yml --ref main -f ref="$head" -f reason='0.2.0 release evidence'
+gh workflow run performance.yml --ref main -f ref="$head" -f reason='provider investigation'
 ```
 
-The artifact records the commit, ref, runner, reason, .NET environment, Records hot-path output,
-and per-provider write round-trip measurements. Performance evidence is diagnostic and reproducible;
-it is not allowed to hide a correctness failure.
+For publishable comparative evidence, reserve a named controlled host, check out the exact commit
+with a clean worktree, and explicitly confirm that the host is idle:
+
+```bash
+GROUNDWORK_CONFIRM_IDLE_HOST=true \
+  eng/collect-comparative-performance.sh "$head"
+```
+
+The collector records exact-head, schema, host, load, runtime, package, catalog, and raw
+BenchmarkDotNet evidence. Follow `benchmarks/Groundwork.Benchmarks/evidence/methodology.md` to review
+and check a valid result into the exact-SHA run directory. Dry output and busy-host results are not
+publishable. Within-run ratios are diagnostic evidence, not cross-machine comparisons or SLAs.
+
+Ordinary correctness gating executes the benchmark contract tests through `Groundwork.slnx`; it
+checks the matrix, compiled model, canonical schema, and every comparison path without using
+wall-clock thresholds. Performance evidence is never allowed to hide a correctness failure.
 
 ## Enforcement note
 
