@@ -25,6 +25,7 @@
     <PackageReference Include="Groundwork.Sqlite" Version="$(GroundworkVersion)" />
     <PackageReference Include="Groundwork.MySql" Version="$(GroundworkVersion)" />
     <PackageReference Include="Groundwork.Documents" Version="$(GroundworkVersion)" />
+    <PackageReference Include="Groundwork.EntityFrameworkCore" Version="$(GroundworkVersion)" />
     <PackageReference Include="Groundwork.Testing" Version="$(GroundworkVersion)" />
   </ItemGroup>
 </Project>

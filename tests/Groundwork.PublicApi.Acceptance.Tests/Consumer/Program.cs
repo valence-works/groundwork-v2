@@ -1,5 +1,7 @@
 using Groundwork.Documents;
+using Groundwork.EntityFrameworkCore;
 using Groundwork.Kernel;
+using Groundwork.Kernel.Schema;
 using Groundwork.Query.Model;
 using Groundwork.Query.Linq;
 using Groundwork.Query.Linq.Execution;
@@ -8,12 +10,14 @@ using Groundwork.Records;
 using Groundwork.Store;
 using Groundwork.Sqlite;
 using Groundwork.Testing;
+using Microsoft.EntityFrameworkCore;
 using KernelStorageUnit = Groundwork.Kernel.StorageUnit;
 
 using Groundwork.PublicApi.Consumer;
 
 PublicApiApprovalFixture.Touch();
 PublicApiApprovalFixture.CompileCallableSurface();
+RunEfImportJourney();
 
 using (var externalProvider = new InMemoryProviderFactory().Create("external-provider-author-proof"))
 {
@@ -105,6 +109,23 @@ static void RunPrivilegedCrossScopeJourney(IStorageProviderConnection connection
         Require(exception.Message.Contains("GW-ACCESS-003", StringComparison.Ordinal),
             "The privileged point-read refusal did not expose its stable access code.");
     }
+}
+
+static void RunEfImportJourney()
+{
+    var builder = new ModelBuilder();
+    builder.Entity<EfCustomer>(entity =>
+    {
+        entity.ToTable("ef_customers");
+        entity.HasKey(customer => customer.Id);
+        entity.Property(customer => customer.Email).HasMaxLength(320).IsRequired();
+        entity.HasIndex(customer => customer.Email);
+    });
+
+    var result = EfCoreModelImporter.Import(builder.FinalizeModel());
+    Require(result.IsComplete && result.Findings.Count == 0,
+        "The packed EF importer did not produce a complete portable declaration.");
+    SchemaSubject.ValidateManifest(result.Declarations);
 }
 
 static void RunExactAppendJourney(IStorageProviderConnection connection)
@@ -582,6 +603,13 @@ public sealed record Note(Guid Id, string CustomerId, string Body);
 public sealed record PlainCustomer(Guid Id, string Email);
 public sealed record FoldedCustomer(Guid Id, string Email);
 public sealed record JsonRecord(Guid Id, object Payload);
+
+public sealed class EfCustomer
+{
+    public Guid Id { get; set; }
+
+    public string Email { get; set; } = string.Empty;
+}
 
 public sealed class PublicAccessObserver : IStorageAccessObserver
 {

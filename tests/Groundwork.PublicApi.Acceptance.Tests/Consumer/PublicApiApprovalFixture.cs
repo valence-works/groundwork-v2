@@ -1,5 +1,6 @@
 using System.Data.Common;
 using Groundwork.Documents;
+using Groundwork.EntityFrameworkCore;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
 using Groundwork.Query.Model;
@@ -12,6 +13,8 @@ using Groundwork.Substrate.Relational;
 using Groundwork.Sqlite;
 using Groundwork.MySql;
 using Groundwork.Testing;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata;
 
 namespace Groundwork.PublicApi.Consumer;
 
@@ -24,6 +27,12 @@ internal static class PublicApiApprovalFixture
     {
         _ = typeof(DocumentUnit);
         _ = typeof(DocumentReadResult<>);
+        _ = typeof(EfCoreImportSeverity);
+        _ = typeof(EfCoreLocaleOrdering);
+        _ = typeof(EfCoreImportOptions);
+        _ = typeof(EfCoreImportFinding);
+        _ = typeof(EfCoreImportResult);
+        _ = typeof(EfCoreModelImporter);
         _ = typeof(PortableType);
         _ = typeof(LocaleSortKeyDefinition);
         _ = typeof(PortableLocaleOrdering);
@@ -132,6 +141,8 @@ internal static class PublicApiApprovalFixture
 
     public static void CompileCallableSurface()
     {
+        _ = new Func<DbContext, EfCoreImportOptions?, EfCoreImportResult>(EfCoreModelImporter.Import);
+        _ = new Func<IModel, EfCoreImportOptions?, EfCoreImportResult>(EfCoreModelImporter.Import);
         _ = new Action<Type, int, Func<IReadOnlyDictionary<string, object?>, IReadOnlyList<string>, object?>>(
             GwGeneratedRows.RegisterProjection);
         _ = GwGeneratedRows.TryGetProjection<ApprovalRecord>(1, out _);

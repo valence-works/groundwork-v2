@@ -2,6 +2,7 @@
 Groundwork.Analyzers|src/Groundwork.Analyzers/Groundwork.Analyzers.csproj
 Groundwork.Diagnostics|src/Groundwork.Diagnostics/Groundwork.Diagnostics.csproj
 Groundwork.Documents|src/Groundwork.Documents/Groundwork.Documents.csproj
+Groundwork.EntityFrameworkCore|src/Groundwork.EntityFrameworkCore/Groundwork.EntityFrameworkCore.csproj
 Groundwork.Extensions.DependencyInjection|src/Groundwork.Extensions.DependencyInjection/Groundwork.Extensions.DependencyInjection.csproj
 Groundwork.Kernel|src/Groundwork.Kernel/Groundwork.Kernel.csproj
 Groundwork.MongoDb|src/Groundwork.MongoDb/Groundwork.MongoDb.csproj

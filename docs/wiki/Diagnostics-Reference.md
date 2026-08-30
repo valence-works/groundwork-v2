@@ -313,6 +313,23 @@ Grouped by concern:
 
 ---
 
+## `GW-EF-*` — EF Core model import
+
+Returned as structured `EfCoreImportFinding` values by `Groundwork.EntityFrameworkCore`. Error
+findings make `EfCoreImportResult.IsComplete` false; warnings and information preserve a usable
+scaffold while naming semantics the application must review.
+
+| Code | Meaning | Alternative |
+| --- | --- | --- |
+| `GW-EF-001` | The relational shape cannot become one portable storage declaration, including keyless entities, schema-qualified tables, table splitting/inheritance, alternate-key references, filtered indexes, or an invalid inferred manifest | Flatten ownership, declare a stable primary key and portable name, or express the missing-value/index choice directly in Groundwork |
+| `GW-EF-002` | A CLR type, EF value converter, EF generation/concurrency policy, or provider SQL computation has no lossless portable column mapping | Convert to a named `PortableType`, use `DateTimeOffset` for time, declare Groundwork optimistic concurrency, or keep conversion/generation in application writes |
+| `GW-EF-003` | `float`/`double` was imported as storage-only `Double` | Use `Decimal` or a scaled `Int64` when predicates, keys, indexes, ordering, or grouping are required |
+| `GW-EF-004` | The importer added an ordered-prefix covering index required by a declared reference | Keep it or replace it with an index whose leading columns are the reference columns |
+| `GW-EF-005` | A provider collation has no explicit portable locale ordering | Supply `EfCoreImportOptions.LocaleOrderings` with the ICU culture and maximum expansion factor |
+| `GW-EF-006` | A global query filter could be a tenant boundary, but that cannot be inferred safely | Confirm the policy explicitly through `EfCoreImportOptions.ScopePolicies` |
+
+---
+
 ## `GW-CLI-*` / `GW-SCHEMA-*` — tooling
 
 | Code | Meaning |

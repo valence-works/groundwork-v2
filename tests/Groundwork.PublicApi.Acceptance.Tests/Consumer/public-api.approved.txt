@@ -1,5 +1,11 @@
 Groundwork.Documents.DocumentUnit
 Groundwork.Documents.DocumentReadResult
+Groundwork.EntityFrameworkCore.EfCoreImportSeverity
+Groundwork.EntityFrameworkCore.EfCoreLocaleOrdering
+Groundwork.EntityFrameworkCore.EfCoreImportOptions
+Groundwork.EntityFrameworkCore.EfCoreImportFinding
+Groundwork.EntityFrameworkCore.EfCoreImportResult
+Groundwork.EntityFrameworkCore.EfCoreModelImporter
 Groundwork.Kernel.PortableType
 Groundwork.Kernel.ProviderOwnedColumns
 Groundwork.Kernel.MissingValueBehavior
