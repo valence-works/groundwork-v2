@@ -41,6 +41,11 @@ public sealed class StableDeclarationPlanningTests
             Assert.Equal(PhysicalSchemaDiffPlanner.StableDeclarationChangedCode, refusal.Code);
             Assert.Equal(path, refusal.Path);
             Assert.Contains("no portable in-place evolution", refusal.Message, StringComparison.Ordinal);
+            if (path == "schema.key")
+            {
+                Assert.Contains("'id'", refusal.Message, StringComparison.Ordinal);
+                Assert.Contains("'alternate'", refusal.Message, StringComparison.Ordinal);
+            }
         }
     }
 

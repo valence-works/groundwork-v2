@@ -352,7 +352,7 @@ would make it work, while an unauthorized one is waiting on an operator naming i
 | `GW-SCHEMA-001` | Legacy schema history has no typed applied snapshot | Invalid |
 | `GW-SCHEMA-002` | Applied state belongs to a different target | Invalid |
 | `GW-SCHEMA-003` | A changed definition has no portable evolution — a key column's portable type changed, or a rename collides with a name another applied column still holds | Invalid |
-| `GW-SCHEMA-004` | A removal has no portable operation — a key column cannot be dropped | Invalid |
+| `GW-SCHEMA-004` | An applied operation or physical constraint is absent from the desired target and has no portable removal operation | Invalid |
 | `GW-SCHEMA-005` | A new required column has no portable default or semantic migration for existing rows | Invalid |
 | `GW-SCHEMA-006` | Applied state was recorded under a different persisted schema boundary — discard the catalog | Invalid |
 | `GW-SCHEMA-007` | A planned **destructive** operation is not authorized. The message names the operation's address, e.g. `drop-column:orders.legacy_total` | Needs authorization |
@@ -362,7 +362,7 @@ would make it work, while an unauthorized one is waiting on an operator naming i
 | `GW-SCHEMA-012` | `groundwork adopt` was asked to adopt a subject declared retired, which describes no catalog to verify | Invalid |
 | `GW-SCHEMA-013` | The provider reported the deployed catalog invalid without naming what differs, so adoption refused rather than record an unproved claim | Invalid |
 | `GW-SCHEMA-014` | A storage unit declares a physical foreign key or check constraint, but the deployment does not advertise `groundwork.schema.enforced-constraints`. Use a logical-only `Reference(...)` (and application validation for checks), or target an advertising relational deployment | Unsupported deployment |
-| `GW-SCHEMA-015` | Applied schema history and the desired declaration differ in a stable identity dimension for which Groundwork defines no portable in-place evolution: logical key identity/order, scope, concurrency, timestamps, schema version, retention, append idempotency, or retention idempotency. Rebuild or migrate as named by the refusal | Invalid |
+| `GW-SCHEMA-015` | Applied schema history and the desired declaration differ in a stable identity dimension for which Groundwork defines no portable in-place evolution: logical key identity/order (including replacing or dropping a key column), scope, concurrency, timestamps, schema version, retention, append idempotency, or retention idempotency. Rebuild or migrate as named by the refusal | Invalid |
 
 `GW-SCHEMA-007` and `-008` replace the earlier use of `GW-RUNTIME-002` for startup auto-apply
 refusals. `GW-RUNTIME-002` now means only what its own row says: **index drift**.

@@ -169,13 +169,17 @@ public static class PhysicalSchemaDiffPlanner
         var desired = target.Subject.Definition;
         var refusals = ImmutableArray.CreateBuilder<SchemaRefusal>();
 
-        if (!LogicalKeyColumns(previous).SequenceEqual(LogicalKeyColumns(desired), StringComparer.Ordinal))
+        var previousKey = LogicalKeyColumns(previous);
+        var desiredKey = LogicalKeyColumns(desired);
+        if (!previousKey.SequenceEqual(desiredKey, StringComparer.Ordinal))
         {
-            refusals.Add(Changed(
-                desired,
-                "logical key identity or column order",
-                "schema.key",
-                "Declare a new unit and migrate its rows."));
+            refusals.Add(new SchemaRefusal(
+                StableDeclarationChangedCode,
+                $"Storage unit '{desired.Name}' changed its logical key identity or column order from " +
+                $"[{string.Join(", ", previousKey.Select(column => $"'{column}'"))}] to " +
+                $"[{string.Join(", ", desiredKey.Select(column => $"'{column}'"))}], for which Groundwork " +
+                "defines no portable in-place evolution. Declare a new unit and migrate its rows.",
+                "schema.key"));
         }
         if (previous.Scope != desired.Scope)
             refusals.Add(Changed(desired, "scope", "schema.scope"));

@@ -185,10 +185,11 @@ removed is planned as an explicit operation that carries its own authorization:
 | Column, index, or retired unit removed | `DropColumn`, `DropIndex`, `DropPrimaryStorage` | `--allow-destructive` |
 | An index moved out of the way of a column alteration | `DropIndex` + `CreatePhysicalIndex` | carried by the alteration |
 
-Only evolutions with **no portable meaning** are refused outright: dropping a key column
-(`GW-SCHEMA-004`), changing a key column's portable type or renaming onto a name another applied
-column still holds (`GW-SCHEMA-003`), and adding a required column with nothing to put in it for
-existing rows (`GW-SCHEMA-005`). See **[Diagnostics Reference](Diagnostics-Reference)**.
+Only evolutions with **no portable meaning** are refused outright: changing logical key identity or
+order — including replacing or dropping a key column — (`GW-SCHEMA-015`), changing a key column's
+portable type or renaming onto a name another applied column still holds (`GW-SCHEMA-003`), and
+adding a required column with nothing to put in it for existing rows (`GW-SCHEMA-005`). See
+**[Diagnostics Reference](Diagnostics-Reference)**.
 
 ### Renames need the logical id
 
