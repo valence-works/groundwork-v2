@@ -17,7 +17,7 @@ public sealed class BenchmarkDbContext(DbContextOptions<BenchmarkDbContext> opti
         item.Property(value => value.Category).HasColumnName("category").IsRequired();
         item.Property(value => value.Sequence).HasColumnName("sequence").IsRequired();
         item.Property(value => value.Payload).HasColumnName("payload").IsRequired();
-        item.HasIndex(value => new { value.Category, value.Id })
+        item.HasIndex(value => new { value.Category, value.Id, value.Sequence, value.Payload })
             .HasDatabaseName("ix_benchmark_items_category_id");
     }
 

@@ -6,10 +6,13 @@ discovery, or a run on a busy development machine is smoke evidence, not a publi
 
 ## Controlled comparison
 
-The key matrix contains point reads, covered queries, and 32-row batched writes through Groundwork,
-EF Core with its checked-in compiled model, and Dapper. The implementations share one SQLite
-schema, seed data, indexes, connection policy, process, and host. The benchmark README documents
-the schema fingerprint, PRAGMAs, materialized shapes, and the meaning of each reported operation.
+The measured matrix contains point reads, covered queries, offset-paged queries, 32-row batched
+writes, and one-row unit-of-work commits through Groundwork, EF Core with its checked-in compiled
+model, and Dapper. The checked-in 15-method catalog is a deterministic discovery preflight for that
+complete matrix. The implementations share one SQLite schema, seed data, indexes, process, and host.
+The query and batched-write paths use equivalent pre-opened connections; the unit-of-work lifecycle
+difference is documented below. The benchmark README documents the schema fingerprint, PRAGMAs,
+materialized shapes, and the meaning of each reported operation.
 
 `eng/collect-comparative-performance.sh` records the tested commit, schema fingerprint, UTC time,
 host, operating system, load snapshot, .NET environment, and resolved package graph. It exports
@@ -26,6 +29,12 @@ service-level objectives, or support promises.
 4. Review the manifest, package graph, BenchmarkDotNet environment metadata, outliers, and result
    stability. If valid, copy the untouched output into `evidence/runs/<commit>/` in a follow-up
    evidence commit and describe the host and run conditions in that directory's README.
+
+The unit-of-work category is an end-to-end public-call comparison. Groundwork opens an independent
+non-pooled connection, performs runtime schema admission, and begins its transaction as part of that
+call; EF Core and Dapper begin their transactions on already-open benchmark connections. The
+reported Groundwork ratio therefore includes its public admission and connection lifecycle rather
+than hiding that work as setup.
 
 No controlled comparative result is checked in by this scaffolding change. Producing that result
 requires the bounded idle-host run above; discovery and Dry smoke output must never be substituted.

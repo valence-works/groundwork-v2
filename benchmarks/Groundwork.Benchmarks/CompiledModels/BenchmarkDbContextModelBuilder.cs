@@ -11,7 +11,7 @@ namespace Groundwork.Benchmarks
     public partial class BenchmarkDbContextModel
     {
         private BenchmarkDbContextModel()
-            : base(skipDetectChanges: false, modelId: new Guid("1d1b40c2-630a-4799-a2b0-4153002f4ea2"), entityTypeCount: 1)
+            : base(skipDetectChanges: false, modelId: new Guid("009287c0-619b-463d-ae89-c02b7f659cd0"), entityTypeCount: 1)
         {
         }
 

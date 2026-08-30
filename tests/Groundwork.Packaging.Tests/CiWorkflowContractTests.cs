@@ -36,7 +36,9 @@ public sealed class CiWorkflowContractTests
         Assert.Contains("GROUNDWORK_CONFIRM_IDLE_HOST", collector, StringComparison.Ordinal);
         Assert.Contains("eng/verify-exact-head.sh", collector, StringComparison.Ordinal);
         Assert.Contains("benchmarks --list flat", collector, StringComparison.Ordinal);
-        Assert.Contains("--filter '*PointRead*' '*CoveredQuery*' '*BatchedWrite*'", collector, StringComparison.Ordinal);
+        const string allWorkloads =
+            "--filter '*PointRead*' '*CoveredQuery*' '*PagedQuery*' '*BatchedWrite*' '*UnitOfWorkCommit*'";
+        Assert.Equal(2, collector.Split(allWorkloads, StringSplitOptions.None).Length - 1);
         Assert.Contains("--exporters json markdown csv", collector, StringComparison.Ordinal);
         Assert.DoesNotContain("threshold", collector, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("baseline.json", collector, StringComparison.OrdinalIgnoreCase);
@@ -59,9 +61,15 @@ public sealed class CiWorkflowContractTests
                 "Groundwork.Benchmarks.StorageBenchmarks.CoveredQuery_Groundwork",
                 "Groundwork.Benchmarks.StorageBenchmarks.CoveredQuery_EFCoreCompiledModel",
                 "Groundwork.Benchmarks.StorageBenchmarks.CoveredQuery_Dapper",
+                "Groundwork.Benchmarks.StorageBenchmarks.PagedQuery_Groundwork",
+                "Groundwork.Benchmarks.StorageBenchmarks.PagedQuery_EFCoreCompiledModel",
+                "Groundwork.Benchmarks.StorageBenchmarks.PagedQuery_Dapper",
                 "Groundwork.Benchmarks.StorageBenchmarks.PointRead_Groundwork",
                 "Groundwork.Benchmarks.StorageBenchmarks.PointRead_EFCoreCompiledModel",
                 "Groundwork.Benchmarks.StorageBenchmarks.PointRead_Dapper",
+                "Groundwork.Benchmarks.StorageBenchmarks.UnitOfWorkCommit_Groundwork",
+                "Groundwork.Benchmarks.StorageBenchmarks.UnitOfWorkCommit_EFCoreCompiledModel",
+                "Groundwork.Benchmarks.StorageBenchmarks.UnitOfWorkCommit_Dapper",
             },
             scenarios);
     }
