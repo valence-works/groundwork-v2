@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export LC_ALL=C
 
 script_directory=$(cd "$(dirname "$0")" && pwd)
 repository_root=$(git -C "$script_directory/.." rev-parse --show-toplevel)
 cd "$repository_root"
 
 requested_sha=${1:?Pass the exact 40-character commit SHA to exercise.}
-output_root=${2:-artifacts/recurrence/full-solution/$requested_sha}
+attempt_id=$(date -u +%Y%m%dT%H%M%SZ)-$$
+output_root=${2:-artifacts/recurrence/full-solution/$requested_sha/$attempt_id}
 lock_path=/tmp/groundwork-tests.lock
 neighbor_pattern='[d]otnet[[:space:]]+test|[t]esthost|[v]stest'
 
@@ -33,11 +35,28 @@ else
   exit 1
 fi
 
-actual_sha=$(bash eng/verify-exact-head.sh "$requested_sha")
-if [[ -n "$(git status --porcelain)" ]]; then
-  echo "Recurrence evidence requires a clean exact-head worktree." >&2
-  exit 1
-fi
+verify_exact_clean() {
+  local phase=$1
+  if ! verified_sha=$(bash eng/verify-exact-head.sh "$requested_sha"); then
+    if [[ -n "${manifest:-}" ]]; then
+      echo "final_status=invalid-exact-head-$phase" >> "$manifest"
+    fi
+    return 1
+  fi
+  if [[ -n "$(git status --porcelain)" ]]; then
+    echo "Recurrence evidence requires a clean exact-head worktree ($phase)." >&2
+    if [[ -n "${manifest:-}" ]]; then
+      echo "final_status=invalid-worktree-$phase" >> "$manifest"
+    fi
+    return 1
+  fi
+  if [[ -n "${manifest:-}" ]]; then
+    echo "git_verification_${phase//-/_}=$verified_sha" >> "$manifest"
+  fi
+}
+
+verify_exact_clean "initial"
+actual_sha=$verified_sha
 if [[ -e "$output_root" ]]; then
   echo "Refusing to overwrite existing recurrence evidence at $output_root." >&2
   exit 1
@@ -75,12 +94,17 @@ check_no_neighboring_tests() {
 
 record_idle_sample() {
   local sample=$1
-  local snapshot load_one
-  snapshot=$(uptime)
-  load_one=$(sed -E 's/.*load average(s)?:[[:space:]]*([0-9]+([.][0-9]+)?).*/\2/' <<< "$snapshot")
+  local load_one
+  if [[ -r /proc/loadavg ]]; then
+    load_one=$(awk '{ print $1 }' /proc/loadavg)
+  elif [[ "$(uname -s)" == "Darwin" ]]; then
+    load_one=$(sysctl -n vm.loadavg | tr -d '{}' | awk '{ print $1 }')
+  else
+    load_one=$(uptime | sed -E 's/.*load average(s)?:[[:space:]]*([0-9]+([.][0-9]+)?).*/\2/')
+  fi
   if [[ ! "$load_one" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
     {
-      echo "load_parse_failure=$snapshot"
+      echo "load_parse_failure=$load_one"
       echo "final_status=invalid-load-sample-$sample"
     } | tee -a "$manifest" >&2
     return 1
@@ -106,6 +130,7 @@ for sample in $(seq 1 11); do
     sleep 30
   fi
 done
+verify_exact_clean "after-idle-preflight"
 
 set +e
 dotnet restore Groundwork.slnx --nologo 2>&1 | tee "$output_root/restore.log"
@@ -128,6 +153,7 @@ fi
 
 for iteration in $(seq 1 5); do
   check_no_neighboring_tests "before-run-$iteration"
+  verify_exact_clean "before-run-$iteration"
   run_directory="$output_root/run-$iteration"
   mkdir -p "$run_directory"
   echo "run_${iteration}_started_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$manifest"
@@ -144,25 +170,39 @@ for iteration in $(seq 1 5); do
   test_status=${test_pipeline_status[0]}
   console_log_status=${test_pipeline_status[1]}
 
+  trx_path=$(find "$run_directory" -type f -name '*.trx' -print -quit)
+  if [[ -n "$trx_path" ]]; then
+    trx_present=true
+  else
+    trx_present=false
+  fi
+
   {
     echo "run_${iteration}_status=$test_status"
     echo "run_${iteration}_console_log_status=$console_log_status"
+    echo "run_${iteration}_trx_present=$trx_present"
     echo "run_${iteration}_finished_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   } >> "$manifest"
+  verify_exact_clean "after-run-$iteration"
   if [[ "$console_log_status" -ne 0 ]]; then
     echo "final_status=console-log-write-failed-on-run-$iteration" >> "$manifest"
     exit "$console_log_status"
   fi
   if [[ "$test_status" -ne 0 ]]; then
-    echo "final_status=failed-on-run-$iteration" >> "$manifest"
+    if [[ "$trx_present" == "true" ]]; then
+      echo "final_status=failed-with-trx-on-run-$iteration" >> "$manifest"
+    else
+      echo "final_status=failed-without-trx-on-run-$iteration" >> "$manifest"
+    fi
     exit "$test_status"
   fi
-  if ! find "$run_directory" -type f -name '*.trx' -print -quit | grep -q .; then
+  if [[ "$trx_present" != "true" ]]; then
     echo "final_status=missing-trx-on-run-$iteration" >> "$manifest"
     echo "Run $iteration passed without producing a TRX result." >&2
     exit 1
   fi
 done
+verify_exact_clean "final"
 
 {
   echo "finished_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"

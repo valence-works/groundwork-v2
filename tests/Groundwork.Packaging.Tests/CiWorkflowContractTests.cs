@@ -83,6 +83,7 @@ public sealed class CiWorkflowContractTests
             "run-full-solution-recurrence.sh"));
 
         Assert.Contains("GROUNDWORK_CONFIRM_IDLE_HOST", script, StringComparison.Ordinal);
+        Assert.Contains("export LC_ALL=C", script, StringComparison.Ordinal);
         Assert.Contains("eng/verify-exact-head.sh", script, StringComparison.Ordinal);
         Assert.Contains("git status --porcelain", script, StringComparison.Ordinal);
         Assert.Contains("/tmp/groundwork-tests.lock", script, StringComparison.Ordinal);
@@ -92,6 +93,9 @@ public sealed class CiWorkflowContractTests
         Assert.Contains("seq 1 11", script, StringComparison.Ordinal);
         Assert.Contains("sleep 30", script, StringComparison.Ordinal);
         Assert.Contains("load <= 1.0", script, StringComparison.Ordinal);
+        Assert.Contains("/proc/loadavg", script, StringComparison.Ordinal);
+        Assert.Contains("sysctl -n vm.loadavg", script, StringComparison.Ordinal);
+        Assert.Contains("/$attempt_id", script, StringComparison.Ordinal);
         Assert.Contains("seq 1 5", script, StringComparison.Ordinal);
         Assert.Contains("dotnet restore Groundwork.slnx", script, StringComparison.Ordinal);
         Assert.Contains("dotnet test Groundwork.slnx", script, StringComparison.Ordinal);
@@ -101,12 +105,21 @@ public sealed class CiWorkflowContractTests
         Assert.Contains("--blame-hang --blame-hang-timeout 20m --blame-hang-dump-type full", script, StringComparison.Ordinal);
         Assert.Contains("PIPESTATUS[@]", script, StringComparison.Ordinal);
         Assert.Contains("console_log_status", script, StringComparison.Ordinal);
+        Assert.Contains("run_${iteration}_trx_present", script, StringComparison.Ordinal);
+        Assert.Contains("verify_exact_clean \"after-idle-preflight\"", script, StringComparison.Ordinal);
+        Assert.Contains("verify_exact_clean \"before-run-$iteration\"", script, StringComparison.Ordinal);
+        Assert.Contains("verify_exact_clean \"after-run-$iteration\"", script, StringComparison.Ordinal);
+        Assert.Contains("verify_exact_clean \"final\"", script, StringComparison.Ordinal);
         Assert.DoesNotContain("--filter", script, StringComparison.Ordinal);
         Assert.DoesNotContain("-m:1", script, StringComparison.Ordinal);
 
         var restore = script.IndexOf("dotnet restore Groundwork.slnx", StringComparison.Ordinal);
         var test = script.IndexOf("dotnet test Groundwork.slnx", StringComparison.Ordinal);
-        Assert.True(restore >= 0 && restore < test);
+        var afterPreflight = script.IndexOf("verify_exact_clean \"after-idle-preflight\"", StringComparison.Ordinal);
+        var trx = script.IndexOf("run_${iteration}_trx_present", StringComparison.Ordinal);
+        var failure = script.IndexOf("if [[ \"$test_status\" -ne 0 ]]", StringComparison.Ordinal);
+        Assert.True(afterPreflight >= 0 && afterPreflight < restore && restore < test);
+        Assert.True(trx >= 0 && trx < failure);
     }
 
     [Fact]

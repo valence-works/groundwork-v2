@@ -58,7 +58,9 @@ five-minute preflight, restores once, and then runs the unfiltered Release solut
 sequence. It stops on the first failure. Every iteration has its own directory containing console
 output and TRX results; a crash or hang also retains its sequence XML and any full dump requested
 after the 20-minute VSTest hang threshold. The manifest records the exact SHA, host, lock
-implementation, preflight samples, and per-run outcome.
+implementation, preflight samples, and per-run outcome. Every invocation writes to a unique
+timestamped attempt directory below the SHA, so an invalid busy-window attempt remains available
+for audit without blocking a later retry.
 
 A failure is recurrence evidence and must be classified from its TRX, console output, and dump. Five
 passes mean only “not reproduced in this clean window”; they are not proof that an intermittent bug
