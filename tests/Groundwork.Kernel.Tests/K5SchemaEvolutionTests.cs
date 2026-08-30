@@ -1449,7 +1449,7 @@ public sealed class K5SchemaEvolutionTests
     }
 
     [Fact]
-    public void Dropping_a_key_column_is_refused_as_an_invalid_evolution()
+    public void Replacing_a_key_column_is_refused_as_stable_identity_drift()
     {
         var executor = new FakeExecutor();
         var unit = CreateOrdersUnit(includeLegacyTotal: true);
@@ -1471,7 +1471,11 @@ public sealed class K5SchemaEvolutionTests
             PlannedAt.AddMinutes(2));
 
         Assert.False(plan.IsApplicable);
-        Assert.Contains(plan.Refusals, refusal => refusal.Code == "GW-SCHEMA-004" && refusal.Message.Contains("'id'", StringComparison.Ordinal));
+        var refusal = Assert.Single(plan.Refusals);
+        Assert.Equal(PhysicalSchemaDiffPlanner.StableDeclarationChangedCode, refusal.Code);
+        Assert.Equal("schema.key", refusal.Path);
+        Assert.Contains("'id'", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("'surrogate'", refusal.Message, StringComparison.Ordinal);
         Assert.Empty(plan.Operations);
     }
 
