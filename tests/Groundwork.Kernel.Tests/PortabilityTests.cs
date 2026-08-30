@@ -914,7 +914,31 @@ public sealed class PortabilityTests
             Unit([
                 Column("id", PortableType.Guid, nullable: false),
                 Column(new string('x', 64), PortableType.String)
-            ], key: ["id"]))
+            ], key: ["id"])),
+        new(
+            "GW-PORT-012",
+            Unit([Column("payload", PortableType.Json)], key: ["payload"])),
+        new(
+            "GW-PORT-012",
+            Unit(
+                [
+                    Column("id", PortableType.Guid, nullable: false),
+                    Column("payload", PortableType.Json)
+                ],
+                key: ["id"]) with
+            {
+                AggregationProfiles =
+                [
+                    new AggregationProfile
+                    {
+                        Name = "by_payload",
+                        GroupByColumns = ["payload"],
+                        Aggregates = [new Aggregate.Count("rows")],
+                        MaxGroups = 10,
+                        MaxInputRows = 10
+                    }
+                ]
+            })
     ];
 
     private sealed record PortabilityRuleFixture(
