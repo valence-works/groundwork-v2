@@ -200,11 +200,11 @@ public class StorageBenchmarks
 
     [Benchmark(Baseline = true)]
     [BenchmarkCategory("UnitOfWorkCommit")]
-    public int UnitOfWorkCommit_Groundwork()
+    public async Task<int> UnitOfWorkCommit_Groundwork()
     {
         using var work = Provider.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Default, unit);
         work.Stage(RowWrite.Update(unit, Values(CommitId, "commit", -1, NextPayload())));
-        return work.Commit().Succeeded;
+        return (await work.CommitAsync()).Succeeded;
     }
 
     [Benchmark]

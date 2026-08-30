@@ -85,7 +85,7 @@ public sealed class BenchmarkMethodologyTests
             Assert.Equal(BenchmarkMethodology.BatchSize, (await benchmarks.BatchedWrite_Groundwork()).Count);
             Assert.Equal(BenchmarkMethodology.BatchSize, await benchmarks.BatchedWrite_EFCoreCompiledModel());
             Assert.Equal(BenchmarkMethodology.BatchSize, await benchmarks.BatchedWrite_Dapper());
-            Assert.Equal(1, benchmarks.UnitOfWorkCommit_Groundwork());
+            Assert.Equal(1, await benchmarks.UnitOfWorkCommit_Groundwork());
             Assert.Equal(1, await benchmarks.UnitOfWorkCommit_EFCoreCompiledModel());
             Assert.Equal(1, await benchmarks.UnitOfWorkCommit_Dapper());
         }
