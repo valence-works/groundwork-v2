@@ -45,7 +45,8 @@ must inspect required capabilities at startup rather than inferring them from th
 Provider-neutral correctness, provider-specific integration suites, schema-tool end-to-end proofs,
 and the separately scheduled concurrency matrix establish the implementation evidence. The
 [MySQL/MariaDB provider report](mysql-provider-evidence.md) records the MySQL 8.4.6 live lanes and
-does not claim MariaDB execution evidence. MongoDB live lanes use a replica set, not a sharded cluster.
+does not claim MariaDB execution evidence. MongoDB's positive production evidence lanes use a
+replica set, not a sharded cluster; a separate standalone lane proves compatibility-mode refusals.
 Performance runs are planning evidence, not a semantic gate or a latency/SLA promise.
 
 ## Interop view capability
