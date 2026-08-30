@@ -1,3 +1,4 @@
+using System.Data.Common;
 using Groundwork.Documents;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
@@ -7,6 +8,7 @@ using Groundwork.Query.Linq.Execution;
 using Groundwork.Query.Planning;
 using Groundwork.Records;
 using Groundwork.Store;
+using Groundwork.Substrate.Relational;
 using Groundwork.Sqlite;
 using Groundwork.Testing;
 
@@ -105,6 +107,20 @@ internal static class PublicApiApprovalFixture
         _ = typeof(KeyedBatchReadSessionExtensions);
         _ = typeof(SqliteProviderFactory);
         _ = typeof(InMemoryProviderFactory);
+        _ = typeof(RelationalStorageSessionBase);
+        _ = typeof(RelationalStorageSessionAdapter);
+        _ = typeof(RelationalAppendAdapter);
+        _ = typeof(RelationalAppendCommand);
+        _ = typeof(RelationalAppendLedgerState);
+        _ = typeof(RelationalAppendReplayState);
+        _ = typeof(RelationalRetentionAdapter);
+        _ = typeof(RelationalRetentionCommand);
+        _ = typeof(RelationalExactRetentionCommand);
+        _ = typeof(RelationalRetentionLedgerState);
+        _ = typeof(RelationalRetentionReplayState);
+        _ = typeof(RelationalUnitOfWork);
+        _ = typeof(RelationalUnitOfWorkSession);
+        _ = typeof(RelationalUnitOfWorkLifetime);
         _ = WellKnownCapabilities.EnforcedConstraints;
     }
 
@@ -275,6 +291,159 @@ internal static class PublicApiApprovalFixture
         _ = new Func<QueryRequest, QueryCoverageCandidates, QueryCoverageResult>(QueryCoverageChecker.Check);
         _ = new Func<QueryCoverageCandidates, QueryCoverageCandidates, RuntimeCoverageGate>(
             (declared, deployed) => new RuntimeCoverageGate(declared, deployed));
+        _ = new Func<Groundwork.Kernel.StorageUnit, StorageAccess, DbConnection, DbTransaction, IUnitOfWork>(
+            ComposeRelationalUnitOfWork);
+    }
+
+    private static IUnitOfWork ComposeRelationalUnitOfWork(
+        Groundwork.Kernel.StorageUnit unit,
+        StorageAccess access,
+        DbConnection connection,
+        DbTransaction transaction)
+    {
+        var lifetime = new RelationalUnitOfWorkLifetime(
+            connection,
+            transaction,
+            supportsAsync: true,
+            disposeTransaction: true);
+        return new RelationalUnitOfWork(
+            [unit],
+            BatchWriteOptions.Default,
+            declaration =>
+            {
+                var session = new ApprovalRelationalSession(
+                    declaration,
+                    access,
+                    connection,
+                    transaction);
+                return new RelationalUnitOfWorkSession(session, session.Close);
+            },
+            lifetime);
+    }
+
+    private sealed class ApprovalRelationalSession(
+        Groundwork.Kernel.StorageUnit unit,
+        StorageAccess access,
+        DbConnection connection,
+        DbTransaction transaction)
+        : RelationalStorageSessionBase(
+            unit,
+            access,
+            new ApprovalRelationalAdapter(connection),
+            new ApprovalAppendAdapter(),
+            retentionAdapter: null,
+            onAppendRetentionOwner: connection,
+            transaction: transaction);
+
+    private sealed class ApprovalRelationalAdapter(DbConnection connection)
+        : RelationalStorageSessionAdapter(connection, new ApprovalDialect())
+    {
+        private DbCommand TransactionBoundCommand(string sql) => CreateCommand(sql);
+
+        protected override void BindParameter(
+            DbCommand command,
+            string parameter,
+            object? value,
+            ColumnDefinition column) { }
+
+        protected override ValueTask<WriteOutcome> Insert(
+            StorageValues values,
+            WriteOutcomeStatus status,
+            RelationalExecution execution) => throw new NotSupportedException();
+
+        protected override ValueTask<WriteOutcome> Update(
+            StorageValues values,
+            StorageKey key,
+            StoredEntry? existing,
+            WriteOptions? options,
+            RelationalExecution execution) => throw new NotSupportedException();
+
+        protected override ValueTask<WriteOutcome> Upsert(
+            StorageValues values,
+            StorageKey key,
+            StoredEntry? existing,
+            WriteOptions? options,
+            RelationalExecution execution) => throw new NotSupportedException();
+
+        protected override ValueTask<WriteOutcome> Delete(
+            StorageKey key,
+            StoredEntry? existing,
+            WriteOptions? options,
+            RelationalExecution execution) => throw new NotSupportedException();
+    }
+
+    private sealed class ApprovalAppendAdapter : RelationalAppendAdapter
+    {
+        protected override ValueTask<DateTimeOffset> PrepareLedger(
+            RelationalAppendCommand operation,
+            RelationalExecution execution) => throw new NotSupportedException();
+
+        protected override ValueTask ReclaimExpired(
+            RelationalAppendCommand operation,
+            DateTimeOffset cutoff,
+            RelationalExecution execution) => throw new NotSupportedException();
+
+        protected override ValueTask<RelationalAppendLedgerState?> ReadLedger(
+            RelationalAppendCommand operation,
+            RelationalExecution execution) => throw new NotSupportedException();
+
+        protected override ValueTask DeleteLedger(
+            RelationalAppendCommand operation,
+            RelationalAppendLedgerState existing,
+            RelationalExecution execution) => throw new NotSupportedException();
+
+        protected override ValueTask<bool> TryClaimLedger(
+            RelationalAppendCommand operation,
+            DateTimeOffset providerNow,
+            RelationalExecution execution) => throw new NotSupportedException();
+
+        protected override ValueTask<RelationalAppendReplayState?> ReadClaimWinner(
+            RelationalAppendCommand operation,
+            RelationalExecution execution) => throw new NotSupportedException();
+
+        protected override ValueTask<IReadOnlyList<RowWriteOutcome>> InsertPayload(
+            RelationalAppendCommand operation,
+            RelationalExecution execution) => throw new NotSupportedException();
+
+        protected override ValueTask<bool> CompleteLedger(
+            RelationalAppendCommand operation,
+            string serializedOutcomes,
+            RelationalExecution execution) => throw new NotSupportedException();
+    }
+
+    private sealed class ApprovalDialect : RelationalDialect
+    {
+        public override string ProviderName => "approval";
+        public override string QuoteIdentifier(string identifier) => identifier;
+        public override string MapType(ColumnDefinition definition) => definition.Type.ToString();
+        public override string? MapCollation(ColumnDefinition definition) => null;
+        public override string? MapDefault(ColumnDefinition definition) => null;
+        public override string CreateTableSql(string table, IReadOnlyList<string> columns, IReadOnlyList<string> primaryKey) => string.Empty;
+        public override string AddColumnSql(string table, string column, string definition) => string.Empty;
+        public override string FinalizeColumnSql(string table, string column, ColumnDefinition definition) => string.Empty;
+        public override string CreateIndexSql(string table, IndexDefinition index, string? filter) => string.Empty;
+        public override string DropIndexSql(string table, string index) => string.Empty;
+        public override string ConditionalUpsertSql(RelationalWriteShape shape) => string.Empty;
+        public override string BatchInsertSql(RelationalWriteShape shape, int batchSize) => string.Empty;
+        public override object? ConvertValue(object? value, ColumnDefinition definition) => value;
+        public override void Validate(ColumnDefinition definition) { }
+        public override bool TryMapUniqueViolation(DbException exception, out string indexName)
+        {
+            indexName = string.Empty;
+            return false;
+        }
+        public override void AcquireApplicationLock(DbConnection connection, string resource) { }
+        public override void ReleaseApplicationLock(DbConnection connection, string resource) { }
+        public override bool VerifyApplicationLock(DbConnection connection, string resource) => true;
+        public override long ReadServerSessionId(DbConnection connection) => 0;
+        public override long AcquireFence(DbConnection connection, PhysicalSchemaTargetIdentity target, string owner) => 0;
+        public override void AssertFence(DbConnection connection, DbTransaction transaction, PhysicalSchemaTargetIdentity target, string owner, long fence) { }
+        public override void EnsureInfrastructure(DbConnection connection) { }
+        public override PhysicalSchemaHistoryState ReadHistory(DbConnection connection, PhysicalSchemaTargetIdentity target) => PhysicalSchemaHistoryState.Empty;
+        public override void PublishHistory(DbConnection connection, DbTransaction transaction, PhysicalSchemaTargetIdentity target, PhysicalSchemaAppliedState state, string? expectedAppliedTargetFingerprint, string owner, long fence) { }
+        public override bool TableExists(DbConnection connection, DbTransaction? transaction, string table) => false;
+        public override IReadOnlyDictionary<string, RelationalColumnMetadata> ReadColumns(DbConnection connection, DbTransaction? transaction, string table) => new Dictionary<string, RelationalColumnMetadata>();
+        public override RelationalIndexMetadata? ReadIndex(DbConnection connection, DbTransaction? transaction, string table, string index) => null;
     }
 
     private sealed record ApprovalRecord(Guid Id, string Value);

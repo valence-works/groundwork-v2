@@ -16,6 +16,7 @@
     <Compile Include="PublicApiApprovalFixture.cs" />
     <PackageReference Include="Groundwork.Kernel" Version="$(GroundworkVersion)" />
     <PackageReference Include="Groundwork.Store" Version="$(GroundworkVersion)" />
+    <PackageReference Include="Groundwork.Substrate.Relational" Version="$(GroundworkVersion)" />
     <PackageReference Include="Groundwork.Records" Version="$(GroundworkVersion)" />
     <PackageReference Include="Groundwork.Records.Store" Version="$(GroundworkVersion)" />
     <PackageReference Include="Groundwork.Schema" Version="$(GroundworkVersion)" />

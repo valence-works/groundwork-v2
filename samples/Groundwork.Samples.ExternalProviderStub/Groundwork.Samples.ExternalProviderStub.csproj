@@ -2,13 +2,14 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFrameworks>$(GroundworkRuntimeTargetFrameworks)</TargetFrameworks>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="../../src/Groundwork.Kernel/Groundwork.Kernel.csproj" />
+    <ProjectReference Include="../../src/Groundwork.Store/Groundwork.Store.csproj" />
     <ProjectReference Include="../../src/Groundwork.Substrate.Relational/Groundwork.Substrate.Relational.csproj" />
   </ItemGroup>
 
