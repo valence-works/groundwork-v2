@@ -34,6 +34,13 @@ Compare `headSha` with the pull request's current `headRefOid`. Any later push i
 evidence and requires another dispatch. Do not use a skipped job or a run from an older commit as a
 substitute.
 
+The SQL Server W2 command has a 20-minute per-test hang threshold inside the job's 30-minute limit.
+A test that exceeds it therefore asks VSTest for a full hang dump and fails while the runner still
+has time to upload the dump, sequence XML, and any partial TRX from
+`artifacts/sqlserver-w2/<tfm>`. The threshold resets between xUnit test cases and is above the
+observed 11–13 minute successful W2 case duration; increasing the outer job timeout is not a hang
+diagnostic. Preserve the exact-head check and exact-once TRX guard when changing this command.
+
 ## Native AOT correctness
 
 `.github/workflows/aot.yml` (`Native AOT conformance`) packs the exact-head public packages, restores
