@@ -82,9 +82,13 @@ Three details worth knowing:
   actionable codes such as `GW-COVER-005`, `GW-COVER-006`, and `GW-COVER-009` keep the ordinary
   `[GwIndex(...)]` suggestion.
 
-> **MongoDB caveat.** MongoDB stores the key in `_id` but filters on the declared field names, and
-> creates no index over them, so a key-bounded read is admitted by the gate and then scans. The
-> verdict is portable; the plan is not yet. See [#238](https://github.com/valence-works/groundwork-v2/issues/238).
+> **MongoDB uses the same boundary.** In addition to storing the complete key in `_id`, MongoDB now
+> physicalizes an ordered index over the declared key fields. This makes a leading composite-key
+> equality an `IXSCAN`, matching the relational primary-key plans. A declared index with the same
+> leading prefix is reused; otherwise Groundwork creates the provider-owned
+> `groundwork_declared_key` (with a deterministic numeric suffix on name collision). That serving
+> index is process-required: runtime admission refuses a missing or changed copy instead of allowing
+> a covered query to scan.
 
 ## The analyzer
 
