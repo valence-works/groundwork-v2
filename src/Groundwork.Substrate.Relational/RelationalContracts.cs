@@ -330,6 +330,16 @@ public abstract class RelationalDialect
     /// <summary>Restores connection-scoped settings after a schema-operation transaction ends.</summary>
     public virtual void CompleteSchemaBatch(DbConnection connection) { }
 
+    /// <summary>
+    /// Reports whether a replayed schema operation is already physically satisfied. Dialects whose
+    /// DDL commits independently of the caller transaction use this seam to make a failed batch
+    /// recoverable without reissuing duplicate-object statements.
+    /// </summary>
+    protected internal virtual bool IsSchemaOperationSatisfied(
+        DbConnection connection,
+        DbTransaction transaction,
+        PhysicalSchemaOperation operation) => false;
+
     public abstract void EnsureInfrastructure(DbConnection connection);
 
     public abstract PhysicalSchemaHistoryState ReadHistory(

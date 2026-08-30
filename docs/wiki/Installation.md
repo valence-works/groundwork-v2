@@ -56,6 +56,7 @@ A typical application references:
 | You want | Packages |
 | --- | --- |
 | Typed rows on SQLite | `Groundwork.Sqlite`, `Groundwork.Records.Store` |
+| Typed rows on MySQL/MariaDB | `Groundwork.MySql`, `Groundwork.Records.Store` |
 | Typed rows on PostgreSQL | `Groundwork.PostgreSql`, `Groundwork.Records.Store` |
 | Typed JSON documents | your provider + `Groundwork.Documents` |
 | Raw kernel declarations only (no contract family) | your provider only (`Groundwork.Store` and `Groundwork.Kernel` come transitively) |

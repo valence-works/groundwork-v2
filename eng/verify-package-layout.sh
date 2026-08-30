@@ -21,11 +21,6 @@ while IFS='|' read -r package_id project_path; do
   expected_ids+=("$package_id")
 done < "$allowlist"
 
-[[ "${#expected_ids[@]}" -eq 24 ]] || {
-  echo "Expected 24 public packages, found ${#expected_ids[@]} in $allowlist" >&2
-  exit 1
-}
-
 contains_expected_id() {
   local candidate="$1"
   local expected

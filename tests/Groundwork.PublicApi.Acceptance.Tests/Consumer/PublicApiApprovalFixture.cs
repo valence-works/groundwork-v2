@@ -10,6 +10,7 @@ using Groundwork.Records;
 using Groundwork.Store;
 using Groundwork.Substrate.Relational;
 using Groundwork.Sqlite;
+using Groundwork.MySql;
 using Groundwork.Testing;
 
 namespace Groundwork.PublicApi.Consumer;
@@ -106,6 +107,11 @@ internal static class PublicApiApprovalFixture
         _ = typeof(KeyedBatchReadRequest);
         _ = typeof(KeyedBatchReadSessionExtensions);
         _ = typeof(SqliteProviderFactory);
+        _ = typeof(MySqlProviderFactory);
+        _ = typeof(MySqlProviderConnection);
+        _ = typeof(MySqlDialect);
+        _ = typeof(MySqlQueryRenderer);
+        _ = typeof(MySqlSchemaToolProviderSessionFactory);
         _ = typeof(InMemoryProviderFactory);
         _ = typeof(RelationalStorageSessionBase);
         _ = typeof(RelationalStorageSessionAdapter);
@@ -132,6 +138,7 @@ internal static class PublicApiApprovalFixture
         _ = new Func<IReadOnlyDictionary<string, object?>, IReadOnlyList<string>, int, string>(
             GwGeneratedRowValue.ReadProjection<string>);
         _ = new Func<string, IStorageProviderConnection>(connectionString => new SqliteProviderFactory().Create(connectionString));
+        _ = new Func<string, IStorageProviderConnection>(connectionString => new MySqlProviderFactory().Create(connectionString));
         _ = new Func<IEnumerable<CapabilityDescriptor>, IReadOnlyList<CapabilityDescriptor>>(
             SchemaCapabilityAdmission.AdvertiseEnforcedConstraints);
         _ = new Action<Groundwork.Kernel.StorageUnit, IEnumerable<CapabilityDescriptor>>(

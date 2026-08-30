@@ -17,10 +17,11 @@ public sealed class PublicApiAcceptanceTests
         var packageDirectory = Path.Combine(repository, "artifacts", "acceptance-packages");
         if (!Directory.Exists(packageDirectory) || !Directory.EnumerateFiles(packageDirectory, "Groundwork.Documents.*.nupkg").Any())
         {
+            var packScript = Path.Combine(repository, "eng", "pack-public-packages.sh");
             var pack = Process.Start(new ProcessStartInfo
             {
-                FileName = "dotnet",
-                Arguments = "pack Groundwork.slnx --configuration Release --output artifacts/acceptance-packages --nologo -m:1 -v:q",
+                FileName = "/bin/bash",
+                Arguments = Quote(packScript) + " " + Quote(packageDirectory),
                 WorkingDirectory = repository,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,

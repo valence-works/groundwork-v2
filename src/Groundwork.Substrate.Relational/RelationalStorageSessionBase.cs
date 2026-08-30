@@ -272,6 +272,42 @@ public abstract class RelationalStorageSessionBase : IStorageSession
             options,
             RelationalExecution.Asynchronous(options?.CancellationToken ?? CancellationToken.None));
 
+    /// <summary>
+    /// Runs one provider-native optional write capability through this session's shared gate,
+    /// transaction, cancellation, cleanup, and closed-state policy.
+    /// </summary>
+    protected T ExecuteProviderWriteCore<T>(Func<RelationalExecution, ValueTask<T>> operation)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        var mode = RelationalExecution.Synchronous;
+        return execution.ExecuteWrite(() => operation(mode), mode).GetAwaiter().GetResult();
+    }
+
+    /// <summary>Asynchronous counterpart of <see cref="ExecuteProviderWriteCore{T}"/>.</summary>
+    protected ValueTask<T> ExecuteProviderWriteCoreAsync<T>(
+        Func<RelationalExecution, ValueTask<T>> operation,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        var mode = RelationalExecution.Asynchronous(cancellationToken);
+        return execution.ExecuteWrite(() => operation(mode), mode);
+    }
+
+    /// <summary>
+    /// Runs a provider-native conditional upsert through the shared write and OnAppend-retention
+    /// lifecycle while preserving its exact Inserted/Updated outcome.
+    /// </summary>
+    protected WriteOutcome ExecuteProviderConditionalUpsertCore(
+        Func<RelationalExecution, ValueTask<WriteOutcome>> operation) =>
+        ExecuteProviderConditionalUpsert(operation, RelationalExecution.Synchronous)
+            .GetAwaiter().GetResult();
+
+    /// <summary>Asynchronous counterpart of <see cref="ExecuteProviderConditionalUpsertCore"/>.</summary>
+    protected ValueTask<WriteOutcome> ExecuteProviderConditionalUpsertCoreAsync(
+        Func<RelationalExecution, ValueTask<WriteOutcome>> operation,
+        CancellationToken cancellationToken = default) =>
+        ExecuteProviderConditionalUpsert(operation, RelationalExecution.Asynchronous(cancellationToken));
+
     /// <summary>Closes this non-owning view; the resource owner decides whether to dispose its connection.</summary>
     public void Close() => execution.Close();
 
@@ -396,6 +432,28 @@ public abstract class RelationalStorageSessionBase : IStorageSession
         var engine = RequireRetention();
         var operation = engine.PrepareExact(operationId, options);
         return execution.ExecuteWrite(() => engine.ApplyExact(operation, mode), mode);
+    }
+
+    private async ValueTask<WriteOutcome> ExecuteProviderConditionalUpsert(
+        Func<RelationalExecution, ValueTask<WriteOutcome>> operation,
+        RelationalExecution mode)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        var onAppend = Unit.Retention?.Trigger == RetentionTrigger.OnAppend;
+        var registration = BeginOnAppend(onAppend);
+        WriteOutcome outcome;
+        try
+        {
+            outcome = await execution.ExecuteWrite(() => operation(mode), mode).ConfigureAwait(false);
+        }
+        catch
+        {
+            await CompleteOnAppend(registration, cleanupRequired: false, mode).ConfigureAwait(false);
+            throw;
+        }
+        await CompleteOnAppend(registration, onAppend && outcome.Status == WriteOutcomeStatus.Inserted, mode)
+            .ConfigureAwait(false);
+        return outcome;
     }
 
     private OnAppendRetentionCoordinator.AppendRegistration? BeginOnAppend(bool eligible)

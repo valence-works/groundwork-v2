@@ -55,6 +55,26 @@ public sealed class RelationalStorageSessionBaseTests
     }
 
     [Fact]
+    public void Provider_native_write_runner_uses_shared_transaction_and_closed_state()
+    {
+        var connection = new TrackingConnection();
+        var storage = new TrackingStorageAdapter(connection);
+        var session = new TrackingSession(
+            Unit(),
+            connection,
+            storage,
+            new TrackingAppendAdapter(storage));
+
+        Assert.True(session.ProviderWriteSawTransaction());
+        Assert.Equal(1, connection.CommitCalls);
+        Assert.Null(storage.Transaction);
+
+        session.Close();
+        Assert.Throws<ObjectDisposedException>(() => session.ProviderWriteSawTransaction());
+        Assert.Equal(1, connection.CommitCalls);
+    }
+
+    [Fact]
     public void Close_refuses_append_before_any_native_driver_work()
     {
         var connection = new TrackingConnection();
@@ -144,6 +164,9 @@ public sealed class RelationalStorageSessionBaseTests
             transaction: transaction)
     {
         internal bool Closed => IsClosed;
+
+        internal bool ProviderWriteSawTransaction() =>
+            ExecuteProviderWriteCore(_ => ValueTask.FromResult(storage.Transaction is not null));
     }
 
     private sealed class TrackingStorageAdapter(TrackingConnection connection)

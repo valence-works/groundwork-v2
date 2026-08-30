@@ -10,7 +10,7 @@ trap 'rm -rf "$package_cache" "$build_root"' EXIT
 
 feed="${GROUNDWORK_PUBLIC_API_PACKAGES:-$repo_root/artifacts/acceptance-packages}"
 test -d "$feed" || {
-  echo "Missing packed artifacts at '$feed'. Run 'dotnet pack Groundwork.slnx --configuration Release --output artifacts/acceptance-packages' first." >&2
+  echo "Missing packed artifacts at '$feed'. Run 'eng/pack-public-packages.sh artifacts/acceptance-packages' first." >&2
   exit 1
 }
 
@@ -27,7 +27,8 @@ for required in \
   Groundwork.Kernel Groundwork.Query.Model Groundwork.Query.Linq Groundwork.Query.Linq.Execution \
   Groundwork.Query.Planning Groundwork.Schema \
   Groundwork.Records Groundwork.Store Groundwork.Records.Store Groundwork.Diagnostics \
-  Groundwork.Substrate.Relational Groundwork.Sqlite Groundwork.Documents Groundwork.Testing; do
+  Groundwork.Substrate.Relational Groundwork.Sqlite Groundwork.MySql Groundwork.Documents \
+  Groundwork.Testing; do
   test -f "$feed/$required.$version.nupkg" || {
     echo "The local feed is missing $required.$version." >&2
     exit 1

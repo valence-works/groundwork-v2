@@ -31,6 +31,9 @@
   <Folder Name="/src/Groundwork.MongoDb/">
     <Project Path="src/Groundwork.MongoDb/Groundwork.MongoDb.csproj" />
   </Folder>
+  <Folder Name="/src/Groundwork.MySql/">
+    <Project Path="src/Groundwork.MySql/Groundwork.MySql.csproj" />
+  </Folder>
   <Folder Name="/src/Groundwork.Query.Model/">
     <Project Path="src/Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
   </Folder>
@@ -90,6 +93,9 @@
   </Folder>
   <Folder Name="/tests/Groundwork.MongoDb.Tests/">
     <Project Path="tests/Groundwork.MongoDb.Tests/Groundwork.MongoDb.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.MySql.Tests/">
+    <Project Path="tests/Groundwork.MySql.Tests/Groundwork.MySql.Tests.csproj" />
   </Folder>
   <Folder Name="/tests/Groundwork.Concurrency.Tests/">
     <Project Path="tests/Groundwork.Concurrency.Tests/Groundwork.Concurrency.Tests.csproj" />

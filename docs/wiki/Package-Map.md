@@ -1,6 +1,6 @@
 # Package Map
 
-Groundwork ships 24 public packages. Most applications reference **two or three**. This page tells
+Groundwork ships 25 public packages. Most applications reference **two or three**. This page tells
 you which, and explains the layering — because the layering is what the whole design rests on.
 
 ## The dependency rule
@@ -27,8 +27,9 @@ Everything depends **inward**. Nothing depends outward.
                     ▲                          ▲
      ┌──────────────┴────────┐   ┌─────────────┴──────────────┐
      │ providers             │   │ contract families          │
-     │ Sqlite / PostgreSql   │   │ Records.Store / Documents  │
-     │ SqlServer / MongoDb   │   │ (+ anything you write)     │
+     │ Sqlite / MySql        │   │ Records.Store / Documents  │
+     │ PostgreSql / SqlServer│   │ (+ anything you write)     │
+     │ MongoDb               │   │                            │
      └───────────────────────┘   └────────────────────────────┘
 ```
 
@@ -63,6 +64,7 @@ literal framework of its own, and `Groundwork.Packaging.Tests` enforces that.
 | Package | Reference it when | Brings in |
 | --- | --- | --- |
 | **`Groundwork.Sqlite`** | Targeting SQLite (file or in-memory) | Store, Kernel, Query.Model, Diagnostics |
+| **`Groundwork.MySql`** | Targeting MySQL 8.0.17+ or MariaDB 11.4.13+ | same + MySqlConnector |
 | **`Groundwork.PostgreSql`** | Targeting PostgreSQL 17+ | same + Npgsql |
 | **`Groundwork.SqlServer`** | Targeting SQL Server 2022+ | same + Microsoft.Data.SqlClient |
 | **`Groundwork.MongoDb`** | Targeting MongoDB (replica set / sharded) | same + MongoDB.Driver |

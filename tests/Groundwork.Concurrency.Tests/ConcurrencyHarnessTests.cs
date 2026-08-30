@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using Groundwork.MongoDb;
 using Groundwork.Kernel;
+using Groundwork.MySql;
 using Groundwork.PostgreSql;
 using Groundwork.Sqlite;
 using Groundwork.SqlServer;
@@ -178,6 +179,13 @@ public sealed class ConcurrencyHarnessTests
         AssertBatchedProvider(new MongoProviderFactory(), isolatedConnection, "mongodb");
     }
 
+    [SkippableFact]
+    public void MySql_batched_upsert_preserves_atomic_concurrency_and_created_at()
+    {
+        using var store = LiveMySqlDatabase.OpenOrSkip();
+        AssertBatchedProvider(new MySqlProviderFactory(), store.ConnectionString, "mysql");
+    }
+
     [SkippableTheory]
     [InlineData(1, false, false)]
     [InlineData(1, false, true)]
@@ -202,6 +210,40 @@ public sealed class ConcurrencyHarnessTests
                 KeyCount = keyCount,
                 RepeatCount = 2,
                 Seed = 9245 + (keyCount == 1000 ? 100 : 0) +
+                    (includePartialUniqueIndex ? 10 : 0) + (optimistic ? 1 : 0),
+                Concurrency = optimistic ? ConcurrencyKind.Optimistic : ConcurrencyKind.None,
+                IncludePartialUniqueIndex = includePartialUniqueIndex
+            });
+
+        Assert.True(report.Passed, Describe(report));
+        Assert.All(report.Scenarios.SelectMany(scenario => scenario.Invariants), invariant =>
+            Assert.True(invariant.Passed, $"{invariant.Name}: {invariant.Detail}"));
+    }
+
+    [SkippableTheory]
+    [InlineData(1, false, false)]
+    [InlineData(1, false, true)]
+    [InlineData(1, true, false)]
+    [InlineData(1, true, true)]
+    [InlineData(1000, false, false)]
+    [InlineData(1000, false, true)]
+    [InlineData(1000, true, false)]
+    [InlineData(1000, true, true)]
+    public void MySql_holds_the_named_invariants_for_each_live_shape(
+        int keyCount,
+        bool includePartialUniqueIndex,
+        bool optimistic)
+    {
+        using var store = LiveMySqlDatabase.OpenOrSkip();
+        var report = ConcurrencyHarness.Run(
+            new StorageProviderConcurrencyFactory("mysql", new MySqlProviderFactory()),
+            store.ConnectionString,
+            new ConcurrencyProbeOptions
+            {
+                WriterCount = 32,
+                KeyCount = keyCount,
+                RepeatCount = 2,
+                Seed = 17900 + (keyCount == 1000 ? 100 : 0) +
                     (includePartialUniqueIndex ? 10 : 0) + (optimistic ? 1 : 0),
                 Concurrency = optimistic ? ConcurrencyKind.Optimistic : ConcurrencyKind.None,
                 IncludePartialUniqueIndex = includePartialUniqueIndex

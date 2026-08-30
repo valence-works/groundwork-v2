@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>$(GroundworkRuntimeTargetFrameworks)</TargetFrameworks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>true</IsPackable>
+    <IsAotCompatible Condition="$([MSBuild]::IsTargetFrameworkCompatible('$(TargetFramework)', 'net8.0'))">true</IsAotCompatible>
+    <PackageId>Groundwork.MySql</PackageId>
+    <Description>MySQL and MariaDB provider substrate for Groundwork typed storage.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="MySqlConnector" />
+    <ProjectReference Include="../Groundwork.Kernel/Groundwork.Kernel.csproj" />
+    <ProjectReference Include="../Groundwork.Store/Groundwork.Store.csproj" />
+    <ProjectReference Include="../Groundwork.Diagnostics/Groundwork.Diagnostics.csproj" />
+    <ProjectReference Include="../Groundwork.Substrate.Relational/Groundwork.Substrate.Relational.csproj" />
+    <ProjectReference Include="../Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
+  </ItemGroup>
+</Project>
