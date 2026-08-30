@@ -45,6 +45,8 @@ public sealed class TargetFrameworkContractTests
             "Publishes and runs a native executable with the latest SDK; it is not a managed multi-framework test host.",
         ["tests/Groundwork.Packaging.Tests/Groundwork.Packaging.Tests.csproj"] =
             "Inspects repository metadata and packed artifacts, which are the same whichever framework reads them.",
+        ["tests/Groundwork.Benchmarks.Tests/Groundwork.Benchmarks.Tests.csproj"] =
+            "Inspects the net10.0-only BenchmarkDotNet executable, its compiled EF model, and its methodology catalog.",
         ["tests/Groundwork.SchemaTool.Tests/Groundwork.SchemaTool.Tests.csproj"] =
             "Instantiates GroundworkVerify, the MSBuild task, which exists only on the build-task framework.",
         ["tests/Groundwork.Analyzers.Tests/Groundwork.Analyzers.Tests.csproj"] =
