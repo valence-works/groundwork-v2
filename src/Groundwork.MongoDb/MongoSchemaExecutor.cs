@@ -283,7 +283,7 @@ public sealed class MongoSchemaExecutor
         foreach (var name in DeployedCollections(unit.Name))
         {
             CompareDocuments(name, unit, columnDrift);
-            CompareIndexes(name, unit, indexDrift);
+            CompareIndexes(name, unit, columnDrift, indexDrift);
         }
         CompareSearchKeyAlgorithms(unit, providerDefinitionEvidence, columnDrift);
         return new PhysicalSchemaInspectionResult(
@@ -335,16 +335,27 @@ public sealed class MongoSchemaExecutor
         }
     }
 
-    private void CompareIndexes(string collectionName, StorageUnit unit, List<SchemaRefusal> drift)
+    private void CompareIndexes(
+        string collectionName,
+        StorageUnit unit,
+        List<SchemaRefusal> processBlockingDrift,
+        List<SchemaRefusal> ordinaryDrift)
     {
         var actual = ReadIndexes(collectionName);
+        // A history written before declared-key physicalization has no serving index. Inspection
+        // must remain readable so the next target can plan the missing CreateIndex migration.
+        var declaredKeyIndex = MongoSchemaTargets.TryDeclaredKeyIndex(unit);
         foreach (var expected in unit.Indexes)
         {
             var specification = new MongoIndexSpecification(expected, unit.Columns);
+            var isDeclaredKeyIndex = string.Equals(
+                expected.Name,
+                declaredKeyIndex?.Name,
+                StringComparison.Ordinal);
             if (!actual.TryGetValue(expected.Name, out var deployed))
             {
-                drift.Add(new SchemaRefusal(
-                    "GW-RUNTIME-002",
+                (isDeclaredKeyIndex ? processBlockingDrift : ordinaryDrift).Add(new SchemaRefusal(
+                    isDeclaredKeyIndex ? "GW-RUNTIME-001" : "GW-RUNTIME-002",
                     $"MongoDB collection '{collectionName}' is missing declared index '{expected.Name}'.",
                     $"indexes.{expected.Name}"));
                 continue;
@@ -352,8 +363,8 @@ public sealed class MongoSchemaExecutor
 
             if (!Matches(deployed, specification))
             {
-                drift.Add(new SchemaRefusal(
-                    "GW-RUNTIME-002",
+                (isDeclaredKeyIndex ? processBlockingDrift : ordinaryDrift).Add(new SchemaRefusal(
+                    isDeclaredKeyIndex ? "GW-RUNTIME-001" : "GW-RUNTIME-002",
                     $"MongoDB index '{collectionName}.{expected.Name}' differs in key order, direction, uniqueness, " +
                     "or partial filter.",
                     $"indexes.{expected.Name}"));

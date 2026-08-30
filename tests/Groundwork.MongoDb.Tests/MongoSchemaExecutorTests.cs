@@ -19,6 +19,225 @@ public sealed class MongoSchemaExecutorTests : IDisposable
     private const string MigrationId = "2026-08-widen-total";
 
     [Fact]
+    public void Mongo_physicalizes_the_declared_key_as_an_ordered_native_index()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("mongo-composite-key"),
+            Name = "mongo_composite_key",
+            Columns =
+            [
+                new() { Name = "tenant", Type = PortableType.String, MaxLength = 32, IsNullable = false },
+                new() { Name = "id", Type = PortableType.Int64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["tenant", "id"] }
+        };
+
+        var target = MongoSchemaTargets.Compile(unit);
+        var physical = target.Subject.Definition;
+        var index = Assert.Single(physical.Indexes);
+
+        Assert.Equal(MongoSchemaTargets.DeclaredKeyIndexName, index.Name);
+        Assert.Equal(["tenant", "id"], index.Columns.Select(column => column.Column));
+        Assert.All(index.Columns, column => Assert.Equal(Groundwork.Kernel.SortDirection.Ascending, column.Direction));
+        Assert.False(index.IsUnique);
+        Assert.Equal(MissingValueBehavior.Included, index.MissingValues);
+        var providerDefinition = Assert.Single(target.ProviderDefinitions,
+            definition => definition.Kind == MongoSchemaTargets.DeclaredKeyIndexDefinitionKind);
+        Assert.Equal(index.Name, providerDefinition.SubjectIdentity);
+    }
+
+    [Fact]
+    public void An_existing_declared_key_prefix_is_the_Mongo_serving_index()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("mongo-existing-key-index"),
+            Name = "mongo_existing_key_index",
+            Columns =
+            [
+                new() { Name = "tenant", Type = PortableType.String, MaxLength = 32, IsNullable = false },
+                new() { Name = "id", Type = PortableType.Int64, IsNullable = false },
+                new() { Name = "created", Type = PortableType.Int64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["tenant", "id"] },
+            Indexes =
+            [
+                new IndexDefinition
+                {
+                    Name = "by_key_then_created",
+                    Columns = [new IndexColumn("tenant"), new IndexColumn("id"), new IndexColumn("created")]
+                }
+            ]
+        };
+
+        var target = MongoSchemaTargets.Compile(unit);
+        var physical = target.Subject.Definition;
+
+        Assert.Single(physical.Indexes);
+        Assert.Equal("by_key_then_created", MongoSchemaTargets.DeclaredKeyIndex(physical).Name);
+        Assert.DoesNotContain(target.ProviderDefinitions,
+            definition => definition.Kind == MongoSchemaTargets.DeclaredKeyIndexDefinitionKind);
+    }
+
+    [Fact]
+    public void A_differently_ordered_index_does_not_replace_the_declared_key_index()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("mongo-descending-key-index"),
+            Name = "mongo_descending_key_index",
+            Columns =
+            [
+                new() { Name = "tenant", Type = PortableType.String, MaxLength = 32, IsNullable = false },
+                new() { Name = "id", Type = PortableType.Int64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["tenant", "id"] },
+            Indexes =
+            [
+                new IndexDefinition
+                {
+                    Name = "by_key_descending",
+                    Columns =
+                    [
+                        new IndexColumn("tenant", Groundwork.Kernel.SortDirection.Descending),
+                        new IndexColumn("id")
+                    ]
+                }
+            ]
+        };
+
+        var target = MongoSchemaTargets.Compile(unit);
+
+        Assert.Equal(2, target.Subject.Definition.Indexes.Count);
+        Assert.Equal(MongoSchemaTargets.DeclaredKeyIndexName,
+            MongoSchemaTargets.DeclaredKeyIndex(target.Subject.Definition).Name);
+        Assert.Contains(target.ProviderDefinitions,
+            definition => definition.Kind == MongoSchemaTargets.DeclaredKeyIndexDefinitionKind);
+    }
+
+    [Fact]
+    public void Mongo_key_index_name_avoids_a_user_declaration_collision()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("mongo-key-index-name"),
+            Name = "mongo_key_index_name",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Int64, IsNullable = false },
+                new() { Name = "value", Type = PortableType.Int64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Indexes =
+            [
+                new IndexDefinition
+                {
+                    Name = MongoSchemaTargets.DeclaredKeyIndexName,
+                    Columns = [new IndexColumn("value")]
+                }
+            ]
+        };
+
+        var physical = MongoSchemaTargets.Physicalize(unit);
+
+        Assert.Equal("groundwork_declared_key_2", MongoSchemaTargets.DeclaredKeyIndex(physical).Name);
+        Assert.Equal("groundwork_declared_key_2",
+            MongoSchemaTargets.PhysicalIndexNames(physical)[MongoSchemaTargets.DeclaredKeyCoverageIndexName]);
+    }
+
+    [Fact]
+    public void An_existing_key_prefix_is_the_physical_mapping_for_the_provider_neutral_candidate()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("mongo-key-mapping"),
+            Name = "mongo_key_mapping",
+            Columns =
+            [
+                new() { Name = "tenant", Type = PortableType.String, MaxLength = 32, IsNullable = false },
+                new() { Name = "id", Type = PortableType.Int64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["tenant", "id"] },
+            Indexes =
+            [
+                new IndexDefinition
+                {
+                    Name = "by_tenant_and_id",
+                    Columns = [new IndexColumn("tenant"), new IndexColumn("id")]
+                }
+            ]
+        };
+
+        var physical = MongoSchemaTargets.Physicalize(unit);
+
+        Assert.Equal("by_tenant_and_id",
+            MongoSchemaTargets.PhysicalIndexNames(physical)[MongoSchemaTargets.DeclaredKeyCoverageIndexName]);
+    }
+
+    [SkippableFact]
+    public void A_pre_key_index_history_remains_inspectable_and_upgrades_in_place()
+    {
+        var context = Context();
+        var executor = new MongoSchemaExecutor(context);
+        var table = Table();
+        var logical = Before(table);
+        var legacyTarget = new PhysicalSchemaTarget(
+            new SchemaSubject(logical),
+            MongoSchemaTargets.Provider);
+        Assert.Equal(
+            PhysicalSchemaApplicationOutcome.Applied,
+            PhysicalSchemaApplication.Apply(legacyTarget, executor).Outcome);
+
+        var desired = MongoSchemaTargets.Compile(logical);
+        var legacyInspection = executor.InspectHistory(desired);
+        var upgraded = PhysicalSchemaApplication.Apply(desired, executor);
+
+        Assert.True(legacyInspection.IsAppliedSchemaValid);
+        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, upgraded.Outcome);
+        Assert.Contains(
+            PhysicalSchemaOperationKind.CreatePhysicalIndex,
+            upgraded.Plan.Operations.Select(operation => operation.Kind));
+        Assert.Contains(
+            MongoSchemaTargets.DeclaredKeyIndexName,
+            Collection(context, table).Indexes.List().ToList().Select(index => index["name"].AsString));
+    }
+
+    [SkippableFact]
+    public void Adoption_checks_the_declared_key_index_on_every_materialized_scope()
+    {
+        var context = Context();
+        var executor = new MongoSchemaExecutor(context);
+        var table = Table();
+        var logical = Before(table) with { Scope = ScopePolicy.Scoped };
+        var target = MongoSchemaTargets.Compile(logical);
+        var physical = target.Subject.Definition;
+        var index = MongoSchemaTargets.DeclaredKeyIndex(physical);
+        var scoped = MongoSchemaExecutor.ScopedCollectionName(table, "tenant-a");
+        context.Database.CreateCollection(table);
+        context.Database.CreateCollection(scoped);
+        foreach (var name in new[] { table, scoped })
+        {
+            context.Database.GetCollection<BsonDocument>(name).Indexes.CreateOne(
+                new CreateIndexModel<BsonDocument>(
+                    new BsonDocument(index.Columns.Select(column =>
+                        new BsonElement(column.Column, column.Direction == Groundwork.Kernel.SortDirection.Descending ? -1 : 1))),
+                    new CreateIndexOptions { Name = index.Name }));
+        }
+
+        using var applicationLock = executor.AcquireApplicationLock(target.Identity);
+        var accepted = executor.InspectDeployedCatalog(target, applicationLock);
+        context.Database.GetCollection<BsonDocument>(scoped).Indexes.DropOne(index.Name);
+        var refused = executor.InspectDeployedCatalog(target, applicationLock);
+
+        Assert.True(accepted.IsAppliedSchemaValid);
+        Assert.False(refused.IsAppliedSchemaValid);
+        Assert.Contains(refused.ColumnDrift, drift =>
+            drift.Path == "indexes." + index.Name &&
+            drift.Message.Contains(scoped, StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Mongo_target_compilation_refuses_relational_interop_views_before_catalog_access()
     {
         var unit = StorageUnit.Declare("mongo-interop", "mongo_interop")

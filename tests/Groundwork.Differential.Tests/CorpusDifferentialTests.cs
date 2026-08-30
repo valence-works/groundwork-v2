@@ -24,6 +24,7 @@ public sealed class CorpusDifferentialTests
     private static readonly string LatestTableName = "g2_latest_" + Guid.NewGuid().ToString("N");
     private static readonly string ScopedTableName = "g2_scoped_" + Guid.NewGuid().ToString("N");
     private static readonly string ExplainTableName = "g2_explain_" + Guid.NewGuid().ToString("N");
+    private static readonly string DeclaredKeyExplainTableName = "g2_key_explain_" + Guid.NewGuid().ToString("N");
     private static readonly string PrefixTableName = "g2_prefix_" + Guid.NewGuid().ToString("N");
 
     [Fact]
@@ -191,6 +192,71 @@ public sealed class CorpusDifferentialTests
             var result = provider.Query(request, options);
             Assert.Equal(1_999L, Assert.Single(result.Rows)["id"]);
         }
+    }
+
+    [SkippableFact]
+    public void Declared_composite_key_prefix_is_an_index_seek_on_all_four_providers()
+    {
+        var postgres = Required("GROUNDWORK_POSTGRES_CONNECTION");
+        var sqlServer = LiveSqlServer.Required();
+        var mongo = LiveMongo.Required();
+        using var environment = new ExplainEnvironment("declared-key");
+        var rows = Enumerable.Range(1, 2_000)
+            .Select(value => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
+            {
+                ["tenant"] = value == 1 ? "selected" : "tenant-" + value,
+                ["id"] = value,
+                ["payload"] = "value-" + value
+            })
+            .ToArray();
+        using var sqlite = OpenSqlite(DeclaredKeyExplainUnit, rows);
+        using var pg = OpenPostgreSql(postgres, DeclaredKeyExplainUnit, rows);
+        using var sql = OpenSqlServer(sqlServer, DeclaredKeyExplainUnit, rows);
+        using var mongoSession = OpenMongo(mongo, DeclaredKeyExplainUnit, rows);
+        using (var analyzeConnection = new Npgsql.NpgsqlConnection(postgres))
+        {
+            analyzeConnection.Open();
+            using var analyze = analyzeConnection.CreateCommand();
+            analyze.CommandText = "ANALYZE \"" + DeclaredKeyExplainTableName.Replace("\"", "\"\"", StringComparison.Ordinal) + "\";";
+            analyze.ExecuteNonQuery();
+        }
+
+        var table = new TableId(DeclaredKeyExplainTableName);
+        var tenant = new ColumnRef(table, "tenant", QueryType.String, false, 64);
+        var request = new QueryRequest(table,
+            new Predicate.Equal(tenant, QueryConstant.Of(tenant, "selected")),
+            [], Projection.All, Paging.None);
+        foreach (var provider in new CorpusSession[] { sqlite, pg, sql, mongoSession })
+        {
+            var physicalIndex = provider.Name switch
+            {
+                "SQLite" => "sqlite_autoindex_" + DeclaredKeyExplainTableName + "_1",
+                "PostgreSQL" => DeclaredKeyExplainTableName + "_pkey",
+                "SQL Server" => "__groundwork_pk_" + DeclaredKeyExplainTableName,
+                "MongoDB" => MongoSchemaTargets.DeclaredKeyIndexName,
+                _ => throw new InvalidOperationException("Unexpected provider " + provider.Name)
+            };
+            var options = new QueryRenderOptions(
+                [new QueryIndexDeclaration(CoverageCandidates.KeyIndexName,
+                [
+                    new QueryIndexColumn("tenant", false, QueryType.String),
+                    new QueryIndexColumn("id", false, QueryType.Int32)
+                ], QueryIndexPinning.ProviderDefault)],
+                selectedIndex: CoverageCandidates.KeyIndexName)
+            {
+                PhysicalIndexNames = new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    [CoverageCandidates.KeyIndexName] = physicalIndex
+                }
+            };
+
+            var result = provider.Query(request, options);
+
+            Assert.Equal(CoverageCandidates.KeyIndexName, result.SelectedIndex);
+            Assert.Equal(1, Assert.Single(result.Rows)["id"]);
+        }
+
+        Assert.Equal(4, Directory.GetFiles(environment.ArtifactDirectory).Length);
     }
 
     [SkippableFact]
@@ -781,6 +847,19 @@ public sealed class CorpusDifferentialTests
         Indexes = [new IndexDefinition { Name = "ix_number_id", Columns = [new IndexColumn("numberValue"), new IndexColumn("id")] }]
     };
 
+    private static StorageUnit DeclaredKeyExplainUnit => new()
+    {
+        Id = new StorageUnitId(DeclaredKeyExplainTableName),
+        Name = DeclaredKeyExplainTableName,
+        Columns =
+        [
+            new() { Name = "tenant", Type = PortableType.String, IsNullable = false, MaxLength = 64 },
+            new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+            new() { Name = "payload", Type = PortableType.String, IsNullable = false, MaxLength = 64 }
+        ],
+        Key = new KeyDefinition { Columns = ["tenant", "id"] }
+    };
+
     private static StorageUnit PrefixUnit => new()
     {
         Id = new StorageUnitId(PrefixTableName),
@@ -1022,7 +1101,7 @@ public sealed class CorpusDifferentialTests
         var session = connection.OpenSession(unit, StorageAccess.Global);
         foreach (var row in rows)
         {
-            session.Delete(new StorageKey(new Dictionary<string, object?> { ["id"] = row["id"] }));
+            session.Delete(new StorageKey(KeyValues(unit, row)));
             session.Insert(new StorageValues(row));
         }
         return new CorpusSession("SQLite", session.Query, connection.Dispose);
@@ -1037,7 +1116,7 @@ public sealed class CorpusDifferentialTests
         var session = connection.OpenSession(unit, StorageAccess.Global);
         foreach (var row in rows)
         {
-            session.Delete(new StorageKey(new Dictionary<string, object?> { ["id"] = row["id"] }));
+            session.Delete(new StorageKey(KeyValues(unit, row)));
             session.Insert(new StorageValues(row));
         }
         return new CorpusSession("PostgreSQL", session.Query, connection.Dispose);
@@ -1052,7 +1131,7 @@ public sealed class CorpusDifferentialTests
         var session = connection.OpenSession(unit, StorageAccess.Global);
         foreach (var row in rows)
         {
-            session.Delete(new StorageKey(new Dictionary<string, object?> { ["id"] = row["id"] }));
+            session.Delete(new StorageKey(KeyValues(unit, row)));
             session.Insert(new StorageValues(row));
         }
         return new CorpusSession("SQL Server", session.Query, connection.Dispose);
@@ -1067,11 +1146,16 @@ public sealed class CorpusDifferentialTests
         var session = connection.OpenSession(unit, MongoStorageAccess.Global);
         foreach (var row in rows)
         {
-            session.Delete(new MongoStorageKey(new Dictionary<string, object?> { ["id"] = row["id"] }));
+            session.Delete(new MongoStorageKey(KeyValues(unit, row)));
             session.Insert(new MongoStorageValues(row));
         }
         return new MongoCorpusSession(session.Query, connection.Dispose);
     }
+
+    private static IReadOnlyDictionary<string, object?> KeyValues(
+        StorageUnit unit,
+        IReadOnlyDictionary<string, object?> row) =>
+        unit.Key.Columns.ToDictionary(column => column, column => row[column], StringComparer.Ordinal);
 
     private static string Required(string name)
     {

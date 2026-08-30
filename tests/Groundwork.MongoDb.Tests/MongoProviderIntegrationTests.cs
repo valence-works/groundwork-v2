@@ -356,6 +356,35 @@ public sealed class MongoProviderIntegrationTests
     }
 
     [SkippableFact]
+    public void Missing_declared_key_serving_index_blocks_Mongo_admission()
+    {
+        using var connection = OpenConnection();
+        var unit = RuntimeAdmissionUnit() with
+        {
+            Id = new StorageUnitId("mongo-key-admission-" + Guid.NewGuid().ToString("N")),
+            Name = "MongoKeyAdmission_" + Guid.NewGuid().ToString("N"),
+            Indexes = []
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        Assert.IsType<MongoDbProviderConnection>(connection).Database
+            .GetCollection<BsonDocument>(unit.Name).Indexes
+            .DropOne(MongoSchemaTargets.DeclaredKeyIndexName);
+
+        var report = connection.InspectSchema(unit, MongoStorageAccess.Global);
+        var refusal = Assert.Single(report.ColumnDrift,
+            refusal => refusal.Path == "indexes." + MongoSchemaTargets.DeclaredKeyIndexName);
+        Assert.Equal("GW-RUNTIME-001", refusal.Code);
+        Assert.False(report.IsProcessReady);
+        Assert.False(connection.Schema.InspectRuntimeAdmission(unit).IsReady);
+
+        var failure = Assert.Throws<InvalidOperationException>(() =>
+            connection.OpenSession(unit, MongoStorageAccess.Global));
+        Assert.Contains("declared-key coverage", failure.Message, StringComparison.Ordinal);
+        Assert.Contains(MongoSchemaTargets.DeclaredKeyIndexName, failure.Message, StringComparison.Ordinal);
+    }
+
+    [SkippableFact]
     public void A_later_scoped_collection_receives_the_declared_indexes()
     {
         using var connection = OpenConnection();
@@ -384,6 +413,7 @@ public sealed class MongoProviderIntegrationTests
             .ToArray();
 
         Assert.Contains("by_payload", indexNames);
+        Assert.Contains(MongoSchemaTargets.DeclaredKeyIndexName, indexNames);
     }
 
     [SkippableFact]
@@ -1415,6 +1445,75 @@ public sealed class MongoProviderIntegrationTests
             var plan = File.ReadAllText(artifact);
             Assert.Contains("IXSCAN", plan, StringComparison.OrdinalIgnoreCase);
             Assert.Contains(SearchKeyProjection.ColumnName("status"), plan, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("GW_EXPLAIN_ASSERT", previousFlag);
+            Environment.SetEnvironmentVariable("GW_EXPLAIN_ARTIFACT_DIR", previousDirectory);
+            if (Directory.Exists(artifactDirectory))
+                Directory.Delete(artifactDirectory, recursive: true);
+        }
+    }
+
+    [SkippableFact]
+    public void Composite_declared_key_prefix_uses_the_Mongo_native_index_without_a_hint()
+    {
+        var connectionString = LiveMongo.ConnectionString;
+        Skip.If(string.IsNullOrWhiteSpace(connectionString),
+            "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB explain proofs.");
+        var previousFlag = Environment.GetEnvironmentVariable("GW_EXPLAIN_ASSERT");
+        var previousDirectory = Environment.GetEnvironmentVariable("GW_EXPLAIN_ARTIFACT_DIR");
+        var artifactDirectory = Path.Combine(Path.GetTempPath(), "groundwork-key-mongo-" + Guid.NewGuid().ToString("N"));
+        Environment.SetEnvironmentVariable("GW_EXPLAIN_ASSERT", "1");
+        Environment.SetEnvironmentVariable("GW_EXPLAIN_ARTIFACT_DIR", artifactDirectory);
+        try
+        {
+            using var connection = new MongoDbProviderFactory().Create(connectionString!);
+            var unit = new StorageUnit
+            {
+                Id = new StorageUnitId("mongo-key-explain-" + Guid.NewGuid().ToString("N")),
+                Name = "MongoKeyExplain_" + Guid.NewGuid().ToString("N"),
+                Columns =
+                [
+                    new() { Name = "tenant", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+                    new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                    new() { Name = "payload", Type = PortableType.String, MaxLength = 64, IsNullable = false }
+                ],
+                Key = new KeyDefinition { Columns = ["tenant", "id"] }
+            };
+            Assert.True(connection.Schema.Apply(unit).Applied);
+            var session = connection.OpenSession(unit, MongoStorageAccess.Global);
+            for (var id = 1; id <= 2_000; id++)
+            {
+                session.Insert(new MongoStorageValues(new Dictionary<string, object?>
+                {
+                    ["tenant"] = id == 1 ? "selected" : "tenant-" + id,
+                    ["id"] = id,
+                    ["payload"] = "value-" + id
+                }));
+            }
+
+            var table = new TableId(unit.Name);
+            var tenant = new ColumnRef(table, "tenant", QueryType.String, false, 64);
+            const string logicalKey = MongoSchemaTargets.DeclaredKeyCoverageIndexName;
+            var options = new QueryRenderOptions(
+                [new QueryIndexDeclaration(logicalKey,
+                [
+                    new QueryIndexColumn("tenant", false, QueryType.String),
+                    new QueryIndexColumn("id", false, QueryType.Int32)
+                ], QueryIndexPinning.ProviderDefault)],
+                selectedIndex: logicalKey);
+            var result = session.Query(new QueryRequest(table,
+                new Predicate.Equal(tenant, QueryConstant.Of(tenant, "selected")),
+                [], Projection.All, Paging.None), options);
+
+            Assert.Equal(logicalKey, result.SelectedIndex);
+            Assert.Equal(1, Assert.Single(result.Rows)["id"]);
+            var artifact = Assert.Single(Directory.GetFiles(artifactDirectory, "*.json"));
+            Assert.Contains("optimizer-selected", Path.GetFileName(artifact), StringComparison.Ordinal);
+            var plan = File.ReadAllText(artifact);
+            Assert.Contains("IXSCAN", plan, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains(MongoSchemaTargets.DeclaredKeyIndexName, plan, StringComparison.Ordinal);
         }
         finally
         {

@@ -16,6 +16,10 @@ public sealed class MongoSchemaTargetCompiler : IPhysicalSchemaTargetCompiler
 /// <summary>The MongoDB half of the provider-neutral schema target vocabulary.</summary>
 public static class MongoSchemaTargets
 {
+    internal const string DeclaredKeyIndexName = "groundwork_declared_key";
+    internal const string DeclaredKeyIndexDefinitionKind = "declared-key-index";
+    internal const string DeclaredKeyCoverageIndexName = "(declared key)";
+
     /// <summary>
     /// The provider name every MongoDB schema target and data-migration ledger entry is recorded
     /// under. It is <see cref="MongoDataMigrationExecutor.ProviderName"/>, not a second spelling:
@@ -59,12 +63,67 @@ public static class MongoSchemaTargets
                 Environment.NewLine,
                 portability.Refusals.Select(refusal => $"{refusal.Code} at {refusal.Path}: {refusal.Message}")));
         }
-        return expanded;
+        return EnsureDeclaredKeyIndex(expanded);
     }
+
+    internal static IndexDefinition DeclaredKeyIndex(StorageUnit physical) =>
+        TryDeclaredKeyIndex(physical) ?? throw new InvalidOperationException(
+            $"MongoDB physical declaration '{physical.Id}' has no ascending index over its declared key.");
+
+    internal static IndexDefinition? TryDeclaredKeyIndex(StorageUnit physical) =>
+        physical.Indexes
+            .Where(index => CoversDeclaredKey(index, physical.Key))
+            .OrderBy(index => index.Name.StartsWith(DeclaredKeyIndexName, StringComparison.Ordinal) ? 0 : 1)
+            .ThenBy(index => index.Name, StringComparer.Ordinal)
+            .FirstOrDefault();
+
+    internal static IReadOnlyDictionary<string, string> PhysicalIndexNames(StorageUnit physical)
+    {
+        var names = physical.Indexes.ToDictionary(index => index.Name, index => index.Name, StringComparer.Ordinal);
+        if (TryDeclaredKeyIndex(physical) is { } declaredKey)
+            names.Add(DeclaredKeyCoverageIndexName, declaredKey.Name);
+        return names;
+    }
+
+    private static StorageUnit EnsureDeclaredKeyIndex(StorageUnit physical)
+    {
+        if (physical.Indexes.Any(index => CoversDeclaredKey(index, physical.Key)))
+            return physical;
+
+        var names = physical.Indexes.Select(index => index.Name).ToHashSet(StringComparer.Ordinal);
+        var name = DeclaredKeyIndexName;
+        for (var suffix = 2; names.Contains(name); suffix++)
+            name = DeclaredKeyIndexName + "_" + suffix;
+
+        return physical with
+        {
+            Indexes =
+            [
+                .. physical.Indexes,
+                new IndexDefinition
+                {
+                    Name = name,
+                    Columns = physical.Key.Columns
+                        .Select(column => new IndexColumn(column, SortDirection.Ascending))
+                        .ToArray()
+                }
+            ]
+        };
+    }
+
+    private static bool CoversDeclaredKey(IndexDefinition index, KeyDefinition key) =>
+        index.Columns.Count >= key.Columns.Count &&
+        index.Columns.Take(key.Columns.Count).Select(column => column.Column)
+            .SequenceEqual(key.Columns, StringComparer.Ordinal) &&
+        index.Columns.Take(key.Columns.Count)
+            .All(column => column.Direction == SortDirection.Ascending);
 
     public static PhysicalSchemaTarget Compile(StorageUnit declaration)
     {
         var physical = Physicalize(declaration);
+        var logicalIndexNames = declaration.Indexes.Select(index => index.Name).ToHashSet(StringComparer.Ordinal);
+        var generatedKeyIndex = physical.Indexes.SingleOrDefault(index =>
+            !logicalIndexNames.Contains(index.Name) && CoversDeclaredKey(index, physical.Key));
         return new PhysicalSchemaTarget(
             new SchemaSubject(physical),
             Provider,
@@ -74,7 +133,16 @@ public static class MongoSchemaTargets
                 SearchKeyDefinitionKind,
                 physical.Name + SearchKeyDefinitionSeparator + derived.Name,
                 derived.AlgorithmId ?? throw new InvalidOperationException(
-                    $"Derived search-key column '{derived.Name}' is missing its algorithm identity."))).ToArray());
+                    $"Derived search-key column '{derived.Name}' is missing its algorithm identity.")))
+                .Concat(generatedKeyIndex is null
+                    ? []
+                    : [new ProviderPhysicalSchemaDefinition(
+                        Provider.Name,
+                        physical.Id,
+                        DeclaredKeyIndexDefinitionKind,
+                        generatedKeyIndex.Name,
+                        "1")])
+                .ToArray());
     }
 
     /// <summary>The derived column a search-key provider definition describes.</summary>

@@ -220,8 +220,10 @@ public sealed class MongoProviderIndex
 }
 
 /// <summary>
-/// Native MongoDB admission evidence. Column drift prevents a store from opening; index drift
-/// remains observable so a query coverage gate can refuse only shapes that require that index.
+/// Native MongoDB admission evidence. Process-blocking physical drift prevents a store from
+/// opening; ordinary index drift remains observable so a query coverage gate can refuse only
+/// shapes that require that index. The historical ColumnDrift property also carries the
+/// provider-required index that makes declared-key coverage true on MongoDB.
 /// Extra native indexes are intentionally absent from <see cref="IndexDrift"/>.
 /// </summary>
 public sealed class MongoSchemaAdmissionReport

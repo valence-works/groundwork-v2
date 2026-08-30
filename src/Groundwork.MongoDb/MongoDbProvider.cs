@@ -163,10 +163,7 @@ internal sealed class MongoProviderState
     internal MongoAppliedUnit Resolve(StorageUnit declaration, MongoStorageAccess access)
     {
         ArgumentNullException.ThrowIfNull(declaration);
-        ProviderOwnedColumns.ValidateLogicalDeclaration(declaration);
-        PortabilityValidator.EnsurePhysicalIdentifiers(declaration);
-        declaration = SearchKeyProjection.Expand(declaration);
-        AggregationProfileValidator.ValidateUnit(declaration);
+        declaration = MongoSchemaTargets.Physicalize(declaration);
         ValidateScope(declaration, access);
 
         // The kernel history is the durable authority for both schema admission and session
@@ -414,7 +411,16 @@ internal sealed class MongoProviderCatalog(MongoProviderState state) : IMongoPro
         var persisted = state.ReadAppliedState(storageUnitId);
         var collectionName = persisted?.Snapshot.Subject.Name ?? storageUnitId.Value;
         var expected = persisted?.Snapshot.Subject.Indexes;
-        return ReadIndexes(collectionName, expected);
+        var providerOwned = persisted?.Snapshot.ProviderDefinitions
+            .Where(definition => string.Equals(
+                definition.Kind,
+                MongoSchemaTargets.DeclaredKeyIndexDefinitionKind,
+                StringComparison.Ordinal))
+            .Select(definition => definition.SubjectIdentity)
+            .ToHashSet(StringComparer.Ordinal) ?? [];
+        return ReadIndexes(collectionName, expected)
+            .Where(index => !providerOwned.Contains(index.Name))
+            .ToArray();
     }
 
     internal IReadOnlyList<MongoProviderIndex> ReadIndexes(
@@ -553,6 +559,17 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
         var report = InspectAdmission(state, applied, access);
         if (!report.IsProcessReady)
         {
+            var declaredKeyIndexDrift = report.ColumnDrift
+                .Where(refusal => refusal.Path.StartsWith("indexes.", StringComparison.Ordinal))
+                .ToArray();
+            if (declaredKeyIndexDrift.Length != 0)
+            {
+                throw new InvalidOperationException(
+                    $"Storage unit '{applied.Declaration.Name}' is not admitted because the MongoDB index that serves declared-key coverage is missing or differs from the applied declaration. " +
+                    $"Restore the index to the applied declaration before opening a session. " +
+                    $"[{string.Join("; ", declaredKeyIndexDrift.Select(refusal => refusal.Code + " at " + refusal.Path + ": " + refusal.Message))}]");
+            }
+
             var algorithmDrift = report.ColumnDrift
                 .Where(refusal => refusal.Path.EndsWith(".searchKeyAlgorithm", StringComparison.Ordinal))
                 .ToArray();
@@ -582,8 +599,8 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
     }
 
     /// <summary>
-    /// Reads Mongo's actual collection/index catalog. This is deliberately inspect-only: missing
-    /// or changed indexes do not make Mongo startup fatal, while missing/invalid declared fields do.
+    /// Reads Mongo's actual collection/index catalog. Ordinary index drift remains inspect-only;
+    /// the index that makes provider-neutral declared-key coverage true is process-required.
     /// </summary>
     internal static MongoSchemaAdmissionReport InspectAdmission(
         MongoProviderState state,
@@ -658,6 +675,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
         }
 
         var actualIndexes = new MongoProviderCatalog(state).ReadIndexes(name, applied.Declaration.Indexes);
+        var declaredKeyIndex = MongoSchemaTargets.DeclaredKeyIndex(applied.Declaration);
         var indexDrift = new List<SchemaRefusal>();
         foreach (var expected in applied.Declaration.Indexes)
         {
@@ -665,10 +683,15 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
                 string.Equals(index.Name, expected.Name, StringComparison.Ordinal));
             if (actual is null)
             {
-                indexDrift.Add(new SchemaRefusal(
-                    "GW-RUNTIME-002",
+                var refusal = new SchemaRefusal(
+                    string.Equals(expected.Name, declaredKeyIndex.Name, StringComparison.Ordinal)
+                        ? "GW-RUNTIME-001"
+                        : "GW-RUNTIME-002",
                     $"Physical MongoDB collection is missing declared index '{expected.Name}'.",
-                    $"indexes.{expected.Name}"));
+                    $"indexes.{expected.Name}");
+                (string.Equals(expected.Name, declaredKeyIndex.Name, StringComparison.Ordinal)
+                    ? columnDrift
+                    : indexDrift).Add(refusal);
                 continue;
             }
 
@@ -680,10 +703,15 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
                 actual.MissingValues != expected.MissingValues ||
                 !keysMatch)
             {
-                indexDrift.Add(new SchemaRefusal(
-                    "GW-RUNTIME-002",
+                var refusal = new SchemaRefusal(
+                    string.Equals(expected.Name, declaredKeyIndex.Name, StringComparison.Ordinal)
+                        ? "GW-RUNTIME-001"
+                        : "GW-RUNTIME-002",
                     $"Physical MongoDB index '{expected.Name}' differs in key order, direction, uniqueness, or partial filter.",
-                    $"indexes.{expected.Name}"));
+                    $"indexes.{expected.Name}");
+                (string.Equals(expected.Name, declaredKeyIndex.Name, StringComparison.Ordinal)
+                    ? columnDrift
+                    : indexDrift).Add(refusal);
             }
         }
 
@@ -942,7 +970,10 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         {
             Indexes = SearchKeyQueryMappings.RetargetIndexes(Unit, suppliedOptions.Indexes)
                 .Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
-            PhysicalIndexNames = Unit.Indexes.ToDictionary(index => index.Name, index => index.Name, StringComparer.Ordinal),
+            PhysicalIndexNames = suppliedOptions.PhysicalIndexNames
+                .Concat(MongoSchemaTargets.PhysicalIndexNames(Unit)
+                    .Where(pair => !suppliedOptions.PhysicalIndexNames.ContainsKey(pair.Key)))
+                .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
             SearchKeyColumns = SearchKeyQueryMappings.For(Unit)
         };
         var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);

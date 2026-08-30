@@ -149,7 +149,9 @@ internal static class RelationalSessionPolicy
                     column => QueryTypeOf(column.Type),
                     StringComparer.Ordinal)))
                 .ToImmutableArray(),
-            PhysicalIndexNames = physicalIndexNames,
+            PhysicalIndexNames = suppliedOptions.PhysicalIndexNames
+                .Concat(physicalIndexNames.Where(pair => !suppliedOptions.PhysicalIndexNames.ContainsKey(pair.Key)))
+                .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
             SearchKeyColumns = SearchKeyQueryMappings.For(unit),
             LatestPartitionColumns = crossScope ? [scopeToken] : suppliedOptions.LatestPartitionColumns
         };

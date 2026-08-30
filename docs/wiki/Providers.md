@@ -41,10 +41,10 @@ production-supported yet** — conformance is evidence of contract behavior, not
 > **A declared key is a coverage candidate on every provider.** A query filtering on the key — or on
 > the leading columns of a composite key — is admitted without a separate `[GwIndex]`, because every
 > relational coordinator emits the key as the table's `PRIMARY KEY` and the engine backs that with a
-> unique index. MongoDB reaches the same verdict but not yet the same plan: it stores the key in
-> `_id` while the renderer filters on the declared field names, so the read is admitted and then
-> scans. See [Query Coverage & Indexes](Query-Coverage-and-Indexes#what-counts-as-a-covering-index)
-> and [#238](https://github.com/valence-works/groundwork-v2/issues/238).
+> unique index. MongoDB physicalizes the same ordered key as a native index over the declared field
+> names; when a declared index already has that leading prefix, it serves the key instead. Missing or
+> changed key-serving indexes block MongoDB admission rather than silently turning covered queries
+> into scans. See [Query Coverage & Indexes](Query-Coverage-and-Indexes#what-counts-as-a-covering-index).
 
 **Always check at runtime rather than reading this table into your code:**
 
