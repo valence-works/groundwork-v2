@@ -99,7 +99,8 @@ public sealed class CiWorkflowContractTests
         Assert.Contains("--logger trx", script, StringComparison.Ordinal);
         Assert.Contains("--results-directory \"$run_directory\"", script, StringComparison.Ordinal);
         Assert.Contains("--blame-hang --blame-hang-timeout 20m --blame-hang-dump-type full", script, StringComparison.Ordinal);
-        Assert.Contains("PIPESTATUS[0]", script, StringComparison.Ordinal);
+        Assert.Contains("PIPESTATUS[@]", script, StringComparison.Ordinal);
+        Assert.Contains("console_log_status", script, StringComparison.Ordinal);
         Assert.DoesNotContain("--filter", script, StringComparison.Ordinal);
         Assert.DoesNotContain("-m:1", script, StringComparison.Ordinal);
 

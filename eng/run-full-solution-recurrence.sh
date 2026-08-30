@@ -109,9 +109,18 @@ done
 
 set +e
 dotnet restore Groundwork.slnx --nologo 2>&1 | tee "$output_root/restore.log"
-restore_status=${PIPESTATUS[0]}
+restore_pipeline_status=("${PIPESTATUS[@]}")
 set -e
-echo "restore_status=$restore_status" >> "$manifest"
+restore_status=${restore_pipeline_status[0]}
+restore_log_status=${restore_pipeline_status[1]}
+{
+  echo "restore_status=$restore_status"
+  echo "restore_log_status=$restore_log_status"
+} >> "$manifest"
+if [[ "$restore_log_status" -ne 0 ]]; then
+  echo "final_status=restore-log-write-failed" >> "$manifest"
+  exit "$restore_log_status"
+fi
 if [[ "$restore_status" -ne 0 ]]; then
   echo "final_status=restore-failed" >> "$manifest"
   exit "$restore_status"
@@ -130,11 +139,20 @@ for iteration in $(seq 1 5); do
     --results-directory "$run_directory" \
     --blame-hang --blame-hang-timeout 20m --blame-hang-dump-type full \
     2>&1 | tee "$run_directory/console.log"
-  test_status=${PIPESTATUS[0]}
+  test_pipeline_status=("${PIPESTATUS[@]}")
   set -e
+  test_status=${test_pipeline_status[0]}
+  console_log_status=${test_pipeline_status[1]}
 
-  echo "run_${iteration}_status=$test_status" >> "$manifest"
-  echo "run_${iteration}_finished_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$manifest"
+  {
+    echo "run_${iteration}_status=$test_status"
+    echo "run_${iteration}_console_log_status=$console_log_status"
+    echo "run_${iteration}_finished_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } >> "$manifest"
+  if [[ "$console_log_status" -ne 0 ]]; then
+    echo "final_status=console-log-write-failed-on-run-$iteration" >> "$manifest"
+    exit "$console_log_status"
+  fi
   if [[ "$test_status" -ne 0 ]]; then
     echo "final_status=failed-on-run-$iteration" >> "$manifest"
     exit "$test_status"
