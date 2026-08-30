@@ -80,12 +80,13 @@ public abstract class RelationalStorageSessionBase : IStorageSession
             adapter.Dialect.ProviderName,
             (key, mode) => pointReads.Read(key, mode),
             adapter);
+        var physicalIndexNames = adapter.PhysicalIndexNames(unit);
         queries = new RelationalSessionQueries(
             unit,
             access,
             adapter.Connection,
             adapter.QueryRenderer,
-            () => adapter.PhysicalIndexNames(unit),
+            () => physicalIndexNames,
             adapter.Decode,
             adapter.AssertExplainPlan,
             observer,

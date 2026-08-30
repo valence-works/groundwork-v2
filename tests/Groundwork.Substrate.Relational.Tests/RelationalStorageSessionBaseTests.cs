@@ -31,6 +31,7 @@ public sealed class RelationalStorageSessionBaseTests
         Assert.Equal(1, connection.CommitCalls);
         Assert.Equal(0, connection.RollbackCalls);
         Assert.Null(storage.Transaction);
+        Assert.Equal(1, storage.PhysicalIndexNameReads);
     }
 
     [Fact]
@@ -142,6 +143,13 @@ public sealed class RelationalStorageSessionBaseTests
         : RelationalStorageSessionAdapter(connection, new TrackingDialect())
     {
         internal DbTransaction? MutationTransaction { get; private set; }
+        internal int PhysicalIndexNameReads { get; private set; }
+
+        public override IReadOnlyDictionary<string, string> PhysicalIndexNames(StorageUnit unit)
+        {
+            PhysicalIndexNameReads++;
+            return base.PhysicalIndexNames(unit);
+        }
 
         protected override void BindParameter(
             DbCommand command,

@@ -210,7 +210,12 @@ internal sealed class ExternalOwnedStorageSession : ExternalStorageSession, IOwn
         StorageAccess access,
         DbConnection connection,
         IProviderCommandObserver? observer = null)
-        : this(unit, access, connection, new ExternalSessionLifetime(), observer) { }
+        : this(
+            unit,
+            access,
+            connection,
+            new ExternalSessionLifetime(nameof(ExternalOwnedStorageSession)),
+            observer) { }
 
     private ExternalOwnedStorageSession(
         StorageUnit unit,
@@ -388,7 +393,7 @@ internal sealed class ExternalRetentionAdapter(ExternalSessionAdapter commands) 
     private DbCommand Command(string sql) => commands.CreateCommand(sql);
 }
 
-internal sealed class ExternalSessionLifetime
+internal sealed class ExternalSessionLifetime(string objectName = nameof(ExternalStorageSession))
 {
     private int released;
 
@@ -399,7 +404,7 @@ internal sealed class ExternalSessionLifetime
     public void ThrowIfReleased()
     {
         if (IsReleased)
-            throw new ObjectDisposedException(nameof(ExternalOwnedStorageSession));
+            throw new ObjectDisposedException(objectName);
     }
 }
 
