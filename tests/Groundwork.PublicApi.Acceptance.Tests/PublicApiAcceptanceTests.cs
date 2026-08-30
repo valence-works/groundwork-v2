@@ -13,26 +13,24 @@ public sealed class PublicApiAcceptanceTests
         // artifacts/packages if the expected files exist there, without checking how they were
         // built. Packing into that same directory here — without ContinuousIntegrationBuild, which
         // this fallback does not set — would hand Packaging.Tests artifacts that fail its Source
-        // Link assertions whenever this suite runs first in the same working tree.
+        // Link assertions whenever this suite runs first in the same working tree. Always repack:
+        // a leftover artifact must never make this acceptance path test a different source tree.
         var packageDirectory = Path.Combine(repository, "artifacts", "acceptance-packages");
-        if (!Directory.Exists(packageDirectory) || !Directory.EnumerateFiles(packageDirectory, "Groundwork.Documents.*.nupkg").Any())
+        var packScript = Path.Combine(repository, "eng", "pack-public-packages.sh");
+        var pack = Process.Start(new ProcessStartInfo
         {
-            var packScript = Path.Combine(repository, "eng", "pack-public-packages.sh");
-            var pack = Process.Start(new ProcessStartInfo
-            {
-                FileName = "/bin/bash",
-                Arguments = Quote(packScript) + " " + Quote(packageDirectory),
-                WorkingDirectory = repository,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false
-            });
-            Assert.NotNull(pack);
-            var packOutput = pack!.StandardOutput.ReadToEnd();
-            var packError = pack.StandardError.ReadToEnd();
-            pack.WaitForExit();
-            Assert.True(pack.ExitCode == 0, packOutput + Environment.NewLine + packError);
-        }
+            FileName = "/bin/bash",
+            Arguments = Quote(packScript) + " " + Quote(packageDirectory),
+            WorkingDirectory = repository,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        });
+        Assert.NotNull(pack);
+        var packOutput = pack!.StandardOutput.ReadToEnd();
+        var packError = pack.StandardError.ReadToEnd();
+        pack.WaitForExit();
+        Assert.True(pack.ExitCode == 0, packOutput + Environment.NewLine + packError);
         var script = Path.Combine(repository, "tests", "Groundwork.PublicApi.Acceptance.Tests", "verify-clean-room.sh");
         var result = Process.Start(new ProcessStartInfo
         {
