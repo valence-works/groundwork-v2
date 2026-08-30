@@ -44,7 +44,7 @@ sha256_file() {
 package_names() {
   while IFS= read -r -d '' path; do
     printf '%s\n' "${path#"$packages_dir"/}"
-  done < <(find "$packages_dir" -type f \( -name '*.nupkg' -o -name '*.snupkg' \) -print0) |
+  done < <(find "$packages_dir" \( -name '*.nupkg' -o -name '*.snupkg' \) -print0) |
     LC_ALL=C sort
 }
 
@@ -55,7 +55,7 @@ if [[ "$operation" == "digest" ]]; then
 fi
 
 validate_package_names() {
-  local package_name
+  local package_name package_path
   while IFS= read -r package_name; do
     [[ -n "$package_name" ]] || continue
     [[ "$package_name" != */* ]] || die "package is not at the artifact root: $package_name"
@@ -63,6 +63,9 @@ validate_package_names() {
       *."$version".nupkg|*."$version".snupkg) ;;
       *) die "package has an unexpected versioned filename: $package_name" ;;
     esac
+    package_path="$packages_dir/$package_name"
+    [[ -f "$package_path" && ! -L "$package_path" ]] ||
+      die "package is not a regular file: $package_name"
   done
 }
 

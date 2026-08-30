@@ -44,6 +44,43 @@ public sealed class PackageIntegrityTests
         }
     }
 
+    [Fact]
+    public void Manifest_verification_refuses_package_symlinks()
+    {
+        var root = RepositoryRoot.Find();
+        var script = Path.Combine(root, "eng", "verify-package-integrity.sh");
+        var packages = Path.Combine(Path.GetTempPath(), "groundwork-package-integrity-" + Guid.NewGuid().ToString("N"));
+        var target = Path.Combine(Path.GetTempPath(), "groundwork-package-integrity-target-" + Guid.NewGuid().ToString("N") + ".nupkg");
+        Directory.CreateDirectory(packages);
+        try
+        {
+            File.WriteAllText(Path.Combine(packages, "Groundwork.Sample.1.2.3.nupkg"), "package");
+            AssertSuccess(Run(script, "create", packages, "1.2.3"));
+
+            var symlink = Path.Combine(packages, "Groundwork.Extra.1.2.3.nupkg");
+            File.WriteAllText(target, "external package");
+            try
+            {
+                File.CreateSymbolicLink(symlink, target);
+            }
+            catch (PlatformNotSupportedException)
+            {
+                return;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return;
+            }
+
+            AssertFailure(Run(script, "verify", packages, "1.2.3"), "not a regular file");
+        }
+        finally
+        {
+            File.Delete(target);
+            Directory.Delete(packages, recursive: true);
+        }
+    }
+
     private static CommandResult Run(string script, params string[] arguments)
     {
         var start = new ProcessStartInfo("/bin/bash")
