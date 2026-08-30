@@ -142,10 +142,10 @@ exists. See **[Versioning & Support](Versioning-and-Support)**.
 
 ### Is it production-ready?
 
-Yes, on the exact topologies marked **Production-supported**. That currently means single-writer,
-file-backed SQLite; writable-primary MySQL/MariaDB, PostgreSQL, and SQL Server; and a
-transaction-capable MongoDB replica set or sharded cluster. MongoDB standalone is
-**Compatibility-only**, and `Groundwork.Testing` is **Development/reference-only**.
+Yes, on the exact provider versions and topologies marked **Production-supported** in the canonical
+**[v2 support matrix](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/support-matrix.md)**.
+Compatible but unevidenced deployments remain **Compatibility-only**, and `Groundwork.Testing`
+remains **Development/reference-only**. The wiki deliberately does not repeat the topology table.
 
 Support is best effort, not an SLA. Your team owns database availability, capacity, credentials,
 backups, upgrades, and failover; Groundwork maintainers own reproducible package defects on a

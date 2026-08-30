@@ -10,20 +10,15 @@ reproducible Groundwork defect on the named topology and keep an operational run
 **Development/reference-only** means non-production use. Support is open-source and best effort; it
 does not include a response-time or availability SLA.
 
-| Provider | Tier | Supported topology |
-| --- | --- | --- |
-| **SQLite** | **Production-supported** | SQLite 3.35.0+, file-backed on local-locking storage, one long-lived provider connection and one application writer process per file. `:memory:` is development/reference-only. |
-| **MySQL/MariaDB** | **Production-supported** | MySQL 8.0.17+ or MariaDB 11.4.13+, InnoDB, verified NO PAD `utf8mb4_0900_bin`, one writable primary endpoint |
-| **PostgreSQL** | **Production-supported** | PostgreSQL 17-compatible writable primary endpoint; no Groundwork read-replica routing |
-| **SQL Server** | **Production-supported** | SQL Server 2022-compatible writable primary database with the documented `sp_getapplock`/schema permissions |
-| **MongoDB** | **Production-supported** | Transaction-capable **replica set or sharded cluster** |
-| **MongoDB standalone** | **Compatibility-only** | Evaluation with only advertised capabilities; transaction-dependent guarantees are refused |
-| `Groundwork.Testing` | **Development/reference-only** | Deterministic reference provider — **not an application database** |
-| `Groundwork.Tool` | **Production-supported** | Deployment-time planning and authorized application against a supported provider topology |
+The authoritative provider/version/topology assignments live in the versioned
+**[v2 support matrix](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/support-matrix.md)**.
+It distinguishes live-evidenced production topologies from compatible but unevidenced deployments;
+the wiki does not maintain a second copy of that table.
 
 The deployment owner retains database availability, capacity, credentials, backups, upgrades, and
 topology. Groundwork maintainers own reproducible package/portable-contract defects. Use the
-**[Production Operations](Production-Operations)** runbooks for deployment and incident handling,
+**[canonical production operations runbooks](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/production-operations.md)**
+for deployment and incident handling,
 and check capabilities at runtime even on a supported topology.
 
 ## Capability differences at a glance

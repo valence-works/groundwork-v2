@@ -1,5 +1,9 @@
 # MySQL/MariaDB provider evidence
 
+The implementation targets both server families, but the executable evidence in this report runs
+against MySQL 8.4.6 only. It does not claim a MariaDB live lane or production-support evidence;
+provider/version support tiers are assigned by the [support matrix](support-matrix.md).
+
 The fifth provider is the proof that the shared relational substrate makes a new relational
 provider smaller than the three implementations that preceded it. This report fixes the comparison
 to two immutable repository boundaries:
