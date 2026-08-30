@@ -288,7 +288,7 @@ public sealed class LinqCorpusTests
         Shape("ticket.Status!.Contains(\"x{0}\", StringComparison.OrdinalIgnoreCase)", value => ticket => ticket.Status!.Contains("x" + value, StringComparison.OrdinalIgnoreCase), "GW-LINQ-108", "Call:Contains"),
         Shape("ticket.TenantId / ({0} + 1) > 0", value => ticket => ticket.TenantId / (value + 1) > 0, "GW-LINQ-102"),
         Shape("ticket.TagIds.Any(value => value != {0})", value => ticket => ticket.TagIds.Any(item => item != value), "GW-LINQ-106", "Call:Any"),
-        Shape("ticket.CreatedAt.Year != ({0} + 2026)", value => ticket => ticket.CreatedAt.Year != value + 2026, typeof(Predicate.Range)),
+        Shape("ticket.CreatedAt.Year != ({0} + 2026)", value => ticket => ticket.CreatedAt.Year != value + 2026, typeof(Predicate.Or)),
         Shape("ticket.CreatedAt.Date <= new DateTime({0} + 2026, 1, 1)", value => ticket => ticket.CreatedAt.Date <= new DateTime(value + 2026, 1, 1), typeof(Predicate.Range)),
         Shape("ticket.OtherTenant > ticket.TenantId", value => ticket => ticket.OtherTenant > ticket.TenantId, "GW-LINQ-103", "Binary:GreaterThan"),
         Shape("ticket.TagIds.GroupBy(value => value).Any()", value => ticket => ticket.TagIds.GroupBy(item => item).Any(), "GW-LINQ-105"),
@@ -340,7 +340,9 @@ public sealed class LinqCorpusTests
         if (spelling.StartsWith("ticket.IsOpen ||", StringComparison.Ordinal)) return AstSignature(new Predicate.Or(new Predicate[] { equalOpen, equalTenant }));
         if (spelling.StartsWith("ticket.TagIds.Any", StringComparison.Ordinal)) return AstSignature(new Predicate.ElementOf(new ElementSetRef("tag_ids", QueryType.Int32), new[] { QueryConstant.Of(0) }, SetQuantifier.Any));
         if (spelling.StartsWith("ticket.TagIds.All", StringComparison.Ordinal)) return AstSignature(new Predicate.ElementOf(new ElementSetRef("tag_ids", QueryType.Int32), new[] { QueryConstant.Of(0) }, SetQuantifier.All));
+        if (spelling.StartsWith("ticket.CreatedAt.Year !=", StringComparison.Ordinal)) return AstSignature(DatePartNotEqual(created));
         if (spelling.StartsWith("ticket.CreatedAt.Year", StringComparison.Ordinal)) return AstSignature(DateRange(created));
+        if (spelling.StartsWith("ticket.CreatedAt.Date <=", StringComparison.Ordinal)) return AstSignature(DateUpperRange(created));
         if (spelling.StartsWith("ticket.CreatedAt.Date", StringComparison.Ordinal)) return AstSignature(DateRange(created));
         if (spelling.StartsWith("ticket.IsOpen ==", StringComparison.Ordinal)) return AstSignature(equalOpen);
         throw new InvalidOperationException($"No exact corpus signature for {spelling} ({type.Name}).");
@@ -348,6 +350,12 @@ public sealed class LinqCorpusTests
 
     private static ColumnRef Column(string name, QueryType type, bool nullable) => new(new TableId("tickets"), name, type, nullable);
     private static Predicate.Range DateRange(ColumnRef column) => new(column, Bound.Inclusive(QueryConstant.Of(column, DateTimeOffset.UnixEpoch)), Bound.Exclusive(QueryConstant.Of(column, DateTimeOffset.UnixEpoch.AddDays(1))));
+    private static Predicate.Range DateUpperRange(ColumnRef column) => new(column, null, Bound.Exclusive(QueryConstant.Of(column, DateTimeOffset.UnixEpoch.AddDays(1))));
+    private static Predicate.Or DatePartNotEqual(ColumnRef column) => new(new Predicate[]
+    {
+        new Predicate.Range(column, Bound.Inclusive(QueryConstant.Of(column, DateTimeOffset.UnixEpoch.AddDays(1))), null),
+        new Predicate.Range(column, null, Bound.Exclusive(QueryConstant.Of(column, DateTimeOffset.UnixEpoch)))
+    });
     private static CorpusDecision DecisionForCode(string code) => Decisions.Single(decision => string.Equals(decision.Code, code, StringComparison.Ordinal));
     private static CorpusDecision DecisionForSignature(string signature) => signature switch
     {

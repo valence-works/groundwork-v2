@@ -97,6 +97,70 @@ public sealed class LinqFrontEndTests
     }
 
     [Fact]
+    public void Date_part_comparisons_lower_each_source_operator_to_exact_utc_bounds()
+    {
+        var year = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var date = new DateTimeOffset(2026, 1, 2, 0, 0, 0, TimeSpan.Zero);
+        var yearCases = new (Expression<Func<Ticket, bool>> Expression, CompareOp Operation)[]
+        {
+            (ticket => ticket.CreatedAt.Year == 2026, CompareOp.Equal),
+            (ticket => ticket.CreatedAt.Year != 2026, CompareOp.NotEqual),
+            (ticket => ticket.CreatedAt.Year < 2026, CompareOp.LessThan),
+            (ticket => ticket.CreatedAt.Year <= 2026, CompareOp.LessThanOrEqual),
+            (ticket => ticket.CreatedAt.Year > 2026, CompareOp.GreaterThan),
+            (ticket => ticket.CreatedAt.Year >= 2026, CompareOp.GreaterThanOrEqual),
+            (ticket => 2026 == ticket.CreatedAt.Year, CompareOp.Equal),
+            (ticket => 2026 != ticket.CreatedAt.Year, CompareOp.NotEqual),
+            (ticket => 2026 < ticket.CreatedAt.Year, CompareOp.GreaterThan),
+            (ticket => 2026 <= ticket.CreatedAt.Year, CompareOp.GreaterThanOrEqual),
+            (ticket => 2026 > ticket.CreatedAt.Year, CompareOp.LessThan),
+            (ticket => 2026 >= ticket.CreatedAt.Year, CompareOp.LessThanOrEqual)
+        };
+        var dateCases = new (Expression<Func<Ticket, bool>> Expression, CompareOp Operation)[]
+        {
+            (ticket => ticket.CreatedAt.Date == new DateTime(2026, 1, 2), CompareOp.Equal),
+            (ticket => ticket.CreatedAt.Date != new DateTime(2026, 1, 2), CompareOp.NotEqual),
+            (ticket => ticket.CreatedAt.Date < new DateTime(2026, 1, 2), CompareOp.LessThan),
+            (ticket => ticket.CreatedAt.Date <= new DateTime(2026, 1, 2), CompareOp.LessThanOrEqual),
+            (ticket => ticket.CreatedAt.Date > new DateTime(2026, 1, 2), CompareOp.GreaterThan),
+            (ticket => ticket.CreatedAt.Date >= new DateTime(2026, 1, 2), CompareOp.GreaterThanOrEqual),
+            (ticket => new DateTime(2026, 1, 2) == ticket.CreatedAt.Date, CompareOp.Equal),
+            (ticket => new DateTime(2026, 1, 2) != ticket.CreatedAt.Date, CompareOp.NotEqual),
+            (ticket => new DateTime(2026, 1, 2) < ticket.CreatedAt.Date, CompareOp.GreaterThan),
+            (ticket => new DateTime(2026, 1, 2) <= ticket.CreatedAt.Date, CompareOp.GreaterThanOrEqual),
+            (ticket => new DateTime(2026, 1, 2) > ticket.CreatedAt.Date, CompareOp.LessThan),
+            (ticket => new DateTime(2026, 1, 2) >= ticket.CreatedAt.Date, CompareOp.LessThanOrEqual)
+        };
+
+        foreach (var (expression, operation) in yearCases)
+        {
+            var expected = ExpectedDatePart(Tickets.Columns[nameof(Ticket.CreatedAt)], year, year.AddYears(1), operation);
+            Assert.Equal(expected.CanonicalForm, ExpressionLowerer.Lower(expression, Tickets).CanonicalForm);
+        }
+        foreach (var (expression, operation) in dateCases)
+        {
+            var expected = ExpectedDatePart(Tickets.Columns[nameof(Ticket.CreatedAt)], date, date.AddDays(1), operation);
+            Assert.Equal(expected.CanonicalForm, ExpressionLowerer.Lower(expression, Tickets).CanonicalForm);
+        }
+    }
+
+    [Fact]
+    public void Date_part_comparisons_fail_closed_when_the_utc_interval_overflows()
+    {
+        var lastDate = DateTime.MaxValue.Date;
+
+        var yearDiagnostics = ExpressionLowerer.Diagnose<Ticket>(
+            ticket => ticket.CreatedAt.Year == 9999,
+            Tickets);
+        var dateDiagnostics = ExpressionLowerer.Diagnose<Ticket>(
+            ticket => ticket.CreatedAt.Date == lastDate,
+            Tickets);
+
+        Assert.Equal("GW-LINQ-107", Assert.Single(yearDiagnostics).Code);
+        Assert.Equal("GW-LINQ-107", Assert.Single(dateDiagnostics).Code);
+    }
+
+    [Fact]
     public void Infer_reads_string_comparison_metadata_from_properties_and_fields()
     {
         var model = GwTableModel<FoldedTicket>.Infer("folded");
@@ -480,6 +544,25 @@ public sealed class LinqFrontEndTests
     }
 
     private static Expression<Func<Ticket, bool>> MakeTenantPredicate(int tenant) => ticket => ticket.TenantId == tenant;
+
+    private static Predicate ExpectedDatePart(ColumnRef column, DateTimeOffset lower, DateTimeOffset upper, CompareOp operation) => operation switch
+    {
+        CompareOp.Equal => DatePartRange(column, lower, upper),
+        CompareOp.NotEqual => new Predicate.Or(new Predicate[]
+        {
+            new Predicate.Range(column, Bound.Inclusive(QueryConstant.Of(column, upper)), null),
+            new Predicate.Range(column, null, Bound.Exclusive(QueryConstant.Of(column, lower)))
+        }),
+        CompareOp.LessThan => new Predicate.Range(column, null, Bound.Exclusive(QueryConstant.Of(column, lower))),
+        CompareOp.LessThanOrEqual => new Predicate.Range(column, null, Bound.Exclusive(QueryConstant.Of(column, upper))),
+        CompareOp.GreaterThan => new Predicate.Range(column, Bound.Inclusive(QueryConstant.Of(column, upper)), null),
+        CompareOp.GreaterThanOrEqual => new Predicate.Range(column, Bound.Inclusive(QueryConstant.Of(column, lower)), null),
+        _ => throw new ArgumentOutOfRangeException(nameof(operation))
+    };
+
+    private static Predicate.Range DatePartRange(ColumnRef column, DateTimeOffset lower, DateTimeOffset upper) =>
+        new(column, Bound.Inclusive(QueryConstant.Of(column, lower)), Bound.Exclusive(QueryConstant.Of(column, upper)));
+
     private static class OtherClosure
     {
         public static Expression<Func<Ticket, bool>> Make(int tenant) => ticket => ticket.TenantId == tenant;
