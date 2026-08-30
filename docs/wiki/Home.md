@@ -103,7 +103,7 @@ map, model-import report, catalog adoption boundary, and a complete customer/ord
 - **[Capabilities Reference](Capabilities-Reference)** — every capability id and what advertising it promises
 
 ### Reference
-- **[Versioning & Support](Versioning-and-Support)** — the pre-1.0 policy, the support matrix, clean-break rules
+- **[Versioning & Support](Versioning-and-Support)** — the frozen 1.0 contract, 1.x evolution rules, final preview transition, and support matrix
 - **[Extending: Writing a Provider](Extending-Writing-a-Provider)** — the complete provider boundary, reusable substrate, and conformance proof
 - **[FAQ](FAQ)**
 

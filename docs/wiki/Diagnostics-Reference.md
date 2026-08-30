@@ -7,6 +7,20 @@ with an explicit release note and regression proof.
 Use them. Branch on `exception.Message.Contains("GW-…")` or on typed `Code` properties rather than on
 message text.
 
+## Frozen 1.0 inventory
+
+The complete candidate 1.0 code set is recorded in
+[`eng/diagnostic-codes-v1.txt`](https://github.com/valence-works/groundwork-v2/blob/main/eng/diagnostic-codes-v1.txt).
+`Groundwork.Architecture.Tests` derives the emitted `GW-*` literals from product source and compares
+that inventory byte-for-byte. The tables below explain the public families and corrective actions;
+the manifest is the exhaustive membership authority, including narrowly scoped subcodes summarized
+as ranges here.
+
+During 1.x an existing code keeps its meaning and severity and is never reassigned or reused. A minor
+release may add a code with an explicit release note. When a condition disappears, its code stays
+reserved; removing it from the frozen inventory requires a compatibility review and does not make the
+identifier available for another refusal.
+
 ## Where codes surface
 
 | Type | Carries |
@@ -240,7 +254,9 @@ Raised by `Groundwork.Extensions.DependencyInjection`, carried on
 | `GW-ACCESS-001` | Cross-scope query without privileged access |
 | `GW-ACCESS-002` | Provider session does not advertise privileged cross-scope queries |
 | `GW-ACCESS-003` | Point operation under privileged access, or a declared-reference join whose persisted target scope differs from its source scope |
-| `GW-ACCESS-004`…`006` | Additional access-context refusals |
+| `GW-ACCESS-004` | An ordinary query was attempted through a privileged cross-scope session, which must use `QueryAcrossScopes` so every returned row retains its scope |
+| `GW-ACCESS-005` | A MongoDB cross-scope query attempted to pin one physical index across multiple scope collections |
+| `GW-ACCESS-006` | MongoDB detected scope-registry drift for a scoped unit; reopen the affected session so provider-owned registration can be rebuilt |
 
 ---
 
