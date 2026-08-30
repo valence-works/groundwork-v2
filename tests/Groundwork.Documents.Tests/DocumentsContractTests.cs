@@ -39,6 +39,32 @@ public sealed class DocumentsContractTests
     }
 
     [Fact]
+    public void Double_projections_infer_nullable_storage_and_round_trip_through_rows()
+    {
+        var unit = DocumentUnit.For<DoubleDocument>("double", "double_documents")
+            .Id(document => document.Id)
+            .Project(document => document.Value)
+            .Project(document => document.OptionalValue)
+            .Build();
+
+        Assert.Equal(
+            [PortableType.Double, PortableType.Double],
+            unit.Bindings.Select(binding => binding.Type));
+        var value = new DoubleDocument(Guid.NewGuid(), 0.1d + 0.2d, double.Epsilon);
+
+        var row = unit.ToRowValues(value);
+
+        Assert.Equal(value.Value, Assert.IsType<double>(row["value"]));
+        Assert.Equal(value.OptionalValue, Assert.IsType<double>(row["optionalValue"]));
+        Assert.Equal(value, unit.Materialize(row));
+
+        var nullValue = value with { OptionalValue = null };
+        var nullRow = unit.ToRowValues(nullValue);
+        Assert.Null(nullRow["optionalValue"]);
+        Assert.Equal(nullValue, unit.Materialize(nullRow));
+    }
+
+    [Fact]
     public void Json_property_names_and_index_direction_are_part_of_the_public_binding()
     {
         var unit = DocumentUnit.For<NamedDocument>("named", "named")
@@ -487,6 +513,21 @@ public sealed class DocumentsContractTests
     }
 
     [Fact]
+    public void Double_projection_cannot_be_used_as_a_document_index()
+    {
+        var exception = Assert.Throws<DocumentDeclarationException>(() =>
+            DocumentUnit.For<DoubleDocument>("double", "double_index")
+                .Id(document => document.Id)
+                .Project(document => document.Value)
+                .Index("by_value", document => document.Value)
+                .Build());
+
+        Assert.Contains(exception.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-DOC-DECL-006" &&
+            diagnostic.Message.Contains("Double", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Unsupported_unsigned_enum_projection_has_an_actionable_diagnostic()
     {
         var exception = Assert.Throws<DocumentDeclarationException>(() =>
@@ -622,6 +663,7 @@ public sealed class DocumentsContractTests
     }
 
     private sealed record Invoice(Guid Id, Customer Customer, decimal Total, IReadOnlyList<string> Tags);
+    private sealed record DoubleDocument(Guid Id, double Value, double? OptionalValue);
     private sealed record Customer(string Name, string? Phone);
     private sealed record EnumDocument(Guid Id, OrderStatus Status);
     private sealed class FieldDocument

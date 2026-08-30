@@ -78,7 +78,8 @@ Materialization: `unit.Materialize(rowValues)` returns `T`; `unit.Read(rowValues
 A projection is a **real typed column** in the physical schema, filled from the JSON on write.
 
 - Only projected values can be indexed. Indexing an unprojected path is `GW-DOC-DECL-005`.
-- **JSON projections are not portable index keys** (`GW-DOC-DECL-006`) — project a scalar instead.
+- **JSON and Double projections are not portable index keys** (`GW-DOC-DECL-006`) — project a
+  comparable scalar instead. `Double` remains storage-only even when inferred from a CLR `double`.
 - Duplicate paths (`GW-DOC-DECL-002`) and colliding column names (`GW-DOC-DECL-003`) are refused.
 - A member that the effective JSON contract can omit is refused (`GW-DOC-DECL-009`) with the
   corrective action — a projected column must always have a defined value.
@@ -141,7 +142,7 @@ boundary is real and not an artifact of the solution graph.
 | `GW-DOC-DECL-003` | Column name collides with a reserved/declared column |
 | `GW-DOC-DECL-004` | Duplicate index name |
 | `GW-DOC-DECL-005` | Index targets an unprojected path |
-| `GW-DOC-DECL-006` | Index targets a JSON projection |
+| `GW-DOC-DECL-006` | Index targets a JSON or storage-only Double projection |
 | `GW-DOC-DECL-007` | Enum with unsupported unsigned underlying type |
 | `GW-DOC-DECL-008` | Enum JSON converter unusable or emits an unsupported kind |
 | `GW-DOC-DECL-009` | Projected member can be omitted by the JSON contract |

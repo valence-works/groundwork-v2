@@ -278,7 +278,7 @@ Raised by `Groundwork.Extensions.DependencyInjection`, carried on
 | `GW-DOC-DECL-003` | Column collides with a reserved/declared column |
 | `GW-DOC-DECL-004` | Duplicate index name |
 | `GW-DOC-DECL-005` | Index targets an unprojected path |
-| `GW-DOC-DECL-006` | Index targets a JSON projection |
+| `GW-DOC-DECL-006` | Index targets a JSON or storage-only Double projection |
 | `GW-DOC-DECL-007` | Enum with unsupported unsigned underlying type |
 | `GW-DOC-DECL-008` | Enum JSON converter unusable or emits an unsupported kind |
 | `GW-DOC-DECL-009` | Projected member can be omitted by the JSON contract |

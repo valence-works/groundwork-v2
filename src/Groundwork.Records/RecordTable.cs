@@ -229,6 +229,7 @@ public sealed class RecordTableBuilder<T>
             : type == typeof(int) ? PortableType.Int32
             : type == typeof(long) ? PortableType.Int64
             : type == typeof(decimal) ? PortableType.Decimal
+            : type == typeof(double) ? PortableType.Double
             : type == typeof(bool) ? PortableType.Boolean
             : type == typeof(DateTimeOffset) ? PortableType.DateTimeOffset
             : type == typeof(Guid) ? PortableType.Guid
@@ -236,7 +237,7 @@ public sealed class RecordTableBuilder<T>
             : type == typeof(object) ? PortableType.Json
             : default;
         return type == typeof(string) || type == typeof(int) || type == typeof(long) ||
-            type == typeof(decimal) || type == typeof(bool) || type == typeof(DateTimeOffset) ||
+            type == typeof(decimal) || type == typeof(double) || type == typeof(bool) || type == typeof(DateTimeOffset) ||
             type == typeof(Guid) || type == typeof(byte[]) || type == typeof(object);
     }
 
