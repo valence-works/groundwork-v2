@@ -134,9 +134,11 @@ Under a host, `AddGroundwork().AddConnection(...)` does that for you; see
 
 ### Can I run migrations between preview versions?
 
-No. Groundwork v2 is a **clean-break** pre-1.0 product. When a release note marks a persisted schema
-boundary, discard the earlier catalog and create a fresh one. There is deliberately no in-place
-migration, alias, dual-write, or fallback.
+Historical preview boundaries remain clean breaks: when the applicable release note requires a
+reset, discard that preview catalog and create a fresh one. The final preview-to-1.0 transition is
+not automatically a reset. Its release note must name the exact boundary and the applicable
+`groundwork adopt`, schema-migration, and data-migration sequence; recreate only when no safe path
+exists. See **[Versioning & Support](Versioning-and-Support)**.
 
 ### Is it production-ready?
 

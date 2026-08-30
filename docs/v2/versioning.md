@@ -21,17 +21,65 @@ While the major version is zero:
   semantics, and storage contracts are changed only with an explicit release
   note and regression proof.
 
-Groundwork v2 is a clean-break pre-1.0 product. When a preview release note
-marks a persisted schema boundary, consumers must discard the earlier preview
-catalog and create a fresh one from the new declarations. Groundwork does not
-ship an in-place migration, compatibility alias, dual-write, or fallback path
-between those preview catalogs.
+Historical preview releases may still name a clean-break catalog boundary.
+Those boundaries remain authoritative for the affected preview pair; in
+particular, the `0.2.0-preview.1` SQLite reset is not retroactively changed by
+the 1.0 policy below.
 
-After `1.0.0`, normal SemVer applies: breaking changes require a major version,
-compatible features use a minor version, and fixes use a patch version.
-Deprecated APIs remain documented for at least one minor release where
-practical. A release note must name the replacement and the planned removal
-version before removal.
+## Frozen 1.0 contract
+
+The candidate 1.0 contract is recorded as three machine-readable inventories:
+
+- `eng/public-api-v1-net8.0.txt` is the complete exported API on `net8.0`;
+- `eng/public-api-v1-net10.0.txt` is the complete exported API on `net10.0`,
+  including the `net10.0`-only MSBuild task; and
+- `eng/diagnostic-codes-v1.txt` is the complete source-emitted `GW-*` code set.
+
+`Groundwork.Architecture.Tests` derives those inventories from the built
+assemblies and product source and compares them byte-for-byte. Set
+`GROUNDWORK_UPDATE_CONTRACT_BASELINES=1` only while making an explicitly
+reviewed contract change; the changed inventory, release note, compatibility
+assessment, and migration guidance must land together. A baseline update is a
+review signal, not a way to make an accidental change pass.
+
+The 1.x evolution rules are:
+
+- Patch releases contain source- and binary-compatible fixes. They do not add,
+  remove, or rename public members or diagnostic codes.
+- Minor releases may add public members and new diagnostic codes. Existing
+  signatures, persisted formats, and documented result semantics remain
+  compatible.
+- An existing diagnostic code keeps its meaning and severity and is never
+  reassigned or reused during 1.x. Retired conditions leave a reserved code;
+  they do not free it for a different refusal.
+- Deprecation starts in a minor release with a documented replacement. The old
+  API remains functional throughout 1.x; removal waits for the next major
+  version.
+- A breaking API, diagnostic-semantic, provider-behavior, or persisted-contract
+  change requires the next major version, an explicit release note, and a
+  migration path or an explicit statement that no safe migration exists.
+
+## Final preview-to-1.0 transition
+
+The move from the final `0.x` preview to `1.0.0` is the last permitted clean
+break in the preview line. It is not automatically a recreate-and-reload
+event. Before upgrading a deployed catalog:
+
+1. Back it up and run `groundwork status` with the 1.0 declarations.
+2. For an existing Groundwork-shaped catalog with no applicable history, use
+   `groundwork adopt` to verify and baseline its physical shape; adoption never
+   excuses drift.
+3. Apply the reviewed schema plan. Use resumable, idempotent data migration
+   steps for value or shape transitions that cannot be expressed as schema DDL
+   alone.
+4. Recreate and reload only when inspection cannot prove a safe adoption or the
+   release note identifies a physical incompatibility for which no authorized
+   migration is available.
+
+The 1.0 release note must name the exact final preview, every public or
+persisted-contract difference, the applicable adopt/migration sequence, and
+the cases that still require recreation. Mixing preview and 1.x packages in
+one Groundwork closure is unsupported.
 
 Every release is built from a tagged commit, packs the explicit public-project
 allowlist, emits Source Link and symbol packages, and passes the clean-room

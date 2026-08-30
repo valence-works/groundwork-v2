@@ -9,6 +9,12 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Microsoft.Build.Framework"
+                      Condition="'$(TargetFramework)' == '$(GroundworkBuildTaskTargetFramework)'" />
+    <PackageReference Include="Microsoft.Build.Utilities.Core"
+                      Condition="'$(TargetFramework)' == '$(GroundworkBuildTaskTargetFramework)'" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="System.Reflection.MetadataLoadContext" />
     <PackageReference Include="xunit" />

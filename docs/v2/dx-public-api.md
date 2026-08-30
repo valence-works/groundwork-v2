@@ -66,7 +66,11 @@ The public API dogfood journey is built outside the repository source graph from
 artifacts. It exercises SQLite schema apply/verify, typed Records writes and queries, Documents,
 batch outcomes, coverage enforcement, concurrency diagnostics, and public schema-drift admission.
 The compile-time fixture and `public-api.approved.txt` manifest cover the callable surface used by
-the consumer; `friction-log.md` records the remaining ergonomic decisions.
+the consumer; `friction-log.md` records the remaining ergonomic decisions. The separate
+`eng/public-api-v1-net8.0.txt` and `eng/public-api-v1-net10.0.txt` manifests exhaustively freeze every
+exported type and member. The clean-room proof answers “can a real package-only consumer use this
+surface?”; the frozen manifests answer “did any exported contract change?” Neither proof substitutes
+for the other.
 
 Run the same proof used by CI:
 

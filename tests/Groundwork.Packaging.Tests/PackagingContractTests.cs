@@ -75,6 +75,24 @@ public sealed class PackagingContractTests
     }
 
     [Fact]
+    public void V1_contract_policy_is_enforceable_and_defines_the_final_preview_transition()
+    {
+        var root = RepositoryRoot.Find();
+        var policy = File.ReadAllText(Path.Combine(root, "docs", "v2", "versioning.md"));
+
+        Assert.Contains("## Frozen 1.0 contract", policy, StringComparison.Ordinal);
+        Assert.Contains("eng/public-api-v1-net8.0.txt", policy, StringComparison.Ordinal);
+        Assert.Contains("eng/public-api-v1-net10.0.txt", policy, StringComparison.Ordinal);
+        Assert.Contains("eng/diagnostic-codes-v1.txt", policy, StringComparison.Ordinal);
+        Assert.Matches(@"never\s+reassigned or reused during 1\.x", policy);
+        Assert.Matches(@"removal waits for the next major\s+version", policy);
+        Assert.Contains("## Final preview-to-1.0 transition", policy, StringComparison.Ordinal);
+        Assert.Contains("groundwork adopt", policy, StringComparison.Ordinal);
+        Assert.Contains("data migration", policy, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("recreate", policy, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Public_tool_identity_is_groundwork_tool_while_project_identity_stays_schema_tool()
     {
         var root = RepositoryRoot.Find();

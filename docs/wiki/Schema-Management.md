@@ -520,10 +520,9 @@ because both read it from the same declaration.
 
 ---
 
-## The clean-break preview rule
+## Preview boundaries and the 1.0 transition
 
-Groundwork v2 is a **clean-break pre-1.0 product**. When a preview release note marks a persisted
-schema boundary:
+Historical preview boundaries remain clean breaks. When a preview release note marks one:
 
 > **Discard the earlier preview catalog and create a fresh one from the new declarations.**
 > There is no in-place migration, compatibility alias, dual-write, or fallback path between preview
@@ -532,6 +531,11 @@ schema boundary:
 `0.2.0-preview.1` marks such a boundary for SQLite, and `0.2.0-preview.2` marks one for every
 provider: subject fingerprints changed, so an earlier catalog is refused with `GW-SCHEMA-006`
 naming the storage unit and this remedy. See **[Versioning & Support](Versioning-and-Support)**.
+
+The final preview-to-1.0 transition is different: back up and inspect the deployment, use
+`groundwork adopt` when an existing Groundwork-shaped catalog has no applicable history, and apply
+authorized schema and resumable data migrations where possible. Recreate only when the 1.0 release
+note identifies an incompatibility with no safe adoption or migration path.
 
 ---
 

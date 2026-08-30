@@ -41,23 +41,30 @@ SDK's MSBuild process rather than into the application; see
 | **Support status is independent of version** | Conformance is evidence of contract behavior, **not** a production support promise. |
 | **Stable surfaces** | Diagnostic codes, public result semantics, and storage contracts change only with an explicit release note and regression proof. |
 
-## After 1.0
+## Frozen 1.0 contract and 1.x evolution
 
-Normal SemVer: breaking → major, compatible features → minor, fixes → patch. Deprecated APIs remain
-documented for at least one minor release where practical, and a release note must name the
-replacement and the planned removal version **before** removal.
+The candidate 1.0 API and diagnostic set is not an informal promise. It is recorded in exhaustive,
+machine-checked manifests for `net8.0`, `net10.0`, and every source-emitted `GW-*` code. The
+[canonical versioning policy](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/versioning.md)
+names those files and the controlled update procedure.
+
+During 1.x, patches are source- and binary-compatible fixes. Minors may add APIs and diagnostic
+codes, but they do not change an existing signature, persisted contract, result meaning, or code
+meaning. A diagnostic code is never reassigned. Deprecation names a replacement in a minor release;
+the deprecated API remains functional for the rest of 1.x and removal waits for the next major.
 
 ---
 
-## The clean-break rule
+## Final preview-to-1.0 transition
 
-Groundwork v2 is a **clean-break pre-1.0 product**. When a preview release note marks a persisted
-schema boundary:
+The move from the final preview to `1.0.0` is the last permitted preview-line clean break, but it is
+not automatically a catalog reset. Back up the deployment, inspect it with the 1.0 declarations,
+use `groundwork adopt` to verify and baseline a Groundwork-shaped catalog when history is absent,
+and apply authorized schema and resumable data migrations. Recreate only when the 1.0 release note
+identifies a physical incompatibility for which inspection cannot prove a safe migration.
 
-> **Discard the earlier preview catalog and create a fresh one from the new declarations.**
-
-There is deliberately **no** in-place migration, compatibility alias, dual-write, or fallback path
-between preview catalogs. Plan preview upgrades as recreate-and-reload, not migrate.
+Historical preview boundaries remain authoritative for the exact releases they name. The reset
+below is therefore still required when moving across that boundary.
 
 ### `0.2.0-preview.1` — SQLite catalog reset (required)
 
@@ -139,12 +146,13 @@ the exact version.
 ## Adoption guidance
 
 **Reasonable now**
-- Prototypes, internal tools, and greenfield services that can recreate their catalog.
-- SQLite and PostgreSQL, with a pinned exact version and a fresh catalog per preview boundary.
+- Prototypes, internal tools, and greenfield services that can follow an authorized migration plan.
+- Existing Groundwork-shaped catalogs that can pass inspection and, when needed, `groundwork adopt`.
 - Anything where you control the deployment and can act on a release note.
 
 **Wait, or plan carefully**
-- Systems that cannot recreate a catalog. There is no preview-to-preview migration path.
+- Systems that cannot take a verified backup or tolerate the transition procedure named by the
+  release note.
 - MongoDB standalone for anything using streams — the capabilities are genuinely absent.
 - Anything needing a support SLA. Nothing is production-supported yet.
 
