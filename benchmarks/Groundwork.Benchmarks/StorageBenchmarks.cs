@@ -47,6 +47,7 @@ public class StorageBenchmarks
     private BenchmarkDbContext? efCommitContext;
     private BenchmarkItem[] efBatchItems = [];
     private BenchmarkItem? efCommitItem;
+    private IGwQueryExecutor? groundworkExecutor;
     private GwQueryTable<BenchmarkItem>? groundworkTable;
     private IGwQueryable<BenchmarkItem>? groundworkCoveredQuery;
     private IGwQueryable<BenchmarkItem>? groundworkPagedQuery;
@@ -85,12 +86,19 @@ public class StorageBenchmarks
             .ToArray();
         efCommitItem = efCommitContext.Items.Single(item => item.Id == CommitId);
 
-        var executor = new SqliteLinqExecutor(session, provider);
-        groundworkTable = new GwQueryDatabase(executor).Table(tableModel);
+        groundworkExecutor = new SqliteLinqExecutor(session, provider);
+        groundworkTable = new GwQueryDatabase(groundworkExecutor).Table(tableModel);
         groundworkCoveredQuery = groundworkTable
             .Where(item => item.Category == CoveredCategory)
             .OrderBy(item => item.Id)
-            .Take(BenchmarkMethodology.PageSize);
+            .Take(BenchmarkMethodology.PageSize)
+            .Select(item => new BenchmarkItem
+            {
+                Id = item.Id,
+                Category = item.Category,
+                Sequence = item.Sequence,
+                Payload = item.Payload
+            });
         groundworkPagedQuery = groundworkTable
             .OrderBy(item => item.Id)
             .Skip(BenchmarkMethodology.SeedRowCount / 2)
@@ -136,7 +144,7 @@ public class StorageBenchmarks
     [Benchmark(Baseline = true)]
     [BenchmarkCategory("CoveredQuery")]
     public Task<IReadOnlyList<BenchmarkItem>> CoveredQuery_Groundwork() =>
-        GroundworkCoveredQuery.ToListAsync();
+        GroundworkExecutor.ToListAsync(GroundworkCoveredQueryRequest, tableModel);
 
     [Benchmark]
     [BenchmarkCategory("CoveredQuery")]
@@ -257,6 +265,8 @@ public class StorageBenchmarks
     public string DatabaseConnectionString => connectionString
         ?? throw new InvalidOperationException("Setup has not run.");
 
+    public QueryRequest GroundworkCoveredQueryRequest => GroundworkCoveredQuery.ToQueryRequest();
+
     private IStorageProviderConnection Provider => provider ?? throw new InvalidOperationException("Setup has not run.");
     private IStorageSession Session => session ?? throw new InvalidOperationException("Setup has not run.");
     private IBatchedStorageSession BatchedSession => batchedSession ?? throw new InvalidOperationException("Setup has not run.");
@@ -265,6 +275,7 @@ public class StorageBenchmarks
     private BenchmarkDbContext EfBatchContext => efBatchContext ?? throw new InvalidOperationException("Setup has not run.");
     private BenchmarkDbContext EfCommitContext => efCommitContext ?? throw new InvalidOperationException("Setup has not run.");
     private BenchmarkItem EfCommitItem => efCommitItem ?? throw new InvalidOperationException("Setup has not run.");
+    private IGwQueryExecutor GroundworkExecutor => groundworkExecutor ?? throw new InvalidOperationException("Setup has not run.");
     private IGwQueryable<BenchmarkItem> GroundworkCoveredQuery => groundworkCoveredQuery ?? throw new InvalidOperationException("Setup has not run.");
     private IGwQueryable<BenchmarkItem> GroundworkPagedQuery => groundworkPagedQuery ?? throw new InvalidOperationException("Setup has not run.");
 

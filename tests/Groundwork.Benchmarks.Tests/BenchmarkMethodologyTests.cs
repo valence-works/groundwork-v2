@@ -3,6 +3,8 @@ using BenchmarkDotNet.Attributes;
 using Groundwork.Benchmarks;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
+using Groundwork.Sqlite;
+using Groundwork.Substrate.Relational;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
@@ -166,6 +168,43 @@ public sealed class BenchmarkMethodologyTests
                     ("payload", 0L, "GROUNDWORK_UTF16_ORDINAL")
                 },
                 indexed);
+        }
+        finally
+        {
+            benchmarks.Cleanup();
+        }
+    }
+
+    [Fact]
+    public void Groundwork_covered_query_uses_the_declared_covering_index()
+    {
+        var benchmarks = new StorageBenchmarks();
+        benchmarks.Setup();
+        try
+        {
+            var request = benchmarks.GroundworkCoveredQueryRequest;
+            var query = new SqliteQueryRenderer().Render(request);
+            Assert.False(request.Projection.AllColumns);
+            Assert.Equal(
+                new[] { "id", "category", "sequence", "payload" },
+                request.Projection.Columns.Select(column => column.Name));
+            Assert.DoesNotContain("SELECT *", query.CommandText, StringComparison.Ordinal);
+            Assert.DoesNotContain("__groundwork_action", query.CommandText, StringComparison.Ordinal);
+
+            using var connection = new SqliteConnection(benchmarks.DatabaseConnectionString);
+            connection.Open();
+            connection.CreateCollation("GROUNDWORK_UTF16_ORDINAL", string.CompareOrdinal);
+            using var explain = connection.CreateCommand();
+            explain.CommandText = "EXPLAIN QUERY PLAN " + query.CommandText;
+            RelationalQueryResultReader.AddParameters(explain, query);
+            using var reader = explain.ExecuteReader();
+            var details = new List<string>();
+            while (reader.Read())
+                details.Add(reader.GetString(3));
+
+            Assert.Contains(details, detail => detail.Contains(
+                "USING COVERING INDEX __groundwork_ix_15_benchmark_items_30_ix_benchmark_items_category_id",
+                StringComparison.Ordinal));
         }
         finally
         {
