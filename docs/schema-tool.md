@@ -19,7 +19,8 @@ Use `--output json` for the stable machine-readable report. Exit codes are `0` s
 Each canonical table may carry an optional `evolution` object for destructive intent, retirement,
 semantic migration identity, supersessions, and the dual-presence window. The deployment host
 supplies named transforms through `ISchemaToolProviderSession.DataMigrationCatalog`; apply refuses
-a missing transform by name with `GW-MIGRATION-008` before any target mutates.
+a missing transform by name with `GW-MIGRATION-008`. It also validates each transform's declared
+columns and the provider's migration capabilities across every target before the first one mutates.
 When the same document is a source-generator `AdditionalFile`, the generated assembly's canonical
 schema attribute preserves evolution. Generated `StorageUnit.Definition` remains the logical table
 shape because evolution is deployment-target metadata rather than part of a storage unit.

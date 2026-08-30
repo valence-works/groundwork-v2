@@ -389,8 +389,7 @@ public sealed record SchemaTable
         string? id = null,
         SchemaForeignColumns foreignColumns = SchemaForeignColumns.Refuse,
         IEnumerable<SchemaReference>? references = null,
-        IEnumerable<SchemaCheck>? checks = null,
-        SchemaEvolution? evolution = null)
+        IEnumerable<SchemaCheck>? checks = null)
     {
         Name = string.IsNullOrWhiteSpace(name) ? throw new ArgumentException("A non-empty value is required.", nameof(name)) : name;
         Id = string.IsNullOrWhiteSpace(id) ? null : id;
@@ -407,7 +406,6 @@ public sealed record SchemaTable
         ForeignColumns = foreignColumns;
         References = Ordered(references ?? Array.Empty<SchemaReference>(), nameof(references), reference => reference.Name);
         Checks = Ordered(checks ?? Array.Empty<SchemaCheck>(), nameof(checks), check => check.Name);
-        Evolution = evolution;
     }
 
     public string Name { get; }
@@ -449,7 +447,7 @@ public sealed record SchemaTable
     public SchemaForeignColumns ForeignColumns { get; }
 
     /// <summary>Evolution metadata emitted only when it differs from the safe default.</summary>
-    public SchemaEvolution? Evolution { get; }
+    public SchemaEvolution? Evolution { get; init; }
 
     private static IReadOnlyList<T> Snapshot<T>(IEnumerable<T> values, string parameterName) =>
         new ReadOnlyCollection<T>((values ?? throw new ArgumentNullException(parameterName)).ToArray());

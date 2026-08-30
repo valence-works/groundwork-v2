@@ -9,6 +9,29 @@ namespace Groundwork.Schema.Generator.Tests;
 public sealed class SchemaEvolutionCanonicalTests
 {
     [Fact]
+    public void Schema_table_retains_its_pre_evolution_constructor_signature()
+    {
+        Assert.NotNull(typeof(SchemaTable).GetConstructor(
+        [
+            typeof(string),
+            typeof(IEnumerable<SchemaColumn>),
+            typeof(IEnumerable<string>),
+            typeof(IEnumerable<SchemaIndex>),
+            typeof(SchemaScope),
+            typeof(SchemaConcurrency),
+            typeof(SchemaTimestamps),
+            typeof(SchemaRetention),
+            typeof(SchemaIdempotency),
+            typeof(SchemaIdempotency),
+            typeof(IEnumerable<SchemaAggregation>),
+            typeof(string),
+            typeof(SchemaForeignColumns),
+            typeof(IEnumerable<SchemaReference>),
+            typeof(IEnumerable<SchemaCheck>)
+        ]));
+    }
+
+    [Fact]
     public void Default_evolution_keeps_the_pre_evolution_canonical_document_byte_identical()
     {
         var schema = new SchemaDocument(
@@ -16,8 +39,10 @@ public sealed class SchemaEvolutionCanonicalTests
             new SchemaTable(
                 "customers",
                 [new SchemaColumn("id", SchemaValueType.Guid, isNullable: false)],
-                ["id"],
-                evolution: new SchemaEvolution())
+                ["id"])
+            {
+                Evolution = new SchemaEvolution()
+            }
         ]);
 
         var canonical = GroundworkSchemaCanonical.Serialize(schema);
@@ -38,16 +63,19 @@ public sealed class SchemaEvolutionCanonicalTests
             new SchemaTable(
                 "retired",
                 [new SchemaColumn("id", SchemaValueType.Int64, isNullable: false)],
-                ["id"],
-                evolution: new SchemaEvolution(isDestructive: true, retiresPrimaryStorage: true)),
+                ["id"])
+            {
+                Evolution = new SchemaEvolution(isDestructive: true, retiresPrimaryStorage: true)
+            },
             new SchemaTable(
                 "tickets",
                 [
                     new SchemaColumn("id", SchemaValueType.String, isNullable: false, length: 64),
                     new SchemaColumn("slug_v2", SchemaValueType.String, length: 128)
                 ],
-                ["id"],
-                evolution: new SchemaEvolution(
+                ["id"])
+            {
+                Evolution = new SchemaEvolution(
                     semanticMigrationId: "2026-08-slugify",
                     supersessions:
                     [
@@ -55,7 +83,8 @@ public sealed class SchemaEvolutionCanonicalTests
                             new SchemaColumn("slug", SchemaValueType.String, length: 64),
                             "slug_v2")
                     ],
-                    dualPresenceWindow: TimeSpan.FromHours(1)))
+                    dualPresenceWindow: TimeSpan.FromHours(1))
+            }
         ]);
 
         var canonical = GroundworkSchemaCanonical.Serialize(schema);

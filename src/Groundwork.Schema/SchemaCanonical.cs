@@ -204,7 +204,7 @@ public static class GroundworkSchemaCanonical
                     RequiredBoolean(indexElement, "unique")));
             }
 
-            tables.Add(new SchemaTable(
+            var table = new SchemaTable(
                 RequiredString(tableElement, "name"),
                 columns,
                 RequiredArray(tableElement, "key").Select(element => element.GetString() ?? throw new FormatException("Schema key names must be strings.")),
@@ -219,8 +219,8 @@ public static class GroundworkSchemaCanonical
                 OptionalString(tableElement, "id"),
                 EnumValueOrDefault(tableElement, "foreignColumns", SchemaForeignColumns.Refuse),
                 ReadReferences(tableElement),
-                ReadChecks(tableElement, columns),
-                ReadEvolution(tableElement)));
+                ReadChecks(tableElement, columns));
+            tables.Add(table with { Evolution = ReadEvolution(tableElement) });
         }
 
         return new SchemaDocument(tables);

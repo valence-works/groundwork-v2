@@ -342,6 +342,28 @@ public sealed class ExpandContractTests
         Assert.NotEqual(superseding.Fingerprint, widerWindow.Fingerprint);
     }
 
+    [Fact]
+    public void An_invalid_transform_is_refused_before_expand_mutates_applied_state()
+    {
+        var executor = Applied(BeforeTarget());
+        var appliedFingerprint = executor.AppliedState!.TargetFingerprint;
+        var target = SupersedingTarget();
+        var catalog = new DataMigrationCatalog(
+        [
+            new DataMigration(MigrationId, target.Subject.Id, new MissingSourceTransform())
+        ]);
+
+        var refusal = Assert.Throws<DataMigrationRefusedException>(() => PhysicalSchemaApplication.Apply(
+            target,
+            executor,
+            T0.AddHours(1),
+            dataMigrations: catalog,
+            dataMigrationExecutor: executor));
+
+        Assert.Equal(DataMigrationCodes.NotApplicable, refusal.Code);
+        Assert.Equal(appliedFingerprint, executor.AppliedState.TargetFingerprint);
+    }
+
     // ------------------------------------------------------------------ fixtures
 
     private static ColumnSupersession Supersession { get; } = new(
@@ -481,6 +503,14 @@ public sealed class ExpandContractTests
     {
         public string Identity => "copy-total/v1";
         public ImmutableArray<string> SourceColumns => [];
+        public ImmutableArray<string> TargetColumns => ["total_amount"];
+        public DataMigrationValues Transform(DataMigrationRow row) => DataMigrationValues.Unchanged;
+    }
+
+    private sealed class MissingSourceTransform : IDataMigrationTransform
+    {
+        public string Identity => "missing-source/v1";
+        public ImmutableArray<string> SourceColumns => ["absent"];
         public ImmutableArray<string> TargetColumns => ["total_amount"];
         public DataMigrationValues Transform(DataMigrationRow row) => DataMigrationValues.Unchanged;
     }

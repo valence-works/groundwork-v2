@@ -168,6 +168,9 @@ public static class GroundworkSchemaCli
                 var dataMigrationCatalog = command == "apply"
                     ? provider.DataMigrationCatalog
                     : null;
+                var dataMigrationExecutor = command == "apply"
+                    ? provider.DataMigrations
+                    : null;
                 PhysicalSchemaPlanAuthorization Authorize(
                     PhysicalSchemaTarget target,
                     PhysicalSchemaDiffPlan plan)
@@ -236,9 +239,10 @@ public static class GroundworkSchemaCli
                     // earlier target has already published its schema.
                     foreach (var item in preflight)
                     {
-                        dataMigrationCatalog!.ResolveDeclared(
-                            item.Target.Subject.Evolution.SemanticMigrationId,
-                            item.Target.Subject.Id);
+                        PhysicalSchemaApplication.PreflightDataMigration(
+                            item.Target,
+                            dataMigrationExecutor,
+                            dataMigrationCatalog);
                     }
                 }
 
@@ -288,7 +292,7 @@ public static class GroundworkSchemaCli
                         planAuthorization: plan => Authorize(target, plan),
                         dataMigrations: dataMigrationCatalog,
                         phase: phase,
-                        dataMigrationExecutor: provider.DataMigrations);
+                        dataMigrationExecutor: dataMigrationExecutor);
                     targetReports.Add(FromApplication(target, result) with
                     {
                         DataMigrations = ReadDataMigrations(provider, target),

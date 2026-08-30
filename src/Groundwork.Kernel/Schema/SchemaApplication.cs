@@ -244,9 +244,8 @@ public static class PhysicalSchemaApplication
             };
         }
 
-        // Resolve the host transform before validation, DDL, or publication. A semantic identity is
-        // a declaration of executable data work, not an optional label that apply may silently skip.
-        var migration = ResolveDataMigration(target, dataMigrations);
+        // Resolve and validate executable data work before validation, DDL, or publication.
+        var migration = PreflightDataMigration(target, migrationExecutor, dataMigrations);
 
         if (plan.Operations.Length == 0)
         {
@@ -348,6 +347,42 @@ public static class PhysicalSchemaApplication
         return (catalog ?? DataMigrationCatalog.Empty).ResolveDeclared(
             target.Subject.Evolution.SemanticMigrationId,
             target.Subject.Id);
+    }
+
+    /// <summary>
+    /// Proves that a document-declared migration can execute against the declaration's full expand
+    /// shape. Schema Tool calls this for every target before it mutates the first one; Apply calls it
+    /// again so direct kernel callers receive the same pre-mutation guarantee.
+    /// </summary>
+    internal static DataMigration? PreflightDataMigration(
+        PhysicalSchemaTarget target,
+        IDataMigrationExecutor? migrationExecutor,
+        DataMigrationCatalog? catalog)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        var migration = ResolveDataMigration(target, catalog);
+        if (migration is null)
+            return null;
+        if (migrationExecutor is null)
+        {
+            throw new DataMigrationRefusedException(
+                DataMigrationCodes.NotSupported,
+                $"semantic migration '{migration.Id}' attaches a data transform, but provider " +
+                $"'{target.Provider.Name}' offers no data-migration execution.");
+        }
+
+        DataMigrationRunner.EnsureCapabilities(migrationExecutor);
+        migration.ValidateAgainst(DeclarationMigrationUnit(target));
+        return migration;
+    }
+
+    private static StorageUnit DeclarationMigrationUnit(PhysicalSchemaTarget target)
+    {
+        var unit = target.Subject.Definition;
+        var superseded = target.Subject.Evolution.Supersessions;
+        return superseded.IsDefaultOrEmpty
+            ? unit
+            : unit with { Columns = [.. unit.Columns, .. superseded.Select(item => item.SupersededColumn)] };
     }
 
     private static StorageUnit MigrationUnit(

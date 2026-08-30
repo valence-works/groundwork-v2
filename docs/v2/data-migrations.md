@@ -146,8 +146,9 @@ state alone — no host transform catalog is needed to read a ledger:
 `not-recorded` marks a semantic migration the subject declares that the ledger has never seen.
 Plan and status need no transform catalog and do not provision anything. Apply is stricter: the
 deployment host exposes its transforms through `ISchemaToolProviderSession.DataMigrationCatalog`,
-and all declared identities are resolved before the first target mutates. A missing identity is
-refused by name with `GW-MIGRATION-008` rather than silently skipped.
+and all declared identities, transform column sets, and provider capabilities are validated before
+the first target mutates. A missing identity is refused by name with `GW-MIGRATION-008` rather than
+silently skipped.
 
 ## Expand–contract
 
