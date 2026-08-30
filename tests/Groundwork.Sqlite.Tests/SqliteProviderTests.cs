@@ -1533,6 +1533,20 @@ public sealed class SqliteProviderTests
         public decimal? DecimalAmount { get; set; }
     }
 
+    private static StorageUnit ScopedLinqUnit(string name) => new()
+    {
+        Id = new StorageUnitId(name),
+        Name = name,
+        Columns =
+        [
+            new ColumnDefinition { Name = "Id", Type = PortableType.String, IsNullable = false },
+            new ColumnDefinition { Name = "value_col", Type = PortableType.String }
+        ],
+        Key = new KeyDefinition { Columns = ["Id"] },
+        Indexes = [new IndexDefinition { Name = "ix_value", Columns = [new IndexColumn("value_col")] }],
+        Scope = ScopePolicy.Scoped
+    };
+
     [Fact]
     public async Task Configured_linq_database_executes_ToListAsync_against_sqlite()
     {
@@ -1561,6 +1575,60 @@ public sealed class SqliteProviderTests
         Assert.Equal("hit", row.Display);
         Assert.Equal("C1", row.Code);
         await Assert.ThrowsAsync<InvalidOperationException>(() => query.Select(ticket => new { ticket.Id }).ToListAsync());
+    }
+
+    [Fact]
+    public async Task Scoped_linq_coverage_uses_logical_index_and_key_shapes()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var name = "linq_scoped_" + Guid.NewGuid().ToString("N");
+        var unit = ScopedLinqUnit(name);
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        var session = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("tenant-a")));
+        Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(new StorageValues(
+            new Dictionary<string, object?> { ["Id"] = "a", ["value_col"] = "hit" })).Status);
+
+        var executor = new SqliteLinqExecutor(session, connection);
+        var table = new GwQueryDatabase(executor).Table<LinqMetric>(
+            new GwTableModel<LinqMetric>(unit.Name, [
+                new GwColumn<LinqMetric>(nameof(LinqMetric.Id), "Id", QueryType.String, false),
+                new GwColumn<LinqMetric>(nameof(LinqMetric.Status), "value_col", QueryType.String)
+            ]));
+
+        var byIndex = await table.Query.Where(ticket => ticket.Status == "hit").ToListAsync(executor);
+        var byKey = await table.Query.Where(ticket => ticket.Id == "a").ToListAsync(executor);
+
+        Assert.Equal("a", Assert.Single(byIndex).Id);
+        Assert.Equal("hit", Assert.Single(byIndex).Status);
+        Assert.Equal("a", Assert.Single(byKey).Id);
+    }
+
+    [Fact]
+    public async Task Privileged_scoped_linq_coverage_refuses_without_provider_owned_details()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var name = "linq_privileged_" + Guid.NewGuid().ToString("N");
+        var unit = ScopedLinqUnit(name);
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        var session = connection.OpenSession(unit, StorageAccess.PrivilegedAcrossScopes(
+            new StorageAccessAudit("sqlite-tests", "coverage-refusal")));
+        var executor = new SqliteLinqExecutor(session, connection);
+        var table = new GwQueryDatabase(executor).Table<LinqMetric>(
+            new GwTableModel<LinqMetric>(unit.Name, [
+                new GwColumn<LinqMetric>(nameof(LinqMetric.Id), "Id", QueryType.String, false),
+                new GwColumn<LinqMetric>(nameof(LinqMetric.Status), "value_col", QueryType.String)
+            ]));
+
+        var refusal = await Assert.ThrowsAsync<QueryCoverageException>(() => table.Query
+            .Where(ticket => ticket.Status == "hit")
+            .ToListAsync(executor));
+
+        Assert.Equal("GW-COVER-006", refusal.Code);
+        Assert.DoesNotContain("__groundwork_", refusal.Message, StringComparison.Ordinal);
     }
 
     [Fact]

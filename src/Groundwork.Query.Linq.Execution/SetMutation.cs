@@ -443,10 +443,40 @@ internal static class StorageUnitCoverage
             .ToImmutableArray();
     }
 
+    /// <summary>
+    /// Returns the logical key used by an ordinary scoped query. Relational providers prepend the
+    /// scope discriminator to the physical key, but the session's scope predicate supplies that
+    /// equality separately. Only that leading provider-owned column is removed; other physical
+    /// columns remain visible to coverage just as they do on a global unit.
+    /// </summary>
+    internal static ImmutableArray<string> ScopedQueryKeyColumns(StorageUnit unit)
+    {
+        ArgumentNullException.ThrowIfNull(unit);
+        var columns = unit.Key.Columns;
+        return columns.Count > 0 && columns[0] == ProviderOwnedColumns.Scope
+            ? columns.Skip(1).ToImmutableArray()
+            : columns.ToImmutableArray();
+    }
+
     internal static ImmutableArray<CoverageIndex> PortableDeclaredIndexes(StorageUnit unit)
     {
         ArgumentNullException.ThrowIfNull(unit);
         return DeclaredIndexes(unit, stripProviderOwnedColumns: true, includeLocaleSortKeys: false);
+    }
+
+    /// <summary>
+    /// Returns declared query indexes in the logical shape seen by an ordinary scoped caller. The
+    /// provider-bound scope equality covers the physical prefix, while search-key mappings and all
+    /// remaining index metadata stay unchanged for the shared coverage checker.
+    /// </summary>
+    internal static ImmutableArray<CoverageIndex> ScopedQueryDeclaredIndexes(StorageUnit unit)
+    {
+        ArgumentNullException.ThrowIfNull(unit);
+        return DeclaredIndexes(
+            unit,
+            stripProviderOwnedColumns: false,
+            includeLocaleSortKeys: true,
+            stripLeadingScope: true);
     }
 
     public static ImmutableArray<CoverageIndex> DeclaredIndexes(StorageUnit unit)
@@ -458,7 +488,8 @@ internal static class StorageUnitCoverage
     private static ImmutableArray<CoverageIndex> DeclaredIndexes(
         StorageUnit unit,
         bool stripProviderOwnedColumns,
-        bool includeLocaleSortKeys)
+        bool includeLocaleSortKeys,
+        bool stripLeadingScope = false)
     {
         var nullable = unit.Columns.ToDictionary(column => column.Name, column => column.IsNullable, StringComparer.Ordinal);
         var logicalByPhysical = unit.DerivedColumns
@@ -468,7 +499,11 @@ internal static class StorageUnitCoverage
         return unit.Indexes
             .Select(index =>
             {
-                var columns = index.Columns
+                var physicalColumns = stripLeadingScope && index.Columns.Count > 0 &&
+                    index.Columns[0].Column == ProviderOwnedColumns.Scope
+                    ? index.Columns.Skip(1)
+                    : index.Columns.AsEnumerable();
+                var columns = physicalColumns
                     .Where(column => !stripProviderOwnedColumns ||
                                      !column.Column.StartsWith("__groundwork_", StringComparison.Ordinal) ||
                                      logicalByPhysical.ContainsKey(column.Column))
@@ -506,12 +541,26 @@ internal static class RuntimeCoverage
         QueryAdmissionProfile? admission)
     {
         ArgumentNullException.ThrowIfNull(session);
+        if (session.Access.IsPrivilegedAcrossScopes)
+        {
+            // A cross-scope query cannot bind the physical scope prefix. Do not hand provider-owned
+            // candidates to the checker: its nearest-index and suggested-declaration diagnostics
+            // must never expose the hidden scope column to a caller who cannot spell it.
+            return Create(session.Unit, [], connection, admission, []);
+        }
+
+        var isScopedQuery = session.Unit.Scope == ScopePolicy.Scoped &&
+            session.Access.Kind == StorageAccessKind.Scoped;
         return Create(
             session.Unit,
-            StorageUnitCoverage.DeclaredIndexes(session.Unit),
+            isScopedQuery
+                ? StorageUnitCoverage.ScopedQueryDeclaredIndexes(session.Unit)
+                : StorageUnitCoverage.DeclaredIndexes(session.Unit),
             connection,
             admission,
-            session.Unit.Key.Columns.ToImmutableArray());
+            isScopedQuery
+                ? StorageUnitCoverage.ScopedQueryKeyColumns(session.Unit)
+                : session.Unit.Key.Columns.ToImmutableArray());
     }
 
     public static RuntimeCoverageGate ForMutation(IStorageSession session)
