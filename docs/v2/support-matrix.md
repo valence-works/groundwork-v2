@@ -14,6 +14,28 @@ operational guidance, and an owner for provider-specific incidents.
 | `Groundwork.Testing` | Public provider-author package | Public conformance contracts and deterministic reference provider; not an application database. |
 | `Groundwork.Tool` | Preview | Deployment-time schema planning and explicit authorization only. |
 
+## Interop view capability
+
+Interop reporting views are an opt-in schema-tool capability, separate from the provider-neutral
+conformance status above. Relational providers create one named view per opted-in unit; the view
+contains all rows for a scoped unit and includes `__groundwork_scope`, so database grants are
+required for any cross-scope consumer.
+
+| Provider | Schema-tool interop view | Native projection |
+| --- | --- | --- |
+| SQLite | Supported | Decimal `TEXT` is cast to `NUMERIC` |
+| PostgreSQL | Supported | UTC tick `bigint` is computed as `timestamptz` (microsecond precision) |
+| SQL Server | Supported | Native `datetimeoffset(7)` and decimal values are selected directly |
+| MySQL/MariaDB | Supported | UTC tick `bigint` is computed as `DATETIME(6)` (microsecond precision) |
+| MongoDB | Refused | Per-scope collections do not form one stable relational view |
+| `Groundwork.Testing` | Refused | No native catalog or provider view exists |
+
+View create, replacement, and removal require exact deployment-tool authorization. MySQL/MariaDB
+DDL may implicitly commit, so its schema-tool apply path cannot promise rollback of every physical
+change in a failed multi-operation batch. PostgreSQL, SQLite, and SQL Server use the shared
+relational schema transaction. View names are validated for provider identifier rules and
+collisions before schema I/O (`GW-PORT-015`).
+
 MongoDB standalone deployments are intentionally not represented as
 production-supported: they cannot provide the transaction/session guarantees
 required by exact append and durable idempotency. A provider may be marked

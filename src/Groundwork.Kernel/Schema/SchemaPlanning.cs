@@ -115,6 +115,7 @@ public static class PhysicalSchemaDiffPlanner
         var realizedDesired = desired
             .Select(operation => Realize(operation, appliedBySlot, evolution))
             .ToImmutableArray();
+        var providerDefinitionRemovals = ProviderDefinitionRemovals(target, applied, evolution.Operations);
         var snapshot = CreateSnapshot(target, realizedDesired);
         var pending = realizedDesired
             .Where(operation =>
@@ -122,6 +123,7 @@ public static class PhysicalSchemaDiffPlanner
                 (IsRebuiltByEvolution(operation, evolution) ||
                  !IsAlreadyApplied(operation, appliedIdentities, appliedBySlot)))
             .Concat(evolution.Operations)
+            .Concat(providerDefinitionRemovals)
             .OrderBy(OperationOrder)
             .ThenBy(operation => operation.SubjectIdentity, StringComparer.Ordinal)
             .ToList();
@@ -372,6 +374,27 @@ public static class PhysicalSchemaDiffPlanner
         applied.Kind == PhysicalSchemaOperationKind.ApplyProviderDefinition &&
         desired is ApplyProviderPhysicalSchemaDefinitionOperation;
 
+    private static IReadOnlyList<PhysicalSchemaOperation> ProviderDefinitionRemovals(
+        PhysicalSchemaTarget target,
+        PhysicalSchemaAppliedState? applied,
+        IReadOnlyList<PhysicalSchemaOperation> evolution)
+    {
+        if (applied is null || evolution.Any(operation => operation is RenamePrimaryStorageOperation))
+            return [];
+
+        var desiredBySlot = target.ProviderDefinitions.ToDictionary(
+            definition => (definition.ProviderName, definition.Kind, definition.SubjectIdentity));
+        return applied.Snapshot.ProviderDefinitions
+            .Where(previous =>
+                string.Equals(previous.Kind, ProviderPhysicalSchemaDefinitionKinds.InteropView, StringComparison.Ordinal) &&
+                (!desiredBySlot.TryGetValue(
+                     (previous.ProviderName, previous.Kind, previous.SubjectIdentity),
+                     out var desired) ||
+                 !string.Equals(previous.Fingerprint, desired.Fingerprint, StringComparison.Ordinal)))
+            .Select(definition => (PhysicalSchemaOperation)new DropProviderPhysicalSchemaDefinitionOperation(definition))
+            .ToArray();
+    }
+
     private static PhysicalSchemaOperation Realize(
         PhysicalSchemaOperation operation,
         IReadOnlyDictionary<string, PhysicalSchemaAppliedOperation> appliedBySlot,
@@ -479,6 +502,9 @@ public static class PhysicalSchemaDiffPlanner
         PhysicalSchemaOperationKind.RenamePrimaryStorage => 0,
         PhysicalSchemaOperationKind.CreatePrimaryStorage => 0,
         PhysicalSchemaOperationKind.RenameColumn => 1,
+        // A view may depend on a column this plan renames, alters, or drops. Remove the old
+        // definition before any table evolution and recreate it from the desired definition later.
+        PhysicalSchemaOperationKind.DropProviderDefinition => 0,
         PhysicalSchemaOperationKind.DropIndex => 2,
         PhysicalSchemaOperationKind.AddColumn => 3,
         PhysicalSchemaOperationKind.AlterColumn => 4,
@@ -696,13 +722,8 @@ public sealed record PhysicalSchemaPlanProtection(
     {
         ArgumentNullException.ThrowIfNull(plan);
         var refusals = plan.Operations
-            .Where(IsIrrecoverable)
-            .Select(operation => new SchemaRefusal(
-                "GW-SCHEMA-010",
-                $"'{operation.AuthorizationAddress}' destroys data that re-applying cannot restore, so it is " +
-                "refused here. Apply it from the deployment tool, which authorizes the exact operation " +
-                "against the exact plan.",
-                $"schema.apply.{operation.Identity}"))
+            .Where(RequiresDeploymentAuthorization)
+            .Select(AuthorizationRefusal)
             .ToArray();
         return refusals.Length == 0
             ? PhysicalSchemaPlanAuthorization.Allow
@@ -715,6 +736,29 @@ public sealed record PhysicalSchemaPlanProtection(
         _ => operation.Kind is PhysicalSchemaOperationKind.DropColumn or
             PhysicalSchemaOperationKind.DropPrimaryStorage
     };
+
+    private static bool RequiresDeploymentAuthorization(PhysicalSchemaOperation operation) =>
+        IsIrrecoverable(operation) ||
+        operation is ApplyProviderPhysicalSchemaDefinitionOperation
+        {
+            Definition.Kind: ProviderPhysicalSchemaDefinitionKinds.InteropView
+        } or DropProviderPhysicalSchemaDefinitionOperation;
+
+    private static SchemaRefusal AuthorizationRefusal(PhysicalSchemaOperation operation) =>
+        operation is ApplyProviderPhysicalSchemaDefinitionOperation
+            { Definition.Kind: ProviderPhysicalSchemaDefinitionKinds.InteropView } or
+            DropProviderPhysicalSchemaDefinitionOperation
+            ? new SchemaRefusal(
+                "GW-SCHEMA-010",
+                $"'{operation.AuthorizationAddress}' changes a database reporting surface and is refused here. " +
+                "Apply it from the deployment tool, which authorizes the exact operation against the exact plan.",
+                $"schema.apply.{operation.Identity}")
+            : new SchemaRefusal(
+                "GW-SCHEMA-010",
+                $"'{operation.AuthorizationAddress}' destroys data that re-applying cannot restore, so it is " +
+                "refused here. Apply it from the deployment tool, which authorizes the exact operation " +
+                "against the exact plan.",
+                $"schema.apply.{operation.Identity}");
 
     public static PhysicalSchemaPlanProtection Inspect(IReadOnlyList<PhysicalSchemaOperation> operations)
     {

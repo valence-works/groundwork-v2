@@ -124,6 +124,50 @@ operation identity; `plan --output json` reports the spelling that authorizes it
 `authorization.destructiveOperationsRequired`. Where a plan would let one address name two
 operations, that address is withdrawn and only the exact identity authorizes them.
 
+### Opt-in interop reporting views
+
+Groundwork can create one provider-native reporting view for a declared unit. Opt in
+explicitly in the fluent declaration. See [ADR 0004](../adr/0004-relational-interop-views) for the
+decision and provider boundaries:
+
+```csharp
+var orders = Groundwork.Kernel.StorageUnit
+    .Declare("orders", "orders")
+    .String("id", 32, column => column.Required())
+    .Decimal("total", 18, 2, column => column.Required())
+    .Key("id")
+    .InteropView("reporting_orders")
+    .Build();
+```
+
+The canonical schema spelling is `"interopView": "reporting_orders"`; source-generated
+`[GwTable]` declarations use the `InteropView` property. The view is a provider-owned schema
+operation, included in the plan fingerprint and applied ledger. Create, replacement, and removal
+are protected operations: `connection.Schema.Apply` refuses them, while the deployment tool admits
+them only with the exact current plan and operation authorization.
+
+The view exposes application columns, omitting Groundwork's internal columns. A scoped unit's view
+also exposes `__groundwork_scope` and therefore contains all scopes. It is not an authorization
+boundary; grant the view only to database principals allowed to read across scopes. A view name
+must be a valid physical identifier and cannot collide with a source table, another storage object,
+or another declared view. The portability refusal is `GW-PORT-015`.
+
+Relational provider projections are:
+
+| Provider | View representation |
+| --- | --- |
+| SQLite | Decimal text is projected with `CAST(... AS NUMERIC)`; SQLite's dynamic numeric typing still applies |
+| PostgreSQL | UTC tick `bigint` timestamps are projected as `timestamptz` at microsecond precision |
+| SQL Server | `datetimeoffset(7)` and decimal columns are selected in their native types |
+| MySQL/MariaDB | UTC tick `bigint` timestamps are projected as `DATETIME(6)` at microsecond precision |
+
+The portable table remains authoritative for exact runtime values. PostgreSQL and MySQL/MariaDB
+report timestamps at microsecond precision; SQL Server's `datetimeoffset(7)` retains 100-nanosecond
+ticks. Relational view DDL uses the schema operation transaction, but MySQL/MariaDB may implicitly commit DDL, so a failed
+multi-operation apply may require a subsequent plan to reconcile physical work. MongoDB and the
+in-memory testing provider reject interop views before provider mutation because neither has one
+stable relational catalog object for this contract.
+
 ---
 
 ## Evolving a deployed schema

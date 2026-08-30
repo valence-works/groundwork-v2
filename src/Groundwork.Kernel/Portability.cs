@@ -301,6 +301,17 @@ public static class PortabilityValidator
         ICollection<PortabilityRefusal> diagnostics)
     {
         ValidateIdentifier(unit.Name, "name", diagnostics);
+        if (unit.InteropView is { } interopView)
+        {
+            ValidateIdentifier(interopView.Name, "interopView.name", diagnostics);
+            if (string.Equals(unit.Name, interopView.Name, StringComparison.OrdinalIgnoreCase))
+            {
+                diagnostics.Add(new(
+                    "GW-PORT-015",
+                    $"Interop view '{interopView.Name}' collides with storage unit '{unit.Name}' under provider identifier comparison.",
+                    "interopView.name"));
+            }
+        }
 
         var declaredPhysicalNames = columns
             .Where(column => column is not null)

@@ -116,6 +116,8 @@ public static class GroundworkSchemaCanonical
             // before this member existed keeps the exact fingerprint it was emitted under.
             if (table.ForeignColumns != SchemaForeignColumns.Refuse)
                 builder.Append(",\"foreignColumns\":").Append(String(table.ForeignColumns.ToString()));
+            if (table.InteropView is { } interopView)
+                builder.Append(",\"interopView\":").Append(String(interopView));
             if (table.Evolution is { IsDefault: false } evolution)
                 Append(builder, evolution);
             builder.Append('}');
@@ -219,7 +221,8 @@ public static class GroundworkSchemaCanonical
                 OptionalString(tableElement, "id"),
                 EnumValueOrDefault(tableElement, "foreignColumns", SchemaForeignColumns.Refuse),
                 ReadReferences(tableElement),
-                ReadChecks(tableElement, columns));
+                ReadChecks(tableElement, columns),
+                OptionalString(tableElement, "interopView"));
             tables.Add(table with { Evolution = ReadEvolution(tableElement) });
         }
 

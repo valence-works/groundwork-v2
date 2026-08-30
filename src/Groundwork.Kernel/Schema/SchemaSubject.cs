@@ -135,6 +135,9 @@ public sealed class SchemaSubject
                     .OrderBy(canonical => canonical, StringComparer.Ordinal),
                 .. (definition.AggregationProfiles ?? []).Select(CanonicalAggregationProfile)
                     .OrderBy(canonical => canonical, StringComparer.Ordinal),
+                .. definition.InteropView is null
+                    ? (string?[])[]
+                    : [$"interop-view:{definition.InteropView.Name}:scope-column"],
                 Evolution.IsDestructive ? "destructive" : "safe",
                 Evolution.SemanticMigrationId,
                 // Appended only when set, so an already-deployed subject keeps the exact
@@ -248,6 +251,18 @@ public sealed class SchemaSubject
             }
         }
 
+        var views = new Dictionary<string, StorageUnit>(StringComparer.OrdinalIgnoreCase);
+        foreach (var unit in units.Where(unit => unit.InteropView is not null))
+        {
+            var name = unit.InteropView!.Name;
+            if (names.TryGetValue(name, out var owner) || !views.TryAdd(name, unit))
+            {
+                throw new ArgumentException(
+                    $"Schema manifest interop view '{name}' collides with another storage object under provider identifier comparison.",
+                    parameterName);
+            }
+        }
+
         var ledgers = new Dictionary<string, (string Name, StorageUnit Unit)>(StringComparer.OrdinalIgnoreCase);
         foreach (var unit in units)
         {
@@ -267,6 +282,12 @@ public sealed class SchemaSubject
                 {
                     throw new ArgumentException(
                         $"Schema manifest ledger '{declaration}' collides with storage unit '{owner.Name}' under provider identifier comparison.",
+                        parameterName);
+                }
+                if (views.ContainsKey(declaration))
+                {
+                    throw new ArgumentException(
+                        $"Schema manifest ledger '{declaration}' collides with interop view '{declaration}' under provider identifier comparison.",
                         parameterName);
                 }
             }
@@ -429,6 +450,7 @@ public sealed class SchemaSubject
             };
         }).ToImmutableArray(),
         AggregationProfiles = (source.AggregationProfiles ?? []).Select(Snapshot).ToImmutableArray(),
+        InteropView = source.InteropView is null ? null : new InteropViewDeclaration(source.InteropView.Name),
         Scope = source.Scope,
         ForeignColumns = source.ForeignColumns,
         AppendIdempotency = source.AppendIdempotency is null ? null : source.AppendIdempotency with { },
@@ -599,6 +621,12 @@ public sealed class ProviderPhysicalSchemaDefinition : IEquatable<ProviderPhysic
     public override bool Equals(object? obj) => Equals(obj as ProviderPhysicalSchemaDefinition);
 
     public override int GetHashCode() => HashCode.Combine(ProviderName, SubjectId, Kind, SubjectIdentity, CanonicalDefinition);
+}
+
+/// <summary>Stable cross-layer names for provider definitions with public schema meaning.</summary>
+public static class ProviderPhysicalSchemaDefinitionKinds
+{
+    public const string InteropView = "interop-view";
 }
 
 /// <summary>Stable provider/subject identity used as the compare-and-swap history key.</summary>

@@ -402,6 +402,11 @@ public sealed class PostgreSqlDialect : RelationalDialect
         DbTransaction transaction,
         ProviderPhysicalSchemaDefinition definition)
     {
+        if (string.Equals(definition.Kind, RelationalInteropViewDefinition.Kind, StringComparison.Ordinal))
+        {
+            base.ApplyProviderDefinition(connection, transaction, definition);
+            return;
+        }
         if (!string.Equals(definition.Kind, RelationalDialect.SearchKeyDefinitionKind, StringComparison.Ordinal))
             throw new InvalidOperationException($"Unsupported PostgreSQL provider definition '{definition.Kind}'.");
         RelationalSearchKeyCatalog.Apply(
@@ -417,6 +422,11 @@ public sealed class PostgreSqlDialect : RelationalDialect
         ProviderPhysicalSchemaDefinition definition)
     {
         ArgumentNullException.ThrowIfNull(definition);
+        if (string.Equals(definition.Kind, RelationalInteropViewDefinition.Kind, StringComparison.Ordinal))
+        {
+            base.DropProviderDefinition(connection, transaction, definition);
+            return;
+        }
         if (!string.Equals(definition.Kind, RelationalDialect.SearchKeyDefinitionKind, StringComparison.Ordinal))
             throw new InvalidOperationException($"Unsupported PostgreSQL provider definition '{definition.Kind}'.");
         RelationalSearchKeyCatalog.Drop(
@@ -425,6 +435,33 @@ public sealed class PostgreSqlDialect : RelationalDialect
             definition,
             "DELETE FROM \"__groundwork_search_key_algorithms\" WHERE \"table_name\"=@table AND \"column_name\"=@column;");
     }
+
+    protected override string RenderInteropViewExpression(ColumnDefinition column) =>
+        column.Type == PortableType.DateTimeOffset
+            ? $"TIMESTAMPTZ '1970-01-01 00:00:00+00' + FLOOR(({QuoteIdentifier(column.Name)} - 621355968000000000) / 10.0) * INTERVAL '1 microsecond'"
+            : base.RenderInteropViewExpression(column);
+
+    protected override bool SupportsInteropViewDefinitionInspection => true;
+
+    protected override string? ReadInteropViewBlockingObject(
+        DbConnection connection,
+        DbTransaction? transaction,
+        string viewName) => ReadCatalogText(
+            connection,
+            transaction,
+            "SELECT c.relkind::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND c.relname=@view AND c.relkind<>'v' LIMIT 1;",
+            "view",
+            viewName);
+
+    protected override string? ReadInteropViewDefinition(
+        DbConnection connection,
+        DbTransaction? transaction,
+        string viewName) => ReadCatalogText(
+            connection,
+            transaction,
+            "SELECT pg_get_viewdef(c.oid, true) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND c.relkind='v' AND c.relname=@view;",
+            "view",
+            viewName);
 
     public override IReadOnlyDictionary<string, string> ReadDerivedSearchKeyAlgorithms(
         DbConnection connection,
@@ -481,7 +518,13 @@ public sealed class PostgreSqlDialect : RelationalDialect
 
     public override bool TableExists(DbConnection connection, DbTransaction? transaction, string table)
     {
-        using var command = Command(connection, transaction, "SELECT to_regclass(@table) IS NOT NULL;");
+        using var command = Command(connection, transaction, """
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_catalog.pg_class
+                WHERE oid = to_regclass(@table)
+                  AND relkind IN ('r', 'p'));
+            """);
         Add(command, "table", table);
         return Convert.ToBoolean(command.ExecuteScalar(), CultureInfo.InvariantCulture);
     }

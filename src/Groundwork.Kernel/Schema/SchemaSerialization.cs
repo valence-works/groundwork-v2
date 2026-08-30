@@ -70,6 +70,9 @@ public static partial class PhysicalSchemaAppliedStateSerializer
             string.Equals(property.Name, nameof(StorageUnit.CheckConstraints), StringComparison.OrdinalIgnoreCase));
         checks.ShouldSerialize = static (_, value) =>
             value is IReadOnlyList<CheckConstraintDefinition> { Count: > 0 };
+        var interopView = typeInfo.Properties.Single(property =>
+            string.Equals(property.Name, nameof(StorageUnit.InteropView), StringComparison.OrdinalIgnoreCase));
+        interopView.ShouldSerialize = static (_, value) => value is InteropViewDeclaration;
     }
 
     public static string Serialize(PhysicalSchemaAppliedState state)

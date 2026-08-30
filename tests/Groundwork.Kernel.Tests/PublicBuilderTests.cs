@@ -56,4 +56,18 @@ public sealed class PublicBuilderTests
         Assert.Equal(AggregationTimeBucketKind.FixedUtc, group.Kind);
         Assert.Equal(TimeSpan.FromHours(1), group.Width);
     }
+
+    [Fact]
+    public void Kernel_builder_opts_a_unit_into_one_named_interop_view()
+    {
+        var unit = Groundwork.Kernel.StorageUnit
+            .Declare("orders", "orders")
+            .String("id", 32, column => column.Required())
+            .Decimal("total", 18, 2, column => column.Required())
+            .Key("id")
+            .InteropView("reporting_orders")
+            .Build();
+
+        Assert.Equal("reporting_orders", unit.InteropView!.Name);
+    }
 }

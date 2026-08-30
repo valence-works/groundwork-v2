@@ -94,6 +94,11 @@ internal sealed class SqlServerDialect : RelationalDialect
         DbTransaction transaction,
         ProviderPhysicalSchemaDefinition definition)
     {
+        if (string.Equals(definition.Kind, RelationalInteropViewDefinition.Kind, StringComparison.Ordinal))
+        {
+            base.ApplyProviderDefinition(connection, transaction, definition);
+            return;
+        }
         if (string.Equals(definition.Kind, RelationalDialect.SearchKeyDefinitionKind, StringComparison.Ordinal))
         {
             RelationalSearchKeyCatalog.Apply(
@@ -141,6 +146,11 @@ internal sealed class SqlServerDialect : RelationalDialect
         ProviderPhysicalSchemaDefinition definition)
     {
         ArgumentNullException.ThrowIfNull(definition);
+        if (string.Equals(definition.Kind, RelationalInteropViewDefinition.Kind, StringComparison.Ordinal))
+        {
+            base.DropProviderDefinition(connection, transaction, definition);
+            return;
+        }
         if (string.Equals(definition.Kind, RelationalDialect.SearchKeyDefinitionKind, StringComparison.Ordinal))
         {
             RelationalSearchKeyCatalog.Drop(
@@ -160,6 +170,28 @@ internal sealed class SqlServerDialect : RelationalDialect
             $"DROP TYPE [dbo].{SqlServerProviderConnection.QuoteIdentifier(definition.SubjectIdentity)};";
         command.ExecuteNonQuery();
     }
+
+    protected override bool SupportsInteropViewDefinitionInspection => true;
+
+    protected override string? ReadInteropViewBlockingObject(
+        DbConnection connection,
+        DbTransaction? transaction,
+        string viewName) => ReadCatalogText(
+            connection,
+            transaction,
+            "SELECT TOP (1) type_desc FROM sys.objects WHERE schema_id=SCHEMA_ID() AND name=@view AND type<>'V';",
+            "view",
+            viewName);
+
+    protected override string? ReadInteropViewDefinition(
+        DbConnection connection,
+        DbTransaction? transaction,
+        string viewName) => ReadCatalogText(
+            connection,
+            transaction,
+            "SELECT OBJECT_DEFINITION(OBJECT_ID(@view, 'V'));",
+            "view",
+            viewName);
 
     private static int? ReadNullableInt(JsonElement element, string name) =>
         element.TryGetProperty(name, out var property) && property.ValueKind != JsonValueKind.Null
@@ -642,8 +674,11 @@ internal sealed class SqlServerDialect : RelationalDialect
     public override string? BackfillColumnSql(string table, ColumnDefinition column) =>
         column.Default is null ? null : $"UPDATE {QuoteIdentifier(table)} SET {QuoteIdentifier(column.Name)}={MapDefault(column)} WHERE {QuoteIdentifier(column.Name)} IS NULL;";
 
-    public override void ValidateTarget(DbConnection connection, DbTransaction? transaction, PhysicalSchemaTarget target) =>
+    public override void ValidateTarget(DbConnection connection, DbTransaction? transaction, PhysicalSchemaTarget target)
+    {
+        base.ValidateTarget(connection, transaction, target);
         SqlServerIndexKeyBudgetValidator.Validate(target.Subject.Definition);
+    }
 
     internal static string PhysicalIndexName(string table, string logicalName) =>
         SqlServerPhysicalName.Normalize(

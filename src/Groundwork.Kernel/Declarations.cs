@@ -513,6 +513,12 @@ public sealed record StorageUnit
     public IReadOnlyList<CheckConstraintDefinition> CheckConstraints { get; init; } = [];
     /// <summary>Named, closed aggregation shapes available to callers of this unit.</summary>
     public IReadOnlyList<AggregationProfile> AggregationProfiles { get; init; } = [];
+    /// <summary>
+    /// Optional read-side view whose provider-native columns use idiomatic reporting types.
+    /// Scoped units expose the provider-owned scope column so every row remains attributable;
+    /// database grants, not Groundwork sessions, must enforce who may read that cross-scope view.
+    /// </summary>
+    public InteropViewDeclaration? InteropView { get; init; }
     public ScopePolicy Scope { get; init; } = ScopePolicy.Global;
     /// <summary>Optional durable idempotency contract for batch appends.</summary>
     public AppendIdempotencyDeclaration? AppendIdempotency { get; init; }
@@ -544,4 +550,15 @@ public sealed record StorageUnit
     /// </remarks>
     [JsonIgnore]
     public ForeignColumnPolicy ForeignColumns { get; init; } = ForeignColumnPolicy.Refuse;
+}
+
+/// <summary>Opts one storage unit into a named provider-native reporting view.</summary>
+public sealed record InteropViewDeclaration
+{
+    public InteropViewDeclaration(string name) =>
+        Name = string.IsNullOrWhiteSpace(name)
+            ? throw new ArgumentException("An interop view requires a non-empty name.", nameof(name))
+            : name;
+
+    public string Name { get; }
 }

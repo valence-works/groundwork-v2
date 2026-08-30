@@ -18,6 +18,21 @@ public sealed class MongoSchemaExecutorTests : IDisposable
 {
     private const string MigrationId = "2026-08-widen-total";
 
+    [Fact]
+    public void Mongo_target_compilation_refuses_relational_interop_views_before_catalog_access()
+    {
+        var unit = StorageUnit.Declare("mongo-interop", "mongo_interop")
+            .String("id", 64, column => column.Required())
+            .Key("id")
+            .InteropView("reporting_mongo_interop")
+            .Build();
+
+        var refusal = Assert.Throws<NotSupportedException>(() => MongoSchemaTargets.Compile(unit));
+
+        Assert.Contains("separate physical collections", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("relational providers", refusal.Message, StringComparison.Ordinal);
+    }
+
     /// <summary>
     /// MongoDB was left out of expand–contract because it kept no applied schema ledger. It has one
     /// now, and both the schema ledger and the data-migration ledger it reads are MongoDB's own, so

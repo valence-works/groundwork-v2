@@ -288,6 +288,9 @@ public sealed class SchemaGenerator : ISourceGenerator
         var token = StringNamedArgument(tableAttribute, "ConcurrencyToken");
         if (token is not null && IsEmpty(context, tableAttribute, tableName, "the concurrency token", token))
             return null;
+        var interopView = StringNamedArgument(tableAttribute, "InteropView");
+        if (interopView is not null && IsEmpty(context, tableAttribute, tableName, "the interop view", interopView))
+            return null;
 
         return new SchemaTable(
             tableName,
@@ -302,7 +305,8 @@ public sealed class SchemaGenerator : ISourceGenerator
             ReadIdempotency(context, symbol, tableName, "GwRetentionIdempotencyAttribute"),
             aggregations,
             StringNamedArgument(tableAttribute, "Id"),
-            EnumNamedArgument(tableAttribute, "ForeignColumns", SchemaForeignColumns.Refuse));
+            EnumNamedArgument(tableAttribute, "ForeignColumns", SchemaForeignColumns.Refuse),
+            interopView: interopView);
     }
 
     private static SchemaRetention? ReadRetention(
@@ -1164,6 +1168,8 @@ public sealed class SchemaGenerator : ISourceGenerator
         }
         if (table.Scope == SchemaScope.Scoped)
             builder.AppendLine("            .Scoped()");
+        if (table.InteropView is { } interopView)
+            builder.Append("            .InteropView(").Append(Literal(interopView)).AppendLine(")");
         if (table.ForeignColumns == SchemaForeignColumns.TolerateDatabaseSupplied)
             builder.AppendLine("            .TolerateForeignColumns()");
         if (table.Concurrency is { } concurrency)

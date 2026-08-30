@@ -84,6 +84,10 @@ public static class SchemaChangeMapping
         // An index taken out of the way of a column alteration is put back by the same plan, so it
         // is a rebuild rather than a removal.
         DropPhysicalIndexOperation { IsRebuild: true } => SchemaChangeKind.RebuildIndex,
+        ApplyProviderPhysicalSchemaDefinitionOperation { Definition.Kind: ProviderPhysicalSchemaDefinitionKinds.InteropView } =>
+            SchemaChangeKind.CreateInteropView,
+        DropProviderPhysicalSchemaDefinitionOperation { Definition.Kind: ProviderPhysicalSchemaDefinitionKinds.InteropView } =>
+            SchemaChangeKind.DropInteropView,
         _ => operation.Kind switch
         {
             PhysicalSchemaOperationKind.CreatePrimaryStorage => SchemaChangeKind.CreateStorageUnit,
@@ -105,6 +109,8 @@ public static class SchemaChangeMapping
             // introduced. It remains a display-vocabulary compromise; runtime admission uses the
             // provider's kernel result rather than this mapping.
             PhysicalSchemaOperationKind.ApplyProviderDefinition => SchemaChangeKind.AddDerivedColumn,
+            PhysicalSchemaOperationKind.DropProviderDefinition => throw new ArgumentOutOfRangeException(
+                nameof(operation), operation.Kind, "No public schema-change description is defined for this provider definition."),
             _ => throw new ArgumentOutOfRangeException(
                 nameof(operation),
                 operation.Kind,

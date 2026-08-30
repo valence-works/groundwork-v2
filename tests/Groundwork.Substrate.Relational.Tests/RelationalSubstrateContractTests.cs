@@ -92,6 +92,27 @@ public sealed class RelationalSubstrateContractTests
     }
 
     [Fact]
+    public void Shared_interop_view_emission_refuses_before_sql_when_catalog_inspection_is_not_supported()
+    {
+        var unit = StorageUnit.Declare("tickets", "tickets")
+            .Int64("id", column => column.Required())
+            .Key("id")
+            .InteropView("reporting_tickets")
+            .Build();
+        var definition = Assert.IsType<ProviderPhysicalSchemaDefinition>(
+            RelationalInteropViewDefinition.Create("stub", unit));
+        using var connection = new TrackingConnection();
+        connection.Open();
+        using var transaction = connection.BeginTransaction();
+
+        var failure = Assert.Throws<InvalidOperationException>(() =>
+            new StubDialect().ApplyProviderDefinition(connection, transaction, definition));
+
+        Assert.Contains("cannot inspect", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, connection.CommandCalls);
+    }
+
+    [Fact]
     public void Write_shape_validates_members_and_snapshots_inputs()
     {
         var columns = new List<RelationalWriteColumn>

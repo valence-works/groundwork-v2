@@ -95,6 +95,8 @@ public sealed class StorageDeclarationBuilder
 
     public StorageDeclarationBuilder Scoped() => Wrap(inner.Scoped());
 
+    public StorageDeclarationBuilder InteropView(string name) => Wrap(inner.InteropView(name));
+
     public StorageDeclarationBuilder UniqueIndex(string name, params string[] columns) => Wrap(inner.UniqueIndex(name, columns));
 
     public StorageDeclarationBuilder UniqueIndex(string name, Action<IndexBuilder> configure) =>

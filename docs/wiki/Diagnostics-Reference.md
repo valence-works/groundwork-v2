@@ -44,7 +44,8 @@ Raised by `PortabilityValidator`, builders, and providers **before schema I/O**.
 | `GW-PORT-011` | Duplicate physical index name | Use unique names |
 | `GW-PORT-012` | A `Double` column used as a key, index, or aggregation group-by column, or a `Json` column used as a key or aggregation group-by column | Declare a comparable portable scalar or binary column for a value you compare; keep `Double` and `Json` for values you only store |
 | `GW-PORT-013` | A declared default's supplied CLR value is outside its `PortableType` domain (the diagnostic names the column, declared type, and supplied CLR type), or a `Double` default is outside the **defaultable** domain — non-finite, negative zero, or subnormal | Supply a default of the CLR type named by the column; for `Json`, use a JSON-compatible scalar/object/array graph and valid serialized JSON text for a top-level string; for `Double`, use a finite, normal value other than negative zero; a subnormal can still be written as a value |
-| `GW-PORT-014` | Locale sort-key declaration is invalid, or the host cannot provide real ICU collation | Declare a bounded String and positive `MaximumExpansionFactor`; disable invariant globalization and Windows NLS; pin ICU consistently across hosts |
+| `GW-PORT-014` | Locale sort-key declaration is invalid or the host cannot provide real ICU collation | Declare a bounded String and positive `MaximumExpansionFactor`; disable invariant globalization and Windows NLS and pin ICU consistently |
+| `GW-PORT-015` | An opt-in interop view name collides with a storage object under provider identifier comparison | Choose a valid unique `interopView` name distinct from every storage unit, ledger, and other view |
 
 ---
 

@@ -204,7 +204,10 @@ public static class GroundworkSchemaCli
                     return (Target: target, Inspection: inspection, Plan: plan, Readiness: readiness,
                         Authorization: Authorize(target, plan));
                 }).ToArray();
-                if (preflight.Any(item => !item.Inspection.IsAppliedSchemaValid || !item.Plan.IsApplicable))
+                if (preflight.Any(item =>
+                        !item.Plan.IsApplicable ||
+                        (!item.Inspection.IsAppliedSchemaValid &&
+                         !IsRepairableProviderDefinitionDrift(item.Inspection, item.Plan))))
                 {
                     targetReports.AddRange(preflight.Select(item => FromPlan(
                         item.Target,
@@ -331,7 +334,9 @@ public static class GroundworkSchemaCli
                 // A target whose schema is applied still has pending work when a data migration was
                 // interrupted, so its resume is reported as pending rather than as ready.
                 pending |= dataMigrations.Any(report => report.State == SchemaToolDataMigrationReport.PendingState);
-                invalid |= !inspection.IsAppliedSchemaValid || !plan.IsApplicable;
+                invalid |= !plan.IsApplicable ||
+                           (!inspection.IsAppliedSchemaValid &&
+                            !IsRepairableProviderDefinitionDrift(inspection, plan));
                 targetReports.Add(FromPlan(target, plan, inspection, readiness: readiness) with
                 {
                     DataMigrations = dataMigrations
@@ -423,7 +428,8 @@ public static class GroundworkSchemaCli
         target.Fingerprint,
         authorizationRefusals?.Any() == true
             ? "authorization-required"
-            : !inspection.IsAppliedSchemaValid || !plan.IsApplicable
+            : !plan.IsApplicable ||
+              (!inspection.IsAppliedSchemaValid && !IsRepairableProviderDefinitionDrift(inspection, plan))
                 ? "blocked"
                 : plan.Operations.Length == 0 ? "ready" : "pending",
         PlanFingerprint(target, plan),
@@ -439,6 +445,16 @@ public static class GroundworkSchemaCli
         Warnings = (inspection.ToleratedDrift.IsDefault ? [] : inspection.ToleratedDrift)
             .Select(refusal => new SchemaVerificationError(refusal.Code, refusal.Message, refusal.Path)).ToArray()
     };
+
+    private static bool IsRepairableProviderDefinitionDrift(
+        PhysicalSchemaInspectionResult inspection,
+        PhysicalSchemaDiffPlan plan) =>
+        inspection.HasColumnDrift &&
+        inspection.ColumnDrift.All(refusal =>
+            string.Equals(refusal.Path, "provider", StringComparison.Ordinal)) &&
+        plan.Operations.Any(operation => operation.Kind is
+            PhysicalSchemaOperationKind.ApplyProviderDefinition or
+            PhysicalSchemaOperationKind.DropProviderDefinition);
 
     private static SchemaToolTargetReport FromApplication(
         PhysicalSchemaTarget target,

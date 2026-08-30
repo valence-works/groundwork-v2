@@ -27,6 +27,56 @@ shape because evolution is deployment-target metadata rather than part of a stor
 
 `apply` mutates nothing unless the invocation selects `--safe` or supplies an exact `--expected-plan` fingerprint. Safe mode refuses protected work. A destructive plan requires its current fingerprint plus every exact operation identity through `--allow-destructive`; semantic migrations require their exact IDs through `--allow-semantic`.
 
+### Opt-in interop reporting views
+
+A table may opt into one provider-native reporting view by naming it in the canonical
+schema. The design and provider boundaries are recorded in [ADR 0004](adr/0004-relational-interop-views.md):
+
+```json
+{
+  "tables": [{
+    "name": "orders",
+    "interopView": "reporting_orders",
+    "columns": [
+      { "name": "id", "type": "String", "nullable": false, "length": 32 },
+      { "name": "total", "type": "Decimal", "nullable": false, "precision": 18, "scale": 2 }
+    ],
+    "key": ["id"],
+    "indexes": []
+  }]
+}
+```
+
+The fluent equivalent is `.InteropView("reporting_orders")`; source-generated `[GwTable]`
+declarations use `InteropView = "reporting_orders"`. The view is a separate provider-owned
+schema operation, appears in the plan and JSON report, and is included in the applied target
+fingerprint. Creating, replacing, or removing it requires deployment-tool authorization for the
+exact current plan. Runtime `connection.Schema.Apply` refuses this protected work; use `groundwork apply`
+with the plan fingerprint and operation identity shown by `plan --output json`.
+
+The view exposes declared application columns and omits Groundwork's internal columns. For a
+scoped table it also exposes `__groundwork_scope`, so the view contains every scope's rows. It is
+not a security boundary: grant access to the view only to database principals that may read all
+scopes. View names must be valid provider identifiers and must not collide with a source table,
+another storage object, or another declared view; such declarations fail before schema I/O with
+`GW-PORT-015`.
+
+The shipped relational providers use these projections:
+
+| Provider | Reporting projection | Precision/transaction note |
+| --- | --- | --- |
+| SQLite | Decimal `TEXT` is cast to `NUMERIC`; other values retain their declared projection | SQLite's dynamic numeric typing applies; view casts do not make decimal precision constraints stricter |
+| PostgreSQL | UTC tick `bigint` timestamps are computed as `timestamptz`; decimal `numeric` remains native | `timestamptz` has microsecond precision, so the view is not a full sub-microsecond round trip; DDL is transactional |
+| SQL Server | Native `datetimeoffset(7)` and `decimal` values are selected directly | DDL runs in the shared schema transaction |
+| MySQL/MariaDB | UTC tick `bigint` timestamps are computed as `DATETIME(6)`; decimal `decimal(p,s)` remains native | Timestamp output is microsecond precision, and server DDL may implicitly commit; do not assume rollback of a failed multi-operation batch |
+
+MongoDB and `Groundwork.Testing`'s in-memory provider reject a declared interop view rather than
+claiming a view was deployed. `plan`, `validate`, `status`, and `adopt` must therefore be used
+against a relational provider for this feature. Base-table drift comparison considers only the
+declared table; the interop view is inspected as its own provider-owned definition.
+Inspection checks both its declared output columns and the canonical-definition marker embedded in
+the live view text, so a same-shaped replacement is still reported as drift.
+
 Provider packages implement `ISchemaToolProviderSessionFactory`. The tool discovers loaded factories and can load a provider plug-in explicitly with `--provider-assembly`; `--connection` and `--database` are passed to the factory without being echoed in reports. Hosts can instead inject an `ISchemaToolProviderSession` resolver directly.
 The shipped aliases are `sqlite`, `mysql`, `postgresql`, `sqlserver`, and `mongodb`; each uses the
 same canonical document, authorization vocabulary, plan fingerprint, and report format.
