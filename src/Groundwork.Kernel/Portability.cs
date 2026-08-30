@@ -142,7 +142,7 @@ public static class PortabilityValidator
         ValidateUniqueNullability(indexes, byName, diagnostics);
         ValidateDecimalShape(columns, diagnostics);
         ValidatePortableDefaultClrTypes(columns, diagnostics);
-        ValidateStorageOnlyDouble(unit, columns, byName, diagnostics);
+        ValidateStorageOnlyComparisons(unit, columns, byName, diagnostics);
         ValidateBoundedIndexKeys(indexes, byName, diagnostics);
         ValidateIndexBudget(indexes, byName, diagnostics);
         ValidateGeneration(unit, columns, diagnostics);
@@ -610,35 +610,49 @@ public static class PortabilityValidator
     }
 
     /// <summary>
-    /// Keeps <see cref="PortableType.Double"/> storage-only. A binary64 column round-trips
-    /// bit-for-bit on every supported store, so it is declarable; it never becomes a comparison
-    /// surface, so every structural position that compares values refuses it. The declared
+    /// Keeps <see cref="PortableType.Double"/> and <see cref="PortableType.Json"/> storage-only.
+    /// Both types are declarable but never become a comparison surface, so every structural
+    /// position that compares values refuses them. JSON indexes retain their declaration-time
+    /// GW-DECL-INDEX-003 diagnostic and are deliberately not repeated here. The declared Double
     /// default is held to a narrower domain still: a value only reaches the store through DDL,
     /// where SQL Server's float literal parser flushes a subnormal to zero.
     /// </summary>
-    private static void ValidateStorageOnlyDouble(
+    private static void ValidateStorageOnlyComparisons(
         StorageUnit unit,
         IReadOnlyList<ColumnDefinition> columns,
         IReadOnlyDictionary<string, ColumnDefinition> byName,
         ICollection<PortabilityRefusal> diagnostics)
     {
-        void RefuseComparison(string column, string position, string path) =>
-            diagnostics.Add(new(
-                "GW-PORT-012",
-                $"Double column '{column}' cannot be {position}. Binary floating point is " +
-                "storage-only: it has no comparison semantics that hold across the supported " +
-                "stores. Declare Decimal or Int64 for a value you compare, and keep Double for " +
-                "a value you only store.",
-                path));
+        void RefuseComparison(string column, PortableType type, string position, string path)
+        {
+            var message = type switch
+            {
+                PortableType.Double =>
+                    $"Double column '{column}' cannot be {position}. Binary floating point is " +
+                    "storage-only: it has no comparison semantics that hold across the supported " +
+                    "stores. Declare Decimal or Int64 for a value you compare, and keep Double for " +
+                    "a value you only store.",
+                PortableType.Json =>
+                    $"Json column '{column}' cannot be {position}. JSON is storage-only: equality " +
+                    "and property ordering differ across the supported stores. Declare a portable " +
+                    "scalar or binary column for a value you compare, and keep Json for a value you " +
+                    "only store.",
+                _ => throw new ArgumentOutOfRangeException(nameof(type), type, null)
+            };
+            diagnostics.Add(new("GW-PORT-012", message, path));
+        }
 
-        bool IsDouble(string? name) =>
-            name is not null && byName.TryGetValue(name, out var column) && column.Type == PortableType.Double;
+        PortableType? NonComparableType(string? name) =>
+            name is not null && byName.TryGetValue(name, out var column) &&
+            column.Type is PortableType.Double or PortableType.Json
+                ? column.Type
+                : null;
 
         var keyColumns = unit.Key?.Columns ?? [];
         for (var index = 0; index < keyColumns.Count; index++)
         {
-            if (IsDouble(keyColumns[index]))
-                RefuseComparison(keyColumns[index], "a key column", $"key.columns[{index}]");
+            if (NonComparableType(keyColumns[index]) is { } type)
+                RefuseComparison(keyColumns[index], type, "a key column", $"key.columns[{index}]");
         }
 
         foreach (var index in (unit.Indexes ?? []).Where(index => index is not null))
@@ -647,21 +661,23 @@ public static class PortabilityValidator
             for (var position = 0; position < indexColumns.Count; position++)
             {
                 var name = indexColumns[position]?.Column;
-                if (IsDouble(name))
-                    RefuseComparison(name!, $"an index column of '{index.Name}'", $"indexes.{index.Name}.columns[{position}]");
+                // JSON index declarations already produce GW-DECL-INDEX-003 at the shared
+                // declaration boundary. Keep GW-PORT-012 for Double indexes for compatibility.
+                if (NonComparableType(name) is PortableType.Double)
+                    RefuseComparison(name!, PortableType.Double, $"an index column of '{index.Name}'", $"indexes.{index.Name}.columns[{position}]");
             }
         }
 
         foreach (var profile in (unit.AggregationProfiles ?? []).Where(profile => profile is not null))
         {
-            foreach (var group in AggregationGrouping.EffectiveGroups(profile)
-                .OfType<AggregationGroup.Column>()
-                .Where(group => IsDouble(group.Alias)))
+            foreach (var group in AggregationGrouping.EffectiveGroups(profile).OfType<AggregationGroup.Column>())
             {
-                RefuseComparison(
-                    group.Alias,
-                    $"a group-by column of aggregation profile '{profile.Name}'",
-                    $"aggregationProfiles.{profile.Name}.groupByColumns");
+                if (NonComparableType(group.Alias) is { } type)
+                    RefuseComparison(
+                        group.Alias,
+                        type,
+                        $"a group-by column of aggregation profile '{profile.Name}'",
+                        $"aggregationProfiles.{profile.Name}.groupByColumns");
             }
         }
 

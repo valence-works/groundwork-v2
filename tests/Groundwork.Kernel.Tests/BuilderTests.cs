@@ -402,10 +402,48 @@ public sealed class BuilderTests
             .UniqueIndex("by_payload", "payload")
             .Build());
 
-        Assert.All(new[] { regular, unique }, error => Assert.Contains(
-            error.Diagnostics,
-            diagnostic => diagnostic.Code == "GW-DECL-INDEX-003" &&
-                diagnostic.Path == "indexes.by_payload.columns[0]"));
+        Assert.All(new[] { regular, unique }, error =>
+        {
+            Assert.Contains(
+                error.Diagnostics,
+                diagnostic => diagnostic.Code == "GW-DECL-INDEX-003" &&
+                    diagnostic.Path == "indexes.by_payload.columns[0]");
+            Assert.DoesNotContain(error.Diagnostics, diagnostic => diagnostic.Code == "GW-PORT-012");
+        });
+    }
+
+    [Fact]
+    public void Fluent_build_refuses_portable_json_as_a_key_column()
+    {
+        var exception = Assert.Throws<StorageDeclarationException>(() => Groundwork.Records.StorageUnit
+            .Declare("bad-json-key", "bad_json_key")
+            .Json("payload")
+            .Key("payload")
+            .Build());
+
+        var diagnostic = Assert.Single(exception.Diagnostics, item => item.Code == "GW-PORT-012");
+        Assert.Equal("key.columns[0]", diagnostic.Path);
+        Assert.Contains("Json column 'payload'", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains("a key column", diagnostic.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Fluent_build_refuses_portable_json_as_an_aggregation_group_by_column()
+    {
+        var exception = Assert.Throws<StorageDeclarationException>(() => Groundwork.Records.StorageUnit
+            .Declare("bad-json-group", "bad_json_group")
+            .Guid("id", column => column.Required())
+            .Json("payload")
+            .Key("id")
+            .Aggregate("by_payload", aggregation => aggregation
+                .GroupBy("payload")
+                .Count("rows"))
+            .Build());
+
+        var diagnostic = Assert.Single(exception.Diagnostics, item => item.Code == "GW-PORT-012");
+        Assert.Equal("aggregationProfiles.by_payload.groupByColumns", diagnostic.Path);
+        Assert.Contains("Json column 'payload'", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains("a group-by column of aggregation profile 'by_payload'", diagnostic.Message, StringComparison.Ordinal);
     }
 
     [Fact]
