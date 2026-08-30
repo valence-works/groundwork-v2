@@ -1,3 +1,4 @@
+using System.Linq.Expressions;
 using Groundwork.Query.Linq;
 using Groundwork.Query.Model;
 using Xunit;
@@ -129,6 +130,54 @@ public sealed class TypedNavigationTests
     }
 
     [Fact]
+    public void Declared_target_date_part_comparisons_lower_each_operator_to_exact_utc_bounds()
+    {
+        var year = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var date = new DateTimeOffset(2026, 1, 2, 0, 0, 0, TimeSpan.Zero);
+        var yearCases = new (Expression<Func<OrderRow, bool>> Expression, CompareOp Operation)[]
+        {
+            (order => order.Customer.CreatedAt.Year == 2026, CompareOp.Equal),
+            (order => order.Customer.CreatedAt.Year != 2026, CompareOp.NotEqual),
+            (order => order.Customer.CreatedAt.Year < 2026, CompareOp.LessThan),
+            (order => order.Customer.CreatedAt.Year <= 2026, CompareOp.LessThanOrEqual),
+            (order => order.Customer.CreatedAt.Year > 2026, CompareOp.GreaterThan),
+            (order => order.Customer.CreatedAt.Year >= 2026, CompareOp.GreaterThanOrEqual),
+            (order => 2026 == order.Customer.CreatedAt.Year, CompareOp.Equal),
+            (order => 2026 != order.Customer.CreatedAt.Year, CompareOp.NotEqual),
+            (order => 2026 < order.Customer.CreatedAt.Year, CompareOp.GreaterThan),
+            (order => 2026 <= order.Customer.CreatedAt.Year, CompareOp.GreaterThanOrEqual),
+            (order => 2026 > order.Customer.CreatedAt.Year, CompareOp.LessThan),
+            (order => 2026 >= order.Customer.CreatedAt.Year, CompareOp.LessThanOrEqual)
+        };
+        var dateCases = new (Expression<Func<OrderRow, bool>> Expression, CompareOp Operation)[]
+        {
+            (order => order.Customer.CreatedAt.Date == new DateTime(2026, 1, 2), CompareOp.Equal),
+            (order => order.Customer.CreatedAt.Date != new DateTime(2026, 1, 2), CompareOp.NotEqual),
+            (order => order.Customer.CreatedAt.Date < new DateTime(2026, 1, 2), CompareOp.LessThan),
+            (order => order.Customer.CreatedAt.Date <= new DateTime(2026, 1, 2), CompareOp.LessThanOrEqual),
+            (order => order.Customer.CreatedAt.Date > new DateTime(2026, 1, 2), CompareOp.GreaterThan),
+            (order => order.Customer.CreatedAt.Date >= new DateTime(2026, 1, 2), CompareOp.GreaterThanOrEqual),
+            (order => new DateTime(2026, 1, 2) == order.Customer.CreatedAt.Date, CompareOp.Equal),
+            (order => new DateTime(2026, 1, 2) != order.Customer.CreatedAt.Date, CompareOp.NotEqual),
+            (order => new DateTime(2026, 1, 2) < order.Customer.CreatedAt.Date, CompareOp.GreaterThan),
+            (order => new DateTime(2026, 1, 2) <= order.Customer.CreatedAt.Date, CompareOp.GreaterThanOrEqual),
+            (order => new DateTime(2026, 1, 2) > order.Customer.CreatedAt.Date, CompareOp.LessThan),
+            (order => new DateTime(2026, 1, 2) >= order.Customer.CreatedAt.Date, CompareOp.LessThanOrEqual)
+        };
+
+        foreach (var (expression, operation) in yearCases)
+        {
+            var expected = ExpectedDatePart(Customers.Columns[nameof(CustomerRow.CreatedAt)], year, year.AddYears(1), operation);
+            Assert.Equal(expected.CanonicalForm, LowerTarget(expression).CanonicalForm);
+        }
+        foreach (var (expression, operation) in dateCases)
+        {
+            var expected = ExpectedDatePart(Customers.Columns[nameof(CustomerRow.CreatedAt)], date, date.AddDays(1), operation);
+            Assert.Equal(expected.CanonicalForm, LowerTarget(expression).CanonicalForm);
+        }
+    }
+
+    [Fact]
     public void Typed_navigation_preserves_the_join_shape_fingerprint_contract()
     {
         QueryRequest Request(string name, GwReference<OrderRow, CustomerRow> reference) =>
@@ -233,6 +282,24 @@ public sealed class TypedNavigationTests
         Predicate.And and => and.Terms.SelectMany(Columns),
         Predicate.Or or => or.Terms.SelectMany(Columns),
         _ => []
+    };
+
+    private static Predicate LowerTarget(Expression<Func<OrderRow, bool>> expression) =>
+        new GwQueryDatabase().Table(Orders).Join(CustomerReference).Where(expression).ToQueryRequest().Where;
+
+    private static Predicate ExpectedDatePart(ColumnRef column, DateTimeOffset lower, DateTimeOffset upper, CompareOp operation) => operation switch
+    {
+        CompareOp.Equal => new Predicate.Range(column, Bound.Inclusive(QueryConstant.Of(column, lower)), Bound.Exclusive(QueryConstant.Of(column, upper))),
+        CompareOp.NotEqual => new Predicate.Or(new Predicate[]
+        {
+            new Predicate.Range(column, Bound.Inclusive(QueryConstant.Of(column, upper)), null),
+            new Predicate.Range(column, null, Bound.Exclusive(QueryConstant.Of(column, lower)))
+        }),
+        CompareOp.LessThan => new Predicate.Range(column, null, Bound.Exclusive(QueryConstant.Of(column, lower))),
+        CompareOp.LessThanOrEqual => new Predicate.Range(column, null, Bound.Exclusive(QueryConstant.Of(column, upper))),
+        CompareOp.GreaterThan => new Predicate.Range(column, Bound.Inclusive(QueryConstant.Of(column, upper)), null),
+        CompareOp.GreaterThanOrEqual => new Predicate.Range(column, Bound.Inclusive(QueryConstant.Of(column, lower)), null),
+        _ => throw new ArgumentOutOfRangeException(nameof(operation))
     };
 
     private sealed class OrderRow

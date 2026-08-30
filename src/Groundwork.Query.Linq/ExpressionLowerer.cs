@@ -442,20 +442,47 @@ public static class ExpressionLowerer
         private Predicate DatePartComparison(BinaryExpression binary, ColumnRef column, string part, Expression other, bool reverse = false)
         {
             var value = ClosedValue(other, parameter, diagnostics);
-            if (part == "Year" && value is int year)
+            try
             {
-                var lower = new DateTimeOffset(year, 1, 1, 0, 0, 0, TimeSpan.Zero);
-                var upper = lower.AddYears(1);
-                return new AstPredicate.And(new AstPredicate[] { new AstPredicate.Range(column, Bound.Inclusive(QueryConstant.Of(column, lower)), Bound.Exclusive(QueryConstant.Of(column, upper))) });
+                if (part == "Year" && value is int year)
+                {
+                    var lower = new DateTimeOffset(year, 1, 1, 0, 0, 0, TimeSpan.Zero);
+                    return DatePartPredicate(column, lower, lower.AddYears(1), Compare(binary.NodeType), reverse);
+                }
+                if (part == "Date" && value is DateTime date)
+                {
+                    var lower = new DateTimeOffset(date.Date, TimeSpan.Zero);
+                    return DatePartPredicate(column, lower, lower.AddDays(1), Compare(binary.NodeType), reverse);
+                }
             }
-            if (part == "Date" && value is DateTime date)
+            catch (ArgumentException)
             {
-                var lower = new DateTimeOffset(date.Date, TimeSpan.Zero);
-                var upper = lower.AddDays(1);
-                return new AstPredicate.Range(column, Bound.Inclusive(QueryConstant.Of(column, lower)), Bound.Exclusive(QueryConstant.Of(column, upper)));
+                // Keep malformed/out-of-range date constants on the diagnostic fail-closed path.
             }
+
             Add("GW-LINQ-107", "The date-part comparison is not a supported UTC range.", binary);
             return AstPredicate.AlwaysFalse.Instance;
+        }
+
+        private static Predicate DatePartPredicate(ColumnRef column, DateTimeOffset lower, DateTimeOffset upper, CompareOp operation, bool reverse)
+        {
+            if (reverse) operation = Invert(operation);
+            var lowerValue = QueryConstant.Of(column, lower);
+            var upperValue = QueryConstant.Of(column, upper);
+            return operation switch
+            {
+                CompareOp.Equal => new AstPredicate.Range(column, Bound.Inclusive(lowerValue), Bound.Exclusive(upperValue)),
+                CompareOp.NotEqual => new AstPredicate.Or(new AstPredicate[]
+                {
+                    new AstPredicate.Range(column, null, Bound.Exclusive(lowerValue)),
+                    new AstPredicate.Range(column, Bound.Inclusive(upperValue), null)
+                }),
+                CompareOp.LessThan => new AstPredicate.Range(column, null, Bound.Exclusive(lowerValue)),
+                CompareOp.LessThanOrEqual => new AstPredicate.Range(column, null, Bound.Exclusive(upperValue)),
+                CompareOp.GreaterThan => new AstPredicate.Range(column, Bound.Inclusive(upperValue), null),
+                CompareOp.GreaterThanOrEqual => new AstPredicate.Range(column, Bound.Inclusive(lowerValue), null),
+                _ => throw new ArgumentOutOfRangeException(nameof(operation))
+            };
         }
 
         private Predicate MethodPredicate(MethodCallExpression call)
