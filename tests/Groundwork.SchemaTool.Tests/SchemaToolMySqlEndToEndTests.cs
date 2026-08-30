@@ -43,6 +43,11 @@ public sealed class SchemaToolMySqlEndToEndTests : IDisposable
         Assert.Equal(0, status.Report.RootElement.GetProperty("pendingOperations").GetArrayLength());
         Assert.True(status.Report.RootElement.GetProperty("appliedOperations").GetArrayLength() > 0);
 
+        var validation = await harness.RunAsync(["validate", "--schema", schema], database.ConnectionString);
+        Assert.True(SchemaToolExitCodes.Success == validation.ExitCode, validation.Reason);
+        Assert.Equal("live", validation.Report.RootElement.GetProperty("inspectionMode").GetString());
+        Assert.Equal("ready", validation.Report.RootElement.GetProperty("outcome").GetString());
+
         var evolved = harness.Temp("mysql-evolved.json", SchemaToolCliHarness.EvolvedSchema());
         var evolvedPlan = await harness.RunAsync(["plan", "--schema", evolved], database.ConnectionString);
         Assert.True(SchemaToolExitCodes.PendingChanges == evolvedPlan.ExitCode, evolvedPlan.Reason);

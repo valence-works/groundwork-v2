@@ -28,6 +28,8 @@ shape because evolution is deployment-target metadata rather than part of a stor
 `apply` mutates nothing unless the invocation selects `--safe` or supplies an exact `--expected-plan` fingerprint. Safe mode refuses protected work. A destructive plan requires its current fingerprint plus every exact operation identity through `--allow-destructive`; semantic migrations require their exact IDs through `--allow-semantic`.
 
 Provider packages implement `ISchemaToolProviderSessionFactory`. The tool discovers loaded factories and can load a provider plug-in explicitly with `--provider-assembly`; `--connection` and `--database` are passed to the factory without being echoed in reports. Hosts can instead inject an `ISchemaToolProviderSession` resolver directly.
+The shipped aliases are `sqlite`, `mysql`, `postgresql`, `sqlserver`, and `mongodb`; each uses the
+same canonical document, authorization vocabulary, plan fingerprint, and report format.
 
 `schema emit` parses and rewrites the source-generator contract in canonical order. Its reported fingerprint is therefore identical to the assembly metadata fingerprint for the same schema.
 
