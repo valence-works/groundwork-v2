@@ -88,6 +88,9 @@
     <Project Path="benchmarks/Groundwork.Benchmarks/Groundwork.Benchmarks.csproj" />
   </Folder>
   <Folder Name="/tests/" />
+  <Folder Name="/tests/Groundwork.Benchmarks.Tests/">
+    <Project Path="tests/Groundwork.Benchmarks.Tests/Groundwork.Benchmarks.Tests.csproj" />
+  </Folder>
   <Folder Name="/tests/Groundwork.Packaging.Tests/">
     <Project Path="tests/Groundwork.Packaging.Tests/Groundwork.Packaging.Tests.csproj" />
   </Folder>

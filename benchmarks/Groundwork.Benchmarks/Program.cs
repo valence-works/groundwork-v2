@@ -12,9 +12,12 @@ using Groundwork.Store;
 using Groundwork.Testing;
 using KernelStorageUnit = Groundwork.Kernel.StorageUnit;
 
+if (args.Length > 0 && string.Equals(args[0], "benchmarks", StringComparison.OrdinalIgnoreCase))
+    return Groundwork.Benchmarks.BenchmarkSuite.Run(args[1..]);
+
 if (args.Length == 0 || (args[0] is not "roundtrips" and not "linq" and not "records"))
 {
-    Console.Error.WriteLine("Usage: roundtrips --workload upsert|commit --n <count> [--provider sqlite|postgresql|sqlserver|mongodb] | linq --n <count> | records --n <count>");
+    Console.Error.WriteLine("Usage: benchmarks [BenchmarkDotNet options] | roundtrips --workload upsert|commit --n <count> [--provider sqlite|postgresql|sqlserver|mongodb] | linq --n <count> | records --n <count>");
     return 2;
 }
 
