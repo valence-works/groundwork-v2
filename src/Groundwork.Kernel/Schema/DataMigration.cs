@@ -27,6 +27,9 @@ public static class DataMigrationCodes
 
     /// <summary>A migration stopped before its source was exhausted and can be resumed.</summary>
     public const string Incomplete = "GW-MIGRATION-007";
+
+    /// <summary>A declaration names a semantic migration the running host does not supply.</summary>
+    public const string MissingTransform = "GW-MIGRATION-008";
 }
 
 /// <summary>A refusal raised by the data-migration facility, naming what was refused and why.</summary>
@@ -253,6 +256,21 @@ public sealed class DataMigrationCatalog
             return false;
         }
         return byIdentity.TryGetValue(Key(semanticMigrationId, subjectId), out migration!);
+    }
+
+    /// <summary>
+    /// Resolves a declaration's optional semantic migration, refusing an exact non-empty identity
+    /// the host catalog does not supply.
+    /// </summary>
+    public DataMigration? ResolveDeclared(string? semanticMigrationId, StorageUnitId subjectId)
+    {
+        if (semanticMigrationId is null)
+            return null;
+        if (TryGet(semanticMigrationId, subjectId, out var migration))
+            return migration;
+        throw new DataMigrationRefusedException(
+            DataMigrationCodes.MissingTransform,
+            $"semantic migration '{semanticMigrationId}' for subject '{subjectId.Value}' has no host-supplied transform.");
     }
 
     private static string Key(string migrationId, StorageUnitId subjectId) =>

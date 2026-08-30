@@ -808,7 +808,7 @@ public sealed class GeneratorContractTests
     [Fact]
     public void Additional_file_round_trip_emits_the_same_canonical_fingerprint()
     {
-        const string json = "{\"tables\":[{\"name\":\"tickets\",\"columns\":[{\"name\":\"id\",\"type\":\"String\",\"nullable\":false}],\"key\":[\"id\"],\"indexes\":[]}] }";
+        const string json = "{\"tables\":[{\"name\":\"tickets\",\"columns\":[{\"name\":\"id\",\"type\":\"String\",\"nullable\":false}],\"key\":[\"id\"],\"indexes\":[],\"evolution\":{\"isDestructive\":true,\"retiresPrimaryStorage\":true}}] }";
         var result = Run("public static class Empty { }", new InMemoryAdditionalText("schema/groundwork.json", json));
 
         Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
@@ -819,6 +819,7 @@ public sealed class GeneratorContractTests
         var fingerprint = (string)assemblyAttribute.ConstructorArguments[1].Value!;
         Assert.Equal(GroundworkSchemaCanonical.Fingerprint(GroundworkSchemaCanonical.Parse(canonical)), fingerprint);
         Assert.Equal(GroundworkSchemaCanonical.Fingerprint(GroundworkSchemaCanonical.Parse(json)), fingerprint);
+        Assert.Contains("\"retiresPrimaryStorage\":true", canonical, StringComparison.Ordinal);
         Assert.Contains(result.Generated, generated => generated.Contains("ticketsStorageUnit", StringComparison.Ordinal));
     }
 

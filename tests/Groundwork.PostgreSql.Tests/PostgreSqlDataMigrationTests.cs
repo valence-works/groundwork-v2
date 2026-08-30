@@ -25,7 +25,7 @@ public sealed class PostgreSqlDataMigrationTests
         var executor = new RelationalSchemaExecutor(
             () => new NpgsqlConnection(database.ConnectionString), new PostgreSqlDialect());
         Assert.Equal(PhysicalSchemaApplicationOutcome.Applied,
-            PhysicalSchemaApplication.Apply(target, executor, Now).Outcome);
+            PhysicalSchemaApplication.Apply(Target(semanticMigrationId: null), executor, Now).Outcome);
         Seed(database, 6);
 
         var first = PhysicalSchemaApplication.Apply(
@@ -68,7 +68,7 @@ public sealed class PostgreSqlDataMigrationTests
         var target = Target();
         var executor = new RelationalSchemaExecutor(
             () => new NpgsqlConnection(database.ConnectionString), new PostgreSqlDialect());
-        PhysicalSchemaApplication.Apply(target, executor, Now);
+        PhysicalSchemaApplication.Apply(Target(semanticMigrationId: null), executor, Now);
         Seed(database, 5);
 
         var result = await PhysicalSchemaApplication.ApplyAsync(
@@ -88,7 +88,7 @@ public sealed class PostgreSqlDataMigrationTests
         var target = Target();
         var executor = new RelationalSchemaExecutor(
             () => new NpgsqlConnection(database.ConnectionString), new PostgreSqlDialect());
-        PhysicalSchemaApplication.Apply(target, executor, Now);
+        PhysicalSchemaApplication.Apply(Target(semanticMigrationId: null), executor, Now);
         Seed(database, 4);
 
         Assert.Throws<InvalidOperationException>(() => PhysicalSchemaApplication.Apply(
@@ -134,12 +134,14 @@ public sealed class PostgreSqlDataMigrationTests
         Key = new KeyDefinition { Columns = ["tenant", "seq"] }
     };
 
-    private static PhysicalSchemaTarget Target()
+    private static PhysicalSchemaTarget Target(string? semanticMigrationId = MigrationId)
     {
         var physical = PostgreSqlSchemaCoordinator.Physicalize(Unit());
         var basis = PostgreSqlSchemaCoordinator.Target(physical);
+        if (semanticMigrationId is null)
+            return basis;
         return new PhysicalSchemaTarget(
-            new SchemaSubject(physical, new SchemaEvolutionMetadata(semanticMigrationId: MigrationId)),
+            new SchemaSubject(physical, new SchemaEvolutionMetadata(semanticMigrationId: semanticMigrationId)),
             basis.Provider,
             basis.ProviderDefinitions);
     }

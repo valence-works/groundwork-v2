@@ -117,6 +117,37 @@ public sealed class SchemaToolContractTests
     }
 
     [Fact]
+    public async Task A_later_targets_missing_transform_blocks_every_target_before_mutation()
+    {
+        const string migration = "missing-orders-transform";
+        var schema = Temp("multi-target-missing-transform.json", """
+            {"tables":[
+              {"name":"customers","columns":[{"name":"id","type":"Guid","nullable":false}],"key":["id"],"indexes":[]},
+              {"name":"orders","columns":[{"name":"id","type":"Guid","nullable":false}],"key":["id"],"indexes":[],"evolution":{"semanticMigrationId":"MIGRATION"}}
+            ]}
+            """.Replace("MIGRATION", migration, StringComparison.Ordinal));
+        using var session = new FakeSession();
+        Assert.Equal(SchemaToolExitCodes.PendingChanges, await RunAsync(
+            ["plan", "--schema", schema, "--provider", "fake", "--output", "json"], _ => session));
+        using var plan = JsonDocument.Parse(output.ToString());
+        var fingerprints = plan.RootElement.GetProperty("targets").EnumerateArray()
+            .Select(target => target.GetProperty("planFingerprint").GetString()!)
+            .ToArray();
+
+        var exit = await RunAsync(
+        [
+            "apply", "--schema", schema, "--provider", "fake", "--output", "json",
+            "--expected-plan", fingerprints[0], "--expected-plan", fingerprints[1],
+            "--allow-semantic", migration
+        ], _ => session);
+
+        Assert.Equal(SchemaToolExitCodes.ValidationFailed, exit);
+        Assert.Contains(DataMigrationCodes.MissingTransform, output.ToString(), StringComparison.Ordinal);
+        Assert.Contains(migration, output.ToString(), StringComparison.Ordinal);
+        Assert.Empty(session.ExecutorImpl.AppliedOperations);
+    }
+
+    [Fact]
     public async Task Logical_references_appear_as_metadata_in_cli_plans()
     {
         var schema = Temp("reference-plan.json", """
@@ -277,6 +308,24 @@ public sealed class SchemaToolContractTests
         Assert.Equal(SchemaToolExitCodes.ValidationFailed,
             await RunAsync(["validate", "--schema", malformed, "--provider", "fake", "--offline", "--output", "json"]));
         Assert.Contains("GW-CLI-005", output.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Offline_validation_refuses_impossible_or_malformed_supersessions()
+    {
+        var impossible = Temp("impossible-supersession.json", """
+            {"tables":[{"name":"tickets","columns":[{"name":"id","type":"String","nullable":false},{"name":"slug","type":"String","nullable":true}],"key":["id"],"indexes":[],"evolution":{"semanticMigrationId":"move-slug","supersessions":[{"supersededColumn":{"name":"slug","type":"String","nullable":true},"replacementColumn":"slug_v2"}]}}]}
+            """);
+
+        Assert.Equal(SchemaToolExitCodes.ValidationFailed,
+            await RunAsync(["validate", "--schema", impossible, "--provider", "fake", "--offline", "--output", "json"]));
+        Assert.Contains("GW-CLI-005", output.ToString(), StringComparison.Ordinal);
+
+        const string malformed =
+            "{\"tables\":[{\"name\":\"tickets\",\"columns\":[{\"name\":\"id\",\"type\":\"String\",\"nullable\":false}]," +
+            "\"key\":[\"id\"],\"indexes\":[],\"evolution\":{\"semanticMigrationId\":\"move-slug\",\"supersessions\":[null]}}]}";
+        var failure = Assert.Throws<FormatException>(() => GroundworkSchemaCanonical.Parse(malformed));
+        Assert.Contains("supersessions", failure.Message, StringComparison.Ordinal);
     }
 
     [Fact]

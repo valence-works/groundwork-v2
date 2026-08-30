@@ -29,22 +29,7 @@ public static class GroundworkSchemaCanonical
             for (var columnIndex = 0; columnIndex < table.Columns.Count; columnIndex++)
             {
                 if (columnIndex != 0) builder.Append(',');
-                var column = table.Columns[columnIndex];
-                builder.Append("{\"name\":").Append(String(column.Name))
-                    .Append(",\"type\":").Append(String(column.Type.ToString()))
-                    .Append(",\"nullable\":").Append(column.IsNullable ? "true" : "false")
-                    .Append(",\"length\":").Append(Number(column.Length))
-                    .Append(",\"precision\":").Append(Number(column.Precision))
-                    .Append(",\"scale\":").Append(Number(column.Scale))
-                    .Append(",\"folding\":").Append(String(column.Folding.ToString()))
-                    .Append(",\"generation\":").Append(String(column.Generation.ToString()))
-                    .Append(",\"default\":").Append(Default(column));
-                // A column that has never been renamed is planned under its own name, so its
-                // logical id adds nothing. Emitting it only once it diverges keeps every already
-                // emitted schema fingerprint byte-identical.
-                if (column.Id is { } columnId && !string.Equals(columnId, column.Name, StringComparison.Ordinal))
-                    builder.Append(",\"id\":").Append(String(columnId));
-                builder.Append('}');
+                Append(builder, table.Columns[columnIndex]);
             }
 
             builder.Append("],\"key\":[");
@@ -131,10 +116,51 @@ public static class GroundworkSchemaCanonical
             // before this member existed keeps the exact fingerprint it was emitted under.
             if (table.ForeignColumns != SchemaForeignColumns.Refuse)
                 builder.Append(",\"foreignColumns\":").Append(String(table.ForeignColumns.ToString()));
+            if (table.Evolution is { IsDefault: false } evolution)
+                Append(builder, evolution);
             builder.Append('}');
         }
 
         return builder.Append("]}").ToString();
+    }
+
+    private static void Append(StringBuilder builder, SchemaColumn column)
+    {
+        builder.Append("{\"name\":").Append(String(column.Name))
+            .Append(",\"type\":").Append(String(column.Type.ToString()))
+            .Append(",\"nullable\":").Append(column.IsNullable ? "true" : "false")
+            .Append(",\"length\":").Append(Number(column.Length))
+            .Append(",\"precision\":").Append(Number(column.Precision))
+            .Append(",\"scale\":").Append(Number(column.Scale))
+            .Append(",\"folding\":").Append(String(column.Folding.ToString()))
+            .Append(",\"generation\":").Append(String(column.Generation.ToString()))
+            .Append(",\"default\":").Append(Default(column));
+        // A column that has never been renamed is planned under its own name, so its logical id
+        // adds nothing. This applies equally to active and superseded column declarations.
+        if (column.Id is { } columnId && !string.Equals(columnId, column.Name, StringComparison.Ordinal))
+            builder.Append(",\"id\":").Append(String(columnId));
+        builder.Append('}');
+    }
+
+    private static void Append(StringBuilder builder, SchemaEvolution evolution)
+    {
+        builder.Append(",\"evolution\":{")
+            .Append("\"isDestructive\":").Append(evolution.IsDestructive ? "true" : "false")
+            .Append(",\"semanticMigrationId\":")
+            .Append(evolution.SemanticMigrationId is null ? "null" : String(evolution.SemanticMigrationId))
+            .Append(",\"retiresPrimaryStorage\":").Append(evolution.RetiresPrimaryStorage ? "true" : "false")
+            .Append(",\"supersessions\":[");
+        for (var index = 0; index < evolution.Supersessions.Count; index++)
+        {
+            if (index != 0) builder.Append(',');
+            var supersession = evolution.Supersessions[index];
+            builder.Append("{\"supersededColumn\":");
+            Append(builder, supersession.SupersededColumn);
+            builder.Append(",\"replacementColumn\":").Append(String(supersession.ReplacementColumn)).Append('}');
+        }
+        builder.Append("],\"dualPresenceWindowTicks\":")
+            .Append(evolution.DualPresenceWindow.Ticks.ToString(CultureInfo.InvariantCulture))
+            .Append('}');
     }
 
     public static string Fingerprint(SchemaDocument document)
@@ -160,17 +186,7 @@ public static class GroundworkSchemaCanonical
             foreach (var columnElement in RequiredArray(tableElement, "columns"))
             {
                 var type = EnumValue<SchemaValueType>(columnElement, "type");
-                columns.Add(new SchemaColumn(
-                    RequiredString(columnElement, "name"),
-                    type,
-                    RequiredBoolean(columnElement, "nullable"),
-                    OptionalInt(columnElement, "length"),
-                    OptionalInt(columnElement, "precision"),
-                    OptionalInt(columnElement, "scale"),
-                    EnumValueOrDefault(columnElement, "folding", TextFolding.None),
-                    EnumValueOrDefault(columnElement, "generation", SchemaGeneration.Supplied),
-                    ReadDefault(columnElement, type),
-                    OptionalString(columnElement, "id")));
+                columns.Add(ReadColumn(columnElement, type));
             }
 
             var indexes = new List<SchemaIndex>();
@@ -203,7 +219,8 @@ public static class GroundworkSchemaCanonical
                 OptionalString(tableElement, "id"),
                 EnumValueOrDefault(tableElement, "foreignColumns", SchemaForeignColumns.Refuse),
                 ReadReferences(tableElement),
-                ReadChecks(tableElement, columns)));
+                ReadChecks(tableElement, columns),
+                ReadEvolution(tableElement)));
         }
 
         return new SchemaDocument(tables);
@@ -304,6 +321,22 @@ public static class GroundworkSchemaCanonical
         if (value.ValueKind != JsonValueKind.Object || !value.TryGetProperty("value", out var literal))
             throw new FormatException("Schema JSON property 'default' must be null or an object with a 'value'.");
         return new SchemaDefault(ReadLiteral(literal, type));
+    }
+
+    private static SchemaColumn ReadColumn(JsonElement element, SchemaValueType? knownType = null)
+    {
+        var type = knownType ?? EnumValue<SchemaValueType>(element, "type");
+        return new SchemaColumn(
+            RequiredString(element, "name"),
+            type,
+            RequiredBoolean(element, "nullable"),
+            OptionalInt(element, "length"),
+            OptionalInt(element, "precision"),
+            OptionalInt(element, "scale"),
+            EnumValueOrDefault(element, "folding", TextFolding.None),
+            EnumValueOrDefault(element, "generation", SchemaGeneration.Supplied),
+            ReadDefault(element, type),
+            OptionalString(element, "id"));
     }
 
     private static object? ReadLiteral(JsonElement literal, SchemaValueType type)
@@ -410,6 +443,24 @@ public static class GroundworkSchemaCanonical
                 OptionalString(value, "ledger"))
             : null;
 
+    private static SchemaEvolution? ReadEvolution(JsonElement table)
+    {
+        if (!TryRead(table, "evolution", JsonValueKind.Object, out var value))
+            return null;
+        return new SchemaEvolution(
+            OptionalBoolean(value, "isDestructive"),
+            OptionalString(value, "semanticMigrationId"),
+            OptionalBoolean(value, "retiresPrimaryStorage"),
+            OptionalArray(value, "supersessions").Select(item => new SchemaColumnSupersession(
+                item.ValueKind == JsonValueKind.Object &&
+                item.TryGetProperty("supersededColumn", out var column) && column.ValueKind == JsonValueKind.Object
+                    ? ReadColumn(column)
+                    : throw new FormatException(
+                        "Each schema JSON 'supersessions' item must contain a 'supersededColumn' object."),
+                RequiredString(item, "replacementColumn"))),
+            TimeSpan.FromTicks(OptionalLong(value, "dualPresenceWindowTicks")));
+    }
+
     private static IReadOnlyList<SchemaAggregation> ReadAggregations(JsonElement table)
     {
         if (!TryRead(table, "aggregations", JsonValueKind.Array, out var value))
@@ -494,6 +545,13 @@ public static class GroundworkSchemaCanonical
         return value.EnumerateArray().ToArray();
     }
 
+    private static IReadOnlyList<JsonElement> OptionalArray(JsonElement parent, string name) =>
+        !parent.TryGetProperty(name, out var value) || value.ValueKind == JsonValueKind.Null
+            ? Array.Empty<JsonElement>()
+            : value.ValueKind == JsonValueKind.Array
+                ? value.EnumerateArray().ToArray()
+                : throw new FormatException($"Schema JSON property '{name}' must be an array or null.");
+
     private static string RequiredString(JsonElement parent, string name) =>
         parent.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString() ?? throw new FormatException($"Schema JSON property '{name}' cannot be null.")
@@ -523,6 +581,13 @@ public static class GroundworkSchemaCanonical
         parent.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out var number)
             ? number
             : throw new FormatException($"Schema JSON property '{name}' must be an integer.");
+
+    private static long OptionalLong(JsonElement parent, string name) =>
+        !parent.TryGetProperty(name, out var value) || value.ValueKind == JsonValueKind.Null
+            ? 0L
+            : value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out var number)
+                ? number
+                : throw new FormatException($"Schema JSON property '{name}' must be an integer or null.");
 
     private static int? OptionalInt(JsonElement parent, string name)
     {

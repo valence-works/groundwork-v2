@@ -244,6 +244,10 @@ public static class PhysicalSchemaApplication
             };
         }
 
+        // Resolve the host transform before validation, DDL, or publication. A semantic identity is
+        // a declaration of executable data work, not an optional label that apply may silently skip.
+        var migration = ResolveDataMigration(target, dataMigrations);
+
         if (plan.Operations.Length == 0)
         {
             var validation = new ValidatePhysicalSchemaOperation(target);
@@ -252,7 +256,7 @@ public static class PhysicalSchemaApplication
             // A target whose schema is already applied can still owe a data migration that an
             // earlier pass left running, so the resume runs here too rather than only after DDL.
             var resumed = await RunDataMigrations(
-                target, migrationExecutor, supersessions, dataMigrations, dataMigrationBudget, dataMigrationProgress, now, mode)
+                target, migrationExecutor, supersessions, migration, dataMigrationBudget, dataMigrationProgress, now, mode)
                 .ConfigureAwait(false);
             return new(
                 resumed.Any(result => !result.IsComplete)
@@ -282,7 +286,7 @@ public static class PhysicalSchemaApplication
         // unfinished data migration is reported by the outcome and by that ledger, not by pretending
         // the schema was never applied.
         var migrations = await RunDataMigrations(
-            target, migrationExecutor, supersessions, dataMigrations, dataMigrationBudget, dataMigrationProgress, now, mode)
+            target, migrationExecutor, supersessions, migration, dataMigrationBudget, dataMigrationProgress, now, mode)
             .ConfigureAwait(false);
         return new(
             migrations.Any(result => !result.IsComplete)
@@ -305,17 +309,14 @@ public static class PhysicalSchemaApplication
         PhysicalSchemaTarget target,
         IDataMigrationExecutor? migrationExecutor,
         ColumnSupersessionPlan supersessions,
-        DataMigrationCatalog? catalog,
+        DataMigration? migration,
         DataMigrationBudget? budget,
         IProgress<DataMigrationProgress>? progress,
         DateTimeOffset? now,
         DataMigrationExecution mode)
     {
-        if (catalog is null ||
-            !catalog.TryGet(target.Subject.Evolution.SemanticMigrationId, target.Subject.Id, out var migration))
-        {
+        if (migration is null)
             return [];
-        }
 
         if (migrationExecutor is null)
         {
@@ -338,6 +339,15 @@ public static class PhysicalSchemaApplication
                 migrationExecutor, target.Identity, unit, migration,
                 budget, now, progress))).ConfigureAwait(false);
         return [result];
+    }
+
+    private static DataMigration? ResolveDataMigration(
+        PhysicalSchemaTarget target,
+        DataMigrationCatalog? catalog)
+    {
+        return (catalog ?? DataMigrationCatalog.Empty).ResolveDeclared(
+            target.Subject.Evolution.SemanticMigrationId,
+            target.Subject.Id);
     }
 
     private static StorageUnit MigrationUnit(

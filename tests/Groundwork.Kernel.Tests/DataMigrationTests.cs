@@ -314,6 +314,24 @@ public sealed class DataMigrationTests
     }
 
     [Fact]
+    public void A_completed_migration_replays_after_contract_retires_its_source_column()
+    {
+        var executor = new FakeExecutor(Unit, Seed(3));
+        Assert.Equal(DataMigrationStatus.Completed,
+            DataMigrationRunner.Run(executor, Target, Unit, Migration(), null, Now).Status);
+        var contracted = Unit with
+        {
+            Columns = Unit.Columns.Where(column => column.Name != "name").ToArray()
+        };
+        var chunksAfterFirstPass = executor.ChunkCalls;
+
+        var replay = DataMigrationRunner.Run(executor, Target, contracted, Migration(), null, Now);
+
+        Assert.Equal(DataMigrationStatus.Replayed, replay.Status);
+        Assert.Equal(chunksAfterFirstPass, executor.ChunkCalls);
+    }
+
+    [Fact]
     public void Reusing_a_migration_identity_for_a_changed_transform_is_refused()
     {
         var executor = new FakeExecutor(Unit, Seed(2));

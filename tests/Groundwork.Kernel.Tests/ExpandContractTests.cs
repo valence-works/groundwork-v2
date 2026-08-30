@@ -190,7 +190,7 @@ public sealed class ExpandContractTests
         var stale = Ready(target, executor);
 
         // The applied state moves between the assessment and the plan: another expand adds a column.
-        PhysicalSchemaApplication.Apply(SupersedingTargetWithNote(), executor, T0.AddDays(2));
+        ApplyWithMigration(SupersedingTargetWithNote(), executor, T0.AddDays(2));
         var plan = Plan(target, executor, SchemaEvolutionPhase.Contract, stale);
 
         var refusal = Assert.Single(plan.Refusals);
@@ -235,13 +235,13 @@ public sealed class ExpandContractTests
     {
         var executor = Expanded();
         var target = SupersedingTarget();
-        var contracted = PhysicalSchemaApplication.Apply(
-            target, executor, T0.AddDays(3), phase: SchemaEvolutionPhase.Contract);
+        var contracted = ApplyWithMigration(
+            target, executor, T0.AddDays(3), SchemaEvolutionPhase.Contract);
         Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, contracted.Outcome);
 
         var expand = Plan(target, executor, SchemaEvolutionPhase.Expand);
-        var contractAgain = PhysicalSchemaApplication.Apply(
-            target, executor, T0.AddDays(4), phase: SchemaEvolutionPhase.Contract);
+        var contractAgain = ApplyWithMigration(
+            target, executor, T0.AddDays(4), SchemaEvolutionPhase.Contract);
 
         Assert.Empty(expand.Operations);
         Assert.Equal(PhysicalSchemaApplicationOutcome.NoChanges, contractAgain.Outcome);
@@ -271,8 +271,8 @@ public sealed class ExpandContractTests
             "supersedes it. Contract it before withdrawing the supersession.",
             refusal.Message);
 
-        PhysicalSchemaApplication.Apply(
-            SupersedingTarget(), executor, T0.AddDays(3), phase: SchemaEvolutionPhase.Contract);
+        ApplyWithMigration(
+            SupersedingTarget(), executor, T0.AddDays(3), SchemaEvolutionPhase.Contract);
         var afterContract = Plan(withdrawn, executor, SchemaEvolutionPhase.Expand);
 
         Assert.Empty(afterContract.Refusals);
@@ -420,10 +420,26 @@ public sealed class ExpandContractTests
     {
         var executor = Applied(BeforeTarget());
         var target = SupersedingTarget();
-        PhysicalSchemaApplication.Apply(target, executor, T0.AddHours(1));
+        ApplyWithMigration(target, executor, T0.AddHours(1));
         executor.Ledger = CompletedLedger(target, T0.AddHours(1));
         return executor;
     }
+
+    private static PhysicalSchemaApplicationResult ApplyWithMigration(
+        PhysicalSchemaTarget target,
+        FakeExecutor executor,
+        DateTimeOffset now,
+        SchemaEvolutionPhase phase = SchemaEvolutionPhase.Expand) =>
+        PhysicalSchemaApplication.Apply(
+            target,
+            executor,
+            now,
+            dataMigrations: new DataMigrationCatalog(
+            [
+                new DataMigration(MigrationId, target.Subject.Id, new CopyTotalTransform())
+            ]),
+            phase: phase,
+            dataMigrationExecutor: executor);
 
     private static PhysicalSchemaHistoryState History(FakeExecutor executor) =>
         executor.AppliedState is null
@@ -542,11 +558,11 @@ public sealed class ExpandContractTests
         }
 
         public DataMigrationChunkOutcome ExecuteChunk(DataMigrationChunkRequest request) =>
-            throw new NotSupportedException();
+            DataMigrationChunkOutcome.Exhausted(request.Entry);
 
         public ValueTask<DataMigrationChunkOutcome> ExecuteChunkAsync(
             DataMigrationChunkRequest request,
-            CancellationToken cancellationToken = default) => throw new NotSupportedException();
+            CancellationToken cancellationToken = default) => new(ExecuteChunk(request));
 
         private sealed class Lock(PhysicalSchemaTargetIdentity target) : IPhysicalSchemaApplicationLock
         {

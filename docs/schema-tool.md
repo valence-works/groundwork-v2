@@ -16,6 +16,14 @@ Use `--output json` for the stable machine-readable report. Exit codes are `0` s
 
 `--phase` selects which half of an expand–contract evolution is planned. It defaults to `expand`, the additive half, and changes nothing for a declaration that supersedes no column. `--phase contract` removes superseded columns and refuses with a `GW-EXPAND-*` code until its readiness is established from the applied schema ledger and the data-migration ledger; the report carries a `supersessions` array with `retainedSince`, `backfillCompletedAt`, and `contractableAt` per superseded column. The two phases of one declaration have distinct plan fingerprints, so an `--expected-plan` value that authorizes the expand can never authorize the contract. See `docs/v2/expand-contract.md`.
 
+Each canonical table may carry an optional `evolution` object for destructive intent, retirement,
+semantic migration identity, supersessions, and the dual-presence window. The deployment host
+supplies named transforms through `ISchemaToolProviderSession.DataMigrationCatalog`; apply refuses
+a missing transform by name with `GW-MIGRATION-008` before any target mutates.
+When the same document is a source-generator `AdditionalFile`, the generated assembly's canonical
+schema attribute preserves evolution. Generated `StorageUnit.Definition` remains the logical table
+shape because evolution is deployment-target metadata rather than part of a storage unit.
+
 `apply` mutates nothing unless the invocation selects `--safe` or supplies an exact `--expected-plan` fingerprint. Safe mode refuses protected work. A destructive plan requires its current fingerprint plus every exact operation identity through `--allow-destructive`; semantic migrations require their exact IDs through `--allow-semantic`.
 
 Provider packages implement `ISchemaToolProviderSessionFactory`. The tool discovers loaded factories and can load a provider plug-in explicitly with `--provider-assembly`; `--connection` and `--database` are passed to the factory without being echoed in reports. Hosts can instead inject an `ISchemaToolProviderSession` resolver directly.

@@ -143,10 +143,11 @@ state alone — no host transform catalog is needed to read a ledger:
 ```
 
 `pending` makes the target pending and the command exit `2`. `applied` carries `completedAt`.
-`not-recorded` marks a semantic migration the subject declares that the ledger has never seen: the
-tool cannot see host transforms, so it names the gap rather than guessing either way. Reading the
-ledger provisions nothing — a missing ledger reports as no recorded migration, so status stays safe
-on a read-only store.
+`not-recorded` marks a semantic migration the subject declares that the ledger has never seen.
+Plan and status need no transform catalog and do not provision anything. Apply is stricter: the
+deployment host exposes its transforms through `ISchemaToolProviderSession.DataMigrationCatalog`,
+and all declared identities are resolved before the first target mutates. A missing identity is
+refused by name with `GW-MIGRATION-008` rather than silently skipped.
 
 ## Expand–contract
 
@@ -165,3 +166,4 @@ the superseded column cannot be dropped until this ledger records its backfill c
 | `GW-MIGRATION-005` | Ledger state is missing, malformed, or self-contradictory |
 | `GW-MIGRATION-006` | A transform produced a column it did not declare as a target |
 | `GW-MIGRATION-007` | A migration stopped before its source was exhausted and can be resumed |
+| `GW-MIGRATION-008` | The declaration names a semantic migration the running host does not supply |
