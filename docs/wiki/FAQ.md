@@ -142,9 +142,15 @@ exists. See **[Versioning & Support](Versioning-and-Support)**.
 
 ### Is it production-ready?
 
-Not yet declared so. All providers are **conformance-passing / preview**. Production support
-additionally requires a supported topology, operational guidance, and an owner for provider-specific
-incidents — see **[Versioning & Support](Versioning-and-Support)**.
+Yes, on the exact topologies marked **Production-supported**. That currently means single-writer,
+file-backed SQLite; writable-primary MySQL/MariaDB, PostgreSQL, and SQL Server; and a
+transaction-capable MongoDB replica set or sharded cluster. MongoDB standalone is
+**Compatibility-only**, and `Groundwork.Testing` is **Development/reference-only**.
+
+Support is best effort, not an SLA. Your team owns database availability, capacity, credentials,
+backups, upgrades, and failover; Groundwork maintainers own reproducible package defects on a
+supported topology. See **[Versioning & Support](Versioning-and-Support)** and
+**[Production Operations](Production-Operations)**.
 
 ### Where's the async API?
 

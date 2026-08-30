@@ -25,6 +25,12 @@ never infers.
 why the tool multi-targets `net8.0` and `net10.0`: a deployment host running .NET 8 can apply schema
 with the runtime it already has.
 
+**Support tier:** Production-supported for deployment work against a production-supported provider
+topology. Multi-target application is not a distributed transaction; preserve the reviewed report
+and reconcile every target after a non-success exit. See the
+[support matrix](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/support-matrix.md)
+and [operations runbook](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/production-operations.md).
+
 ## Installing it
 
 ```bash

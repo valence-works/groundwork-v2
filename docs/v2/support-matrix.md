@@ -1,25 +1,52 @@
 # v2 provider support matrix
 
-“Conformance” means the provider passes the provider-neutral contract suites.
-“Production-supported” additionally requires a supported deployment topology,
-operational guidance, and an owner for provider-specific incidents.
+Package maturity and support are separate. A `0.x-preview` package can be supported on a named
+topology while its public contract is still allowed to change under the preview versioning policy.
+Passing the provider-neutral conformance suites is evidence for a support decision; it is not a
+support tier by itself.
 
-| Component/provider | Status in the first preview | Required topology and evidence |
+## Support tiers
+
+| Tier | Commitment |
+| --- | --- |
+| **Production-supported** | Groundwork maintainers accept provider defects reproduced on the named topology, keep an operational runbook, and ship fixes under the release policy. This is open-source, best-effort support, not a response-time or availability SLA. |
+| **Compatibility-only** | The deployment can use the capabilities it advertises and will fail closed for capabilities it lacks, but maintainers do not represent the topology as suitable for production. |
+| **Development/reference-only** | Intended for tests, provider development, samples, or local evaluation; not an application production database. |
+
+The support boundary covers Groundwork's packages and portable contract. The deployment owner
+continues to own database availability, capacity, credentials, backups and restore tests, upgrades,
+replication/failover, and the operating-system or managed-service layer. See the
+[production operations runbooks](production-operations.md) for incident ownership and evidence to
+capture before escalation.
+
+## Provider matrix
+
+| Component/provider | Tier | Supported topology |
 | --- | --- | --- |
-| SQLite | Conformance-passing / preview | File-backed or in-memory SQLite with the documented connection lifetime; production support requires an operational pilot and runbook. |
-| MySQL/MariaDB | Conformance-passing / preview | MySQL 8.0.17+ or MariaDB 11.4.13+ with InnoDB and a runtime-verified NO PAD `utf8mb4_0900_bin`; hosted correctness covers both runtime TFMs and the schema tool, with concurrency kept in the exact-head/main workflow. See [the provider evidence report](mysql-provider-evidence.md). |
-| PostgreSQL | Conformance-passing / preview | PostgreSQL 17-compatible deployment; production support requires an operational pilot and runbook. |
-| SQL Server | Conformance-passing / preview | SQL Server 2022-compatible deployment; production support follows an operational pilot. |
-| MongoDB | Conformance-passing / preview | Replica-set or sharded deployment for transactional and exact-append behavior. |
-| `Groundwork.Testing` | Public provider-author package | Public conformance contracts and deterministic reference provider; not an application database. |
-| `Groundwork.Tool` | Preview | Deployment-time schema planning and explicit authorization only. |
+| SQLite | **Production-supported** | SQLite 3.35.0+ in a file on storage with ordinary local filesystem locking, with exactly one long-lived `IStorageProviderConnection` and one application writer process per database file. WAL and the provider's busy timeout remain enabled. `:memory:` databases are development/reference-only. |
+| MySQL/MariaDB | **Production-supported** | MySQL 8.0.17+ or MariaDB 11.4.13+ using InnoDB, one writable primary endpoint, and a runtime-verified NO PAD `utf8mb4_0900_bin`. Groundwork sessions and the schema tool must not be routed to a read replica. |
+| PostgreSQL | **Production-supported** | A PostgreSQL 17-compatible writable primary endpoint. Groundwork sessions and the schema tool use that endpoint; split read/write routing and read-replica sessions are outside the supported topology. |
+| SQL Server | **Production-supported** | A SQL Server 2022-compatible writable primary database where the Groundwork principal can use the documented database-scoped `sp_getapplock` and schema facilities. Read-only replica routing is outside the supported topology. |
+| MongoDB | **Production-supported** | A transaction-capable replica set or sharded cluster reached through the official driver with sessions and transactions available. The runtime capability probe remains authoritative after a topology or server configuration change. |
+| MongoDB standalone | **Compatibility-only** | Operations whose required capabilities are advertised may be used for evaluation. Transaction-dependent guarantees—including atomic commit, exact append, durable idempotency, and data migrations—are absent or refused, so this topology is not production-supported. |
+| `Groundwork.Testing` | **Development/reference-only** | Deterministic reference provider and public provider-author conformance contracts; not an application database. |
+| `Groundwork.Tool` | **Production-supported** | Deployment-time planning, status, adoption, and explicitly authorized application against a production-supported provider topology. Multi-target execution is not a distributed transaction. |
+
+Production support applies only to the capabilities a connected deployment advertises. A
+production-supported provider can still omit a capability it cannot honor—for example,
+MySQL/MariaDB does not advertise durable high-water inspection or compare-and-delete. Applications
+must inspect required capabilities at startup rather than inferring them from this table.
+
+## Evidence boundary
+
+Provider-neutral correctness, provider-specific integration suites, schema-tool end-to-end proofs,
+and the separately scheduled concurrency matrix establish the implementation evidence. The
+[MySQL/MariaDB provider report](mysql-provider-evidence.md) records that provider's exact live lanes.
+Performance runs are planning evidence, not a semantic gate or a latency/SLA promise.
 
 ## Interop view capability
 
-Interop reporting views are an opt-in schema-tool capability, separate from the provider-neutral
-conformance status above. Relational providers create one named view per opted-in unit; the view
-contains all rows for a scoped unit and includes `__groundwork_scope`, so database grants are
-required for any cross-scope consumer.
+Interop reporting views are a separate opt-in capability.
 
 | Provider | Schema-tool interop view | Native projection |
 | --- | --- | --- |
@@ -30,25 +57,11 @@ required for any cross-scope consumer.
 | MongoDB | Refused | Per-scope collections do not form one stable relational view |
 | `Groundwork.Testing` | Refused | No native catalog or provider view exists |
 
-View create, replacement, and removal require exact deployment-tool authorization. MySQL/MariaDB
-DDL may implicitly commit, so its schema-tool apply path cannot promise rollback of every physical
-change in a failed multi-operation batch. PostgreSQL, SQLite, and SQL Server use the shared
-relational schema transaction. View names are validated for provider identifier rules and
-collisions before schema I/O (`GW-PORT-015`).
+A scoped view contains all scopes and exposes `__groundwork_scope`, so database grants—not the
+view—provide authorization. MySQL/MariaDB DDL may implicitly commit; a failed multi-operation apply
+must be reconciled with `groundwork status` as its runbook describes.
 
-MongoDB standalone deployments are intentionally not represented as
-production-supported: they cannot provide the transaction/session guarantees
-required by exact append and durable idempotency. A provider may be marked
-production-supported in a later release when the matrix is updated with its
-topology, test evidence, and operational owner.
-
-Every provider implements the whole asynchronous session surface. MySQL/MariaDB,
-PostgreSQL, SQL Server, and MongoDB use asynchronous driver I/O; SQLite and the reference provider
-complete their asynchronous members synchronously because their drivers do. See
-[async-surface.md](async-surface.md).
-
-All relational providers and the reference provider advertise
-`groundwork.operational.atomic-commit`. MongoDB advertises it only when the
-connected deployment reports transaction support; standalone MongoDB omits the
-descriptor. The five providers currently marked conformance-passing support audited, query-only
-cross-scope access for scoped units.
+Every provider implements the complete asynchronous session surface. MySQL/MariaDB, PostgreSQL,
+SQL Server, and MongoDB use asynchronous driver I/O. SQLite and the reference provider complete
+their asynchronous members synchronously because their drivers do. See
+[the asynchronous surface](async-surface.md).

@@ -95,29 +95,31 @@ Other changes in `0.2.0-preview.1`:
 
 ## Provider support matrix
 
-“**Conformance**” = passes the provider-neutral contract suites.
-“**Production-supported**” additionally requires a supported deployment topology, operational
-guidance, and an owner for provider-specific incidents.
+Conformance is implementation evidence, not a tier. **Production-supported** names an exact topology
+with maintained runbooks and best-effort maintainer ownership of reproducible Groundwork defects.
+**Compatibility-only** is capability-gated without a production suitability promise.
+**Development/reference-only** is non-production. No tier creates a response-time or availability
+SLA.
 
-| Component / provider | Status in the first preview | Required topology and evidence |
+| Component / provider | Tier | Supported topology |
 | --- | --- | --- |
-| **SQLite** | Conformance-passing / preview | File-backed or in-memory with the documented connection lifetime; production support requires an operational pilot and runbook |
-| **PostgreSQL** | Conformance-passing / preview | PostgreSQL 17-compatible; production support requires an operational pilot and runbook |
-| **SQL Server** | Conformance-passing / preview | SQL Server 2022-compatible; production support follows an operational pilot |
-| **MongoDB** | Conformance-passing / preview | **Replica-set or sharded** for transactional and exact-append behavior |
-| `Groundwork.Testing` | Public provider-author package | Public conformance contracts and deterministic reference provider; **not an application database** |
-| `Groundwork.Tool` | Preview | Deployment-time schema planning and explicit authorization only |
+| **SQLite** | **Production-supported** | SQLite 3.35.0+, file-backed with local locking, one long-lived provider connection and one writer process per file; `:memory:` is development/reference-only |
+| **MySQL/MariaDB** | **Production-supported** | MySQL 8.0.17+ or MariaDB 11.4.13+, InnoDB, verified NO PAD `utf8mb4_0900_bin`, writable primary endpoint |
+| **PostgreSQL** | **Production-supported** | PostgreSQL 17-compatible writable primary endpoint |
+| **SQL Server** | **Production-supported** | SQL Server 2022-compatible writable primary database with required application-lock/schema permissions |
+| **MongoDB** | **Production-supported** | Transaction-capable replica set or sharded cluster |
+| **MongoDB standalone** | **Compatibility-only** | Evaluation using only advertised capabilities; transaction-dependent facilities are refused |
+| `Groundwork.Testing` | **Development/reference-only** | Public conformance contracts and deterministic reference provider; **not an application database** |
+| `Groundwork.Tool` | **Production-supported** | Deployment-time planning and authorized application on a supported provider topology |
 
-**MongoDB standalone deployments are intentionally not represented as production-supported.** They
-cannot provide the transaction/session guarantees required by exact append and durable idempotency.
-
-A provider may be marked production-supported in a later release **when the matrix is updated with its
-topology, test evidence, and operational owner** — not before.
+The deployment owner owns the database/platform, capacity, credentials, backup/restore, upgrades,
+and failover. Groundwork maintainers own reproducible package defects within the named boundary. See
+**[Production Operations](Production-Operations)** for the runbooks and incident evidence contract.
 
 All relational providers and the reference provider advertise
 `groundwork.operational.atomic-commit`. MongoDB advertises it only when the connected deployment
-reports transaction support. All five conformance providers support audited, query-only cross-scope
-access for scoped units.
+reports transaction support. All shipped providers support audited, query-only cross-scope access
+for scoped units when the connected deployment advertises the required capability.
 
 ---
 
@@ -130,7 +132,7 @@ A release is not published until all of it is green:
    release artifacts).
 3. Emits **Source Link** and **symbol packages**, asserted against the packed artifacts rather
    than against the project settings meant to produce them.
-4. Passes the **full four-provider CI suite**.
+4. Passes the **full provider CI suite**.
 5. Passes **package layout verification**.
 6. Passes the **clean-room package-only public API consumer** — built outside the repository source
    graph, from packed artifacts, with no project references, internal access, reflection, or friend
@@ -146,6 +148,7 @@ the exact version.
 ## Adoption guidance
 
 **Reasonable now**
+- Production services on a production-supported topology that can follow the operational runbook.
 - Prototypes, internal tools, and greenfield services that can follow an authorized migration plan.
 - Existing Groundwork-shaped catalogs that can pass inspection and, when needed, `groundwork adopt`.
 - Anything where you control the deployment and can act on a release note.
@@ -154,7 +157,7 @@ the exact version.
 - Systems that cannot take a verified backup or tolerate the transition procedure named by the
   release note.
 - MongoDB standalone for anything using streams — the capabilities are genuinely absent.
-- Anything needing a support SLA. Nothing is production-supported yet.
+- Anything needing a contracted response-time or availability SLA; support here is best effort.
 
 **In every case**
 - Pin exact versions; keep the whole Groundwork closure on one version.
@@ -167,5 +170,6 @@ the exact version.
 
 - [Versioning policy](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/versioning.md)
 - [Support matrix](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/support-matrix.md)
+- [Production operations](Production-Operations)
 - [Release notes](https://github.com/valence-works/groundwork-v2/tree/main/docs/v2/releases)
 - [Issue tracker](https://github.com/valence-works/Groundwork/issues)

@@ -8,9 +8,15 @@ with an inferred conflict target, partial unique violations are reported by inde
 probe read, and scoped writes do not duplicate scope parameters.
 
 Portable ordinal string semantics, retention, exact append, provider sequences, and durable
-idempotency are all proved against the same provider-neutral conformance suites the other three
-providers run, and against a four-provider query differential suite that compares native results to
-a portable oracle.
+idempotency are all proved against the same provider-neutral conformance suites the other shipped
+providers run, and against provider differential suites that compare native results to a portable
+oracle.
+
+**Support tier:** Production-supported when runtime and schema-tool traffic use a PostgreSQL
+17-compatible writable primary endpoint; Groundwork read-replica routing is outside the supported
+topology. See the
+[support matrix](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/support-matrix.md)
+and [operations runbook](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/production-operations.md).
 
 ## Referencing it
 
