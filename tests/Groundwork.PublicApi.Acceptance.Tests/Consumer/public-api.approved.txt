@@ -90,4 +90,9 @@ Groundwork.Substrate.Relational.RelationalRetentionReplayState
 Groundwork.Substrate.Relational.RelationalUnitOfWork
 Groundwork.Substrate.Relational.RelationalUnitOfWorkSession
 Groundwork.Substrate.Relational.RelationalUnitOfWorkLifetime
+Groundwork.MySql.MySqlProviderFactory
+Groundwork.MySql.MySqlProviderConnection
+Groundwork.MySql.MySqlDialect
+Groundwork.MySql.MySqlQueryRenderer
+Groundwork.MySql.MySqlSchemaToolProviderSessionFactory
 Groundwork.Sqlite.SqliteProviderFactory

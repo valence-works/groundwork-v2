@@ -1,7 +1,7 @@
 # Groundwork v2
 
 Groundwork is a provider-neutral persistence kernel for .NET. A single logical
-storage declaration can be mapped to SQLite, PostgreSQL, SQL Server, or MongoDB
+storage declaration can be mapped to SQLite, MySQL/MariaDB, PostgreSQL, SQL Server, or MongoDB
 without making provider concerns part of the public model.
 
 This repository is the greenfield implementation of the

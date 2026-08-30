@@ -261,7 +261,8 @@ public sealed class RelationalSchemaExecutor
                 Execute(connection, transaction, RelationalSql.CreateIndex(dialect, createIndex.Subject.Name, createIndex.Index));
                 break;
             case RebuildPhysicalIndexOperation rebuild:
-                Execute(connection, transaction, RelationalSql.DropIndex(dialect, rebuild.Subject.Name, rebuild.Index.Name));
+                if (dialect.ReadIndex(connection, transaction, rebuild.Subject.Name, rebuild.Index.Name) is not null)
+                    Execute(connection, transaction, RelationalSql.DropIndex(dialect, rebuild.Subject.Name, rebuild.Index.Name));
                 Execute(connection, transaction, RelationalSql.CreateIndex(dialect, rebuild.Subject.Name, rebuild.Index));
                 break;
             case CreatePhysicalForeignKeyOperation foreignKey:
@@ -626,7 +627,10 @@ public sealed class RelationalSchemaExecutor
                     if (!(dialect.CreateTableIncludesColumns &&
                           operations.Any(item => item is CreatePrimaryStorageOperation) &&
                           operation is AddColumnOperation or BackfillColumnOperation or FinalizeColumnOperation))
-                        ExecuteOperation(lease.Connection, transaction, operation);
+                    {
+                        if (!dialect.IsSchemaOperationSatisfied(lease.Connection, transaction, operation))
+                            ExecuteOperation(lease.Connection, transaction, operation);
+                    }
                     acknowledgements.Add(new PhysicalSchemaOperationAcknowledgement(
                         operation.Identity,
                         operation.Fingerprint,

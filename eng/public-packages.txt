@@ -5,6 +5,7 @@ Groundwork.Documents|src/Groundwork.Documents/Groundwork.Documents.csproj
 Groundwork.Extensions.DependencyInjection|src/Groundwork.Extensions.DependencyInjection/Groundwork.Extensions.DependencyInjection.csproj
 Groundwork.Kernel|src/Groundwork.Kernel/Groundwork.Kernel.csproj
 Groundwork.MongoDb|src/Groundwork.MongoDb/Groundwork.MongoDb.csproj
+Groundwork.MySql|src/Groundwork.MySql/Groundwork.MySql.csproj
 Groundwork.PostgreSql|src/Groundwork.PostgreSql/Groundwork.PostgreSql.csproj
 Groundwork.Query.Linq|src/Groundwork.Query.Linq/Groundwork.Query.Linq.csproj
 Groundwork.Query.Linq.Execution|src/Groundwork.Query.Linq.Execution/Groundwork.Query.Linq.Execution.csproj
