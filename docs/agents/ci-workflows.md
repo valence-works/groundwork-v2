@@ -10,12 +10,18 @@ builds, architecture and public API checks, deterministic provider and capabilit
 all tests except those explicitly tagged `Category=Concurrency`. A failure is actionable merge
 feedback.
 
+The `mysql-provider` job deliberately starts one MySQL 8.4 service and runs `net8.0`, `net10.0`,
+and the schema-tool journey sequentially. This retains both-runtime and live CLI evidence without
+paying the service-startup and restore cost of a two-leg job matrix. Its TRX guard refuses a green
+result if either the provider conformance proof or schema-tool proof was skipped.
+
 ## Concurrency
 
 `.github/workflows/concurrency.yml` (`Concurrency`) owns the high-contention provider-neutral
 harness, PostgreSQL asynchronous contention surfaces, SQL Server's full W2 matrix, and concurrent
-retention coalescing. It runs automatically after a push to `main`. Before merging a pull request,
-dispatch it once against the candidate branch's exact final head:
+retention coalescing. The provider-neutral harness includes nine live MySQL cases per runtime TFM
+and refuses a skipped MySQL service. It runs automatically after a push to `main`. Before merging a
+pull request, dispatch it once against the candidate branch's exact final head:
 
 ```bash
 head=$(gh pr view 123 --json headRefOid --jq .headRefOid)

@@ -1,6 +1,6 @@
 # Providers
 
-One declaration, four databases. This page is what you need to know about each before choosing.
+One declaration, five databases. This page is what you need to know about each before choosing.
 
 ## Support matrix
 
@@ -12,6 +12,7 @@ production-supported yet** — conformance is evidence of contract behavior, not
 | Provider | Status | Required topology |
 | --- | --- | --- |
 | **SQLite** | Conformance-passing / preview | File-backed or in-memory, with the documented connection lifetime. **SQLite 3.35.0+**. |
+| **MySQL/MariaDB** | Conformance-passing / preview | MySQL 8.0.17+ or MariaDB 11.4.13+ with InnoDB and NO PAD `utf8mb4_0900_bin` |
 | **PostgreSQL** | Conformance-passing / preview | PostgreSQL 17-compatible |
 | **SQL Server** | Conformance-passing / preview | SQL Server 2022-compatible |
 | **MongoDB** | Conformance-passing / preview | **Replica set or sharded** for transactional and exact-append behavior |
@@ -24,18 +25,18 @@ production-supported yet** — conformance is evidence of contract behavior, not
 
 ## Capability differences at a glance
 
-| Capability | SQLite | PostgreSQL | SQL Server | MongoDB (replica set) | MongoDB (standalone) |
-| --- | :-: | :-: | :-: | :-: | :-: |
-| Atomic commit | ✅ | ✅ | ✅ | ✅ | ❌ |
-| Provider sequence | ✅ | ✅ | ✅ | ✅ (+1 command) | ❌ |
-| Append idempotency | ✅ | ✅ | ✅ | ✅ | ❌ |
-| Exact append outcomes | ✅ | ✅ | ✅ | ✅ | ❌ |
-| Durable high-water inspection | ✅ | ✅ | ✅ | ✅ | ❌ |
-| Exact retention | ✅ | ✅ | ✅ | ✅ | ❌ |
-| Compare-and-delete | ✅ | ✅ | ✅ | ✅ | ❌ |
-| Native multi-row batch | ✅ | ✅ | ✅ | ✅ (aggregate mode) | — |
-| Cross-scope query | ✅ | ✅ | ✅ | ✅ (unpinned only) | — |
-| Native index hints | ❌ (no syntax) | ❌ (no syntax) | ✅ | ✅ | — |
+| Capability | SQLite | MySQL/MariaDB | PostgreSQL | SQL Server | MongoDB (replica set) | MongoDB (standalone) |
+| --- | :-: | :-: | :-: | :-: | :-: | :-: |
+| Atomic commit | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| Provider sequence | ✅ | ✅ | ✅ | ✅ | ✅ (+1 command) | ❌ |
+| Append idempotency | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| Exact append outcomes | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| Durable high-water inspection | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ |
+| Exact retention | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| Compare-and-delete | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ |
+| Native multi-row batch | ✅ | ❌ (row fallback) | ✅ | ✅ | ✅ (aggregate mode) | — |
+| Cross-scope query | ✅ | ✅ | ✅ | ✅ | ✅ (unpinned only) | — |
+| Native index hints | ❌ (no syntax) | ❌ (no syntax) | ❌ (no syntax) | ✅ | ✅ | — |
 
 > **A declared key is a coverage candidate on every provider.** A query filtering on the key — or on
 > the leading columns of a composite key — is admitted without a separate `[GwIndex]`, because every
@@ -96,6 +97,25 @@ message names the file and the fix. Under a host, register the connection with
 > ⚠️ **Catalogs created by a v2 preview earlier than 0.2.0-preview.1 physically declare those columns
 > as `BINARY` and are not compatible.** Delete and recreate them. There is deliberately no migration,
 > alias, dual-write, or compatibility mode.
+
+---
+
+## MySQL/MariaDB — `Groundwork.MySql`
+
+```csharp
+using var connection = new MySqlProviderFactory().Create(
+    "Server=localhost;Database=app;User ID=app;Password=…");
+```
+
+- Uses `MySqlConnector` and the shared relational session/unit-of-work substrate.
+- Requires InnoDB plus a NO PAD `utf8mb4_0900_bin`; startup refuses incompatible collation
+  semantics rather than weakening ordinal key equality.
+- Provider sequences use `AUTO_INCREMENT`; schema coordination uses connection-bound
+  `GET_LOCK`/`RELEASE_LOCK` leases and durable fences.
+- Parameter budget: **65,535**, advertised by the provider.
+- No portable native index-hint contract is advertised.
+
+Test/CI connection variable: `GROUNDWORK_MYSQL_CONNECTION`.
 
 ---
 

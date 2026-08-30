@@ -26,6 +26,7 @@ jobs:
     timeout-minutes: 45
     env:
       GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/concurrencyci?replicaSet=concurrencyrs&directConnection=true
+      GROUNDWORK_MYSQL_CONNECTION: Server=127.0.0.1;Port=3306;User ID=root;Password=groundwork;SslMode=None;Pooling=false
       GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
       GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
     services:
@@ -50,6 +51,18 @@ jobs:
         options: >-
           --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P 'Groundwork!2026' -Q 'SELECT 1'"
           --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
+      mysql:
+        image: mysql:8.4.6
+        env:
+          MYSQL_ROOT_PASSWORD: groundwork
+          MYSQL_ROOT_HOST: "%"
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pgroundwork --silent"
+          --health-interval 5s
           --health-timeout 5s
           --health-retries 30
     steps:
@@ -87,6 +100,7 @@ jobs:
             echo '- InMemory: provider-neutral harness'
             echo '- SQLite: provider-neutral harness'
             echo '- MongoDB: live replica set harness'
+            echo '- MySQL: live provider-neutral harness'
             echo '- PostgreSQL: live harness and async provider surfaces'
             echo '- SQL Server: batched lifecycle proof (full W2 runs in isolated matrix jobs)'
           } >> "$GITHUB_STEP_SUMMARY"
@@ -104,6 +118,18 @@ jobs:
           --logger "trx;LogFileName=concurrency-net10.0.trx"
           --results-directory artifacts/concurrency/net10.0
           --blame-hang --blame-hang-timeout 10m --blame-hang-dump-type full
+      - name: Refuse a run whose MySQL concurrency proofs did not execute
+        run: |
+          for tfm in net8.0 net10.0; do
+            results="artifacts/concurrency/$tfm/concurrency-$tfm.trx"
+            passed=$(grep -o 'testName="Groundwork.Concurrency.Tests.ConcurrencyHarnessTests.MySql_[^"]*"[^>]*outcome="Passed"' "$results" | wc -l || true)
+            notExecuted=$(grep -o 'testName="Groundwork.Concurrency.Tests.ConcurrencyHarnessTests.MySql_[^"]*"[^>]*outcome="NotExecuted"' "$results" | wc -l || true)
+            echo "[$tfm] MySQL concurrency proofs passed: $passed, not executed: $notExecuted"
+            if [ "$passed" -ne 9 ] || [ "$notExecuted" -ne 0 ]; then
+              echo "::error::[$tfm] The nine live MySQL concurrency proofs were absent or skipped." >&2
+              exit 1
+            fi
+          done
       - name: Run PostgreSQL concurrency surfaces (.NET 8)
         run: >-
           dotnet test tests/Groundwork.PostgreSql.Tests/Groundwork.PostgreSql.Tests.csproj

@@ -11,6 +11,9 @@ that collation, while query and key comparisons additionally use binary expressi
 accents, supplementary characters, and trailing spaces are not delegated to a server default.
 Folded portable collations remain refused. Generated Int32/Int64 keys use `AUTO_INCREMENT`; schema
 application locks retain their exact physical connection through `GET_LOCK`/`RELEASE_LOCK`.
+The repository's [provider evidence report](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/mysql-provider-evidence.md)
+records the reproducible before/after source comparison and the live correctness, schema-tool, and
+concurrency lanes.
 
 ## Referencing it
 

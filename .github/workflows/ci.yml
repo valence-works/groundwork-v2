@@ -622,6 +622,82 @@ jobs:
           dotnet test tests/Groundwork.PostgreSql.Tests/Groundwork.PostgreSql.Tests.csproj
           --no-restore --configuration Release --filter "Category!=Concurrency"
 
+  mysql-provider:
+    if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GROUNDWORK_MYSQL_CONNECTION: Server=127.0.0.1;Port=3306;User ID=root;Password=groundwork;SslMode=None;Pooling=false
+    services:
+      mysql:
+        image: mysql:8.4.6
+        env:
+          MYSQL_ROOT_PASSWORD: groundwork
+          MYSQL_ROOT_HOST: "%"
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pgroundwork --silent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - run: dotnet restore tests/Groundwork.MySql.Tests/Groundwork.MySql.Tests.csproj
+      - run: dotnet restore tests/Groundwork.SchemaTool.Tests/Groundwork.SchemaTool.Tests.csproj
+      - name: Run MySQL provider conformance on both target frameworks
+        run: |
+          for tfm in net8.0 net10.0; do
+            dotnet test tests/Groundwork.MySql.Tests/Groundwork.MySql.Tests.csproj \
+              --no-restore --configuration Release --framework "$tfm" \
+              --filter "Category!=Concurrency" \
+              --logger "trx;LogFileName=mysql-conformance-$tfm.trx" \
+              --results-directory "artifacts/mysql/$tfm"
+          done
+      - name: Run the schema tool against live MySQL
+        run: >-
+          dotnet test tests/Groundwork.SchemaTool.Tests/Groundwork.SchemaTool.Tests.csproj
+          --no-restore --configuration Release
+          --filter FullyQualifiedName~SchemaToolMySqlEndToEndTests
+          --logger "trx;LogFileName=mysql-schema-tool.trx"
+          --results-directory artifacts/mysql/schema-tool
+      - name: Refuse a run whose MySQL proofs did not execute
+        run: |
+          conformance="Groundwork.MySql.Tests.MySqlProviderConformanceTests.Provider_passes_the_shipped_conformance_suite_on_both_surfaces"
+          for tfm in net8.0 net10.0; do
+            results="artifacts/mysql/$tfm/mysql-conformance-$tfm.trx"
+            passed=$(grep -o "testName=\"$conformance\"[^>]*outcome=\"Passed\"" "$results" | wc -l || true)
+            notExecuted=$(grep -c 'outcome="NotExecuted"' "$results" || true)
+            echo "[$tfm] MySQL conformance passed: $passed, not executed: $notExecuted"
+            if [ "$passed" -ne 1 ] || [ "$notExecuted" -ne 0 ]; then
+              echo "::error::[$tfm] The live MySQL provider proofs were absent or skipped." >&2
+              exit 1
+            fi
+          done
+
+          results="artifacts/mysql/schema-tool/mysql-schema-tool.trx"
+          proof="Groundwork.SchemaTool.Tests.SchemaToolMySqlEndToEndTests.Discovered_mysql_factory_plans_applies_and_reports_status_against_a_live_database"
+          passed=$(grep -o "testName=\"$proof\"[^>]*outcome=\"Passed\"" "$results" | wc -l || true)
+          notExecuted=$(grep -c 'outcome="NotExecuted"' "$results" || true)
+          echo "MySQL schema-tool proof passed: $passed, not executed: $notExecuted"
+          if [ "$passed" -ne 1 ] || [ "$notExecuted" -ne 0 ]; then
+            echo "::error::The live MySQL schema-tool proof was absent or skipped." >&2
+            exit 1
+          fi
+      - name: Upload MySQL diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mysql-diagnostics-${{ github.run_attempt }}
+          path: artifacts/mysql/**
+          if-no-files-found: ignore
+          retention-days: 14
+
   retention-correctness:
     if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' }}
     runs-on: ubuntu-latest
