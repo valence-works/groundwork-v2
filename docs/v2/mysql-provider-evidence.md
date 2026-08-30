@@ -1,5 +1,9 @@
 # MySQL/MariaDB provider evidence
 
+The implementation targets both server families, but the executable evidence in this report runs
+against MySQL 8.4.6 only. It does not claim a MariaDB live lane or production-support evidence;
+provider/version support tiers are assigned by the [support matrix](support-matrix.md).
+
 The fifth provider is the proof that the shared relational substrate makes a new relational
 provider smaller than the three implementations that preceded it. This report fixes the comparison
 to two immutable repository boundaries:
@@ -42,6 +46,6 @@ through the discovered MySQL schema-tool factory. The job inspects its TRX files
 live conformance or schema-tool proof was skipped.
 
 The main-only and exact-ref `Concurrency` workflow supplies the same live MySQL service to the
-provider-neutral harness. It requires all nine MySQL concurrency cases to pass on each target
+provider-neutral harness. It requires all ten MySQL concurrency cases to pass on each target
 framework. This remains separate from ordinary pull-request correctness feedback, and a skipped job
 is never reported as evidence.

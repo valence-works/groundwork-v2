@@ -78,7 +78,7 @@ idempotency, lifecycle, or data-migration ledgers by hand.
   During a rolling Groundwork upgrade, allow only the current release line to apply schema until all
   schema-applying instances use the same database-scoped lock contract.
 
-## MySQL/MariaDB: InnoDB writable primary
+## MySQL 8.4.6: InnoDB writable primary
 
 - Keep every Groundwork table on InnoDB and route runtime/schema-tool traffic to the writable
   primary. Startup must continue to verify NO PAD `utf8mb4_0900_bin`; do not replace that check with
@@ -89,11 +89,15 @@ idempotency, lifecycle, or data-migration ledgers by hand.
   `groundwork status`, compare every target with the preserved plan, and resume only from the newly
   reported current plan. Do not assume rollback restored the earlier catalog.
 
-## MongoDB: transaction-capable deployment
+Other MySQL 8.0.17+ releases and MariaDB 11.4.13+ remain compatibility-only until their own live
+conformance, schema-tool, and concurrency lanes exist. These recovery precautions still apply when
+evaluating them, but they do not turn an unevidenced deployment into a production-supported one.
 
-- Use a replica set or sharded cluster for production. Verify sessions, transactions, and every
-  application-required capability after deployment or topology changes; a standalone node is not a
-  production fallback.
+## MongoDB: replica-set deployment
+
+- Use a transaction-capable replica set for production. Verify sessions, transactions, and every
+  application-required capability after deployment or topology changes. Sharded clusters and
+  standalone nodes are compatibility-only in this release, not production fallbacks.
 - Monitor primary availability, replication health/lag, transaction errors, connection-pool
   pressure, and storage growth. Keep retryable-write/transaction behavior enabled for the official
   driver path used by Groundwork.

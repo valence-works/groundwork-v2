@@ -86,14 +86,42 @@ public sealed class PackagingContractTests
         Assert.Contains("**Compatibility-only**", matrix, StringComparison.Ordinal);
         Assert.Contains("**Development/reference-only**", matrix, StringComparison.Ordinal);
         Assert.Contains("one application writer process per database file", matrix, StringComparison.Ordinal);
-        Assert.Contains("transaction-capable replica set or sharded cluster", matrix, StringComparison.Ordinal);
+        Assert.Contains("| MySQL 8.4.6 | **Production-supported** |", matrix, StringComparison.Ordinal);
+        Assert.Contains("| MariaDB 11.4.13+ | **Compatibility-only** |", matrix, StringComparison.Ordinal);
+        Assert.Contains("| MongoDB replica set | **Production-supported** |", matrix, StringComparison.Ordinal);
+        Assert.Contains("| MongoDB sharded cluster | **Compatibility-only** |", matrix, StringComparison.Ordinal);
+        Assert.DoesNotContain("MySQL/MariaDB | **Production-supported**", matrix, StringComparison.Ordinal);
+        Assert.DoesNotContain("replica set or sharded cluster reached", matrix, StringComparison.Ordinal);
         Assert.Contains("Groundwork maintainers", operations, StringComparison.Ordinal);
         Assert.Contains("deployment owner", operations, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("## SQLite: single-writer file", operations, StringComparison.Ordinal);
         Assert.Contains("## PostgreSQL: writable primary", operations, StringComparison.Ordinal);
         Assert.Contains("## SQL Server: writable primary database", operations, StringComparison.Ordinal);
-        Assert.Contains("## MySQL/MariaDB: InnoDB writable primary", operations, StringComparison.Ordinal);
-        Assert.Contains("## MongoDB: transaction-capable deployment", operations, StringComparison.Ordinal);
+        Assert.Contains("## MySQL 8.4.6: InnoDB writable primary", operations, StringComparison.Ordinal);
+        Assert.Contains("## MongoDB: replica-set deployment", operations, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Wiki_support_guidance_defers_to_the_canonical_policy_instead_of_repeating_topology_promises()
+    {
+        var root = RepositoryRoot.Find();
+        var canonicalMatrix = "https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/support-matrix.md";
+        var canonicalRunbook = "https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/production-operations.md";
+        var providers = File.ReadAllText(Path.Combine(root, "docs", "wiki", "Providers.md"));
+        var versioning = File.ReadAllText(Path.Combine(root, "docs", "wiki", "Versioning-and-Support.md"));
+        var faq = File.ReadAllText(Path.Combine(root, "docs", "wiki", "FAQ.md"));
+        var operations = File.ReadAllText(Path.Combine(root, "docs", "wiki", "Production-Operations.md"));
+
+        Assert.Contains(canonicalMatrix, providers, StringComparison.Ordinal);
+        Assert.Contains(canonicalMatrix, versioning, StringComparison.Ordinal);
+        Assert.Contains(canonicalMatrix, faq, StringComparison.Ordinal);
+        Assert.Contains(canonicalRunbook, operations, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("| Provider | Tier | Supported topology |", providers, StringComparison.Ordinal);
+        Assert.DoesNotContain("| Component / provider | Tier | Supported topology |", versioning, StringComparison.Ordinal);
+        Assert.DoesNotContain("writable-primary MySQL/MariaDB", faq, StringComparison.Ordinal);
+        Assert.DoesNotContain("replica set or sharded cluster", faq, StringComparison.Ordinal);
+        Assert.DoesNotContain("## SQLite", operations, StringComparison.Ordinal);
     }
 
     [Fact]
