@@ -42,34 +42,58 @@ public sealed class MongoSchemaExecutorTests : IDisposable
             ["id"] = "one",
             ["total"] = new BsonDecimal128(12.34m)
         });
+        Collection(context, table).InsertOne(new BsonDocument
+        {
+            ["_id"] = "two",
+            ["id"] = "two",
+            ["total"] = new BsonDecimal128(56.78m)
+        });
 
         var superseding = Target(After(table), new SchemaEvolutionMetadata(
             semanticMigrationId: MigrationId,
             supersessions: [new ColumnSupersession(TotalColumn, "total_amount")],
             dualPresenceWindow: TimeSpan.Zero));
+        var migration = new DataMigration(MigrationId, superseding.Subject.Id, new CopyTotalTransform());
+        var catalog = new DataMigrationCatalog([migration]);
 
         var expand = PhysicalSchemaApplication.Apply(
-            superseding, executor, phase: SchemaEvolutionPhase.Expand, dataMigrationExecutor: migrations);
-        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, expand.Outcome);
+            superseding,
+            executor,
+            dataMigrations: catalog,
+            dataMigrationBudget: new DataMigrationBudget { MaxRowsPerBatch = 1, MaxBatches = 1 },
+            phase: SchemaEvolutionPhase.Expand,
+            dataMigrationExecutor: migrations);
+        Assert.Equal(PhysicalSchemaApplicationOutcome.DataMigrationIncomplete, expand.Outcome);
         var expanded = Collection(context, table).Find(new BsonDocument("_id", "one")).Single();
         Assert.True(expanded.Contains("total"));
         Assert.True(expanded.Contains("total_amount"));
 
-        // Nothing records the backfill, so the contract half is gated shut and removes nothing.
+        // The bounded pass has not recorded exhaustion, so contract is gated shut and removes nothing.
         var gated = PhysicalSchemaApplication.Apply(
-            superseding, executor, phase: SchemaEvolutionPhase.Contract, dataMigrationExecutor: migrations);
+            superseding,
+            executor,
+            dataMigrations: catalog,
+            phase: SchemaEvolutionPhase.Contract,
+            dataMigrationExecutor: migrations);
         Assert.Equal(PhysicalSchemaApplicationOutcome.Rejected, gated.Outcome);
         Assert.Equal("GW-EXPAND-002", Assert.Single(gated.Plan.Refusals).Code);
         Assert.True(Collection(context, table).Find(new BsonDocument("_id", "one")).Single().Contains("total"));
 
-        migrations.WriteLedgerEntry(new DataMigrationLedgerEntry(
-            superseding.Identity, MigrationId, table, "fingerprint",
-            DataMigrationRunState.Completed, cursor: null,
-            rowsScanned: 1, rowsChanged: 1, batches: 1,
-            DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow));
+        var completed = PhysicalSchemaApplication.Apply(
+            superseding,
+            executor,
+            dataMigrations: catalog,
+            phase: SchemaEvolutionPhase.Expand,
+            dataMigrationExecutor: migrations);
+        Assert.Equal(PhysicalSchemaApplicationOutcome.NoChanges, completed.Outcome);
+        Assert.Equal(DataMigrationStatus.Completed, Assert.Single(completed.DataMigrations).Status);
 
         var contract = PhysicalSchemaApplication.Apply(
-            superseding, executor, phase: SchemaEvolutionPhase.Contract, dataMigrationExecutor: migrations);
+            superseding,
+            executor,
+            dataMigrations: catalog,
+            phase: SchemaEvolutionPhase.Contract,
+            dataMigrationExecutor: migrations);
         Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, contract.Outcome);
         Assert.Contains(
             PhysicalSchemaOperationKind.DropColumn,
@@ -456,6 +480,18 @@ public sealed class MongoSchemaExecutorTests : IDisposable
 
     private static PhysicalSchemaTarget Target(StorageUnit unit, SchemaEvolutionMetadata? evolution = null) =>
         new(new SchemaSubject(MongoSchemaTargets.Physicalize(unit), evolution), MongoSchemaTargets.Provider);
+
+    private sealed class CopyTotalTransform : IDataMigrationTransform
+    {
+        public string Identity => "copy-total-v1";
+
+        public ImmutableArray<string> SourceColumns => ["total"];
+
+        public ImmutableArray<string> TargetColumns => ["total_amount"];
+
+        public DataMigrationValues Transform(DataMigrationRow row) =>
+            DataMigrationValues.Set(new Dictionary<string, object?> { ["total_amount"] = row["total"] });
+    }
 
     private static void Expire(MongoClientContext context, PhysicalSchemaTargetIdentity target) =>
         context.Database.GetCollection<BsonDocument>("__groundwork_metadata").UpdateOne(

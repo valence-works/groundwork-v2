@@ -165,6 +165,12 @@ public static class GroundworkSchemaCli
                     .Concat(Values(arguments, "--authorize-destructive")).ToHashSet(StringComparer.Ordinal);
                 var semantic = Values(arguments, "--allow-semantic")
                     .Concat(Values(arguments, "--authorize-semantic")).ToHashSet(StringComparer.Ordinal);
+                var dataMigrationCatalog = command == "apply"
+                    ? provider.DataMigrationCatalog
+                    : null;
+                var dataMigrationExecutor = command == "apply"
+                    ? provider.DataMigrations
+                    : null;
                 PhysicalSchemaPlanAuthorization Authorize(
                     PhysicalSchemaTarget target,
                     PhysicalSchemaDiffPlan plan)
@@ -226,6 +232,20 @@ public static class GroundworkSchemaCli
                     return SchemaToolExitCodes.AuthorizationRequired;
                 }
 
+                if (command == "apply")
+                {
+                    // Resolve every document-declared transform before the first target mutates.
+                    // A later target cannot otherwise reveal a missing host transform after an
+                    // earlier target has already published its schema.
+                    foreach (var item in preflight)
+                    {
+                        PhysicalSchemaApplication.PreflightDataMigration(
+                            item.Target,
+                            dataMigrationExecutor,
+                            dataMigrationCatalog);
+                    }
+                }
+
                 if (command == "adopt")
                 {
                     if (provider.Executor is not IPhysicalSchemaCatalogInspector)
@@ -270,8 +290,9 @@ public static class GroundworkSchemaCli
                         target,
                         provider.Executor,
                         planAuthorization: plan => Authorize(target, plan),
+                        dataMigrations: dataMigrationCatalog,
                         phase: phase,
-                        dataMigrationExecutor: provider.DataMigrations);
+                        dataMigrationExecutor: dataMigrationExecutor);
                     targetReports.Add(FromApplication(target, result) with
                     {
                         DataMigrations = ReadDataMigrations(provider, target),
@@ -345,6 +366,11 @@ public static class GroundworkSchemaCli
         catch (GroundworkSchemaBoundaryException exception)
         {
             await WriteErrorAsync(output, error, json, GroundworkSchemaBoundaryException.Code, exception.Message);
+            return SchemaToolExitCodes.ValidationFailed;
+        }
+        catch (DataMigrationRefusedException exception)
+        {
+            await WriteErrorAsync(output, error, json, exception.Code, exception.Message);
             return SchemaToolExitCodes.ValidationFailed;
         }
         catch (Exception exception) when (exception is JsonException or FormatException or ArgumentException)

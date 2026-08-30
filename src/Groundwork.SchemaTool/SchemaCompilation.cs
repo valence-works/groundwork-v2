@@ -11,33 +11,21 @@ public static class SchemaCompilation
         ArgumentNullException.ThrowIfNull(schema);
         var units = EnrichReferenceTargetScopes(schema.Tables.Select(Compile).ToArray());
         SchemaSubject.ValidateManifest(units);
+        var unitsById = units.ToDictionary(unit => unit.Id);
+        foreach (var table in schema.Tables)
+        {
+            // Offline verification has no provider compiler to construct a subject, but evolution
+            // still has declaration-level invariants: the replacement must exist and the retired
+            // column must no longer be part of the target shape.
+            _ = new SchemaSubject(unitsById[new StorageUnitId(table.LogicalId)], Compile(table.Evolution));
+        }
         return units;
     }
 
     public static StorageUnit Compile(SchemaTable table)
     {
         ArgumentNullException.ThrowIfNull(table);
-        var columns = table.Columns.Select(column => new ColumnDefinition
-        {
-            Name = column.Name,
-            Id = column.Id,
-            Type = Map(column.Type),
-            IsNullable = column.IsNullable,
-            MaxLength = column.Length,
-            Precision = column.Precision,
-            Scale = column.Scale,
-            Collation = column.Folding switch
-            {
-                TextFolding.None => null,
-                TextFolding.AsciiIgnoreCase => PortableCollation.OrdinalIgnoreCase,
-                TextFolding.UnicodeOrdinalIgnoreCase => PortableCollation.UnicodeOrdinalIgnoreCase,
-                _ => throw new ArgumentOutOfRangeException(nameof(column.Folding), column.Folding, null)
-            },
-            Default = column.Default is null ? null : new PortableDefault(column.Default.Value),
-            Generation = column.Generation == SchemaGeneration.ProviderSequence
-                ? ColumnGeneration.ProviderSequence
-                : ColumnGeneration.Supplied
-        }).ToList();
+        var columns = table.Columns.Select(Compile).ToList();
         return new StorageUnit
         {
             Id = new StorageUnitId(table.LogicalId),
@@ -107,6 +95,38 @@ public static class SchemaCompilation
         };
     }
 
+    private static ColumnDefinition Compile(SchemaColumn column) => new()
+    {
+        Name = column.Name,
+        Id = column.Id,
+        Type = Map(column.Type),
+        IsNullable = column.IsNullable,
+        MaxLength = column.Length,
+        Precision = column.Precision,
+        Scale = column.Scale,
+        Collation = column.Folding switch
+        {
+            TextFolding.None => null,
+            TextFolding.AsciiIgnoreCase => PortableCollation.OrdinalIgnoreCase,
+            TextFolding.UnicodeOrdinalIgnoreCase => PortableCollation.UnicodeOrdinalIgnoreCase,
+            _ => throw new ArgumentOutOfRangeException(nameof(column.Folding), column.Folding, null)
+        },
+        Default = column.Default is null ? null : new PortableDefault(column.Default.Value),
+        Generation = column.Generation == SchemaGeneration.ProviderSequence
+            ? ColumnGeneration.ProviderSequence
+            : ColumnGeneration.Supplied
+    };
+
+    private static SchemaEvolutionMetadata Compile(SchemaEvolution? evolution) => evolution is null
+        ? new SchemaEvolutionMetadata()
+        : new SchemaEvolutionMetadata(
+            evolution.IsDestructive,
+            evolution.SemanticMigrationId,
+            evolution.RetiresPrimaryStorage,
+            [.. evolution.Supersessions.Select(item => new ColumnSupersession(
+                Compile(item.SupersededColumn), item.ReplacementColumn))],
+            evolution.DualPresenceWindow);
+
     /// <summary>
     /// Mirrors the fluent builder, which supplies the system-owned token column when a declaration
     /// opts into optimistic concurrency without spelling it out.
@@ -165,6 +185,9 @@ public static class SchemaCompilation
         ArgumentNullException.ThrowIfNull(schema);
         ArgumentNullException.ThrowIfNull(targets);
         var units = EnrichReferenceTargetScopes(schema.Tables.Select(Compile).ToArray());
+        var evolutionById = schema.Tables.ToDictionary(
+            table => new StorageUnitId(table.LogicalId),
+            table => table.Evolution);
         SchemaSubject.ValidateManifestWithoutCrossUnitReferences(units);
         var refusals = StorageReferenceValidation.ValidateManifestBySource(units)
             .GroupBy(result => result.SourceUnitId)
@@ -176,7 +199,12 @@ public static class SchemaCompilation
                     result.Finding.Path)).ToArray());
         return OrderForPhysicalConstraintDeployment(units).Select(unit =>
         {
-            var target = targets.Compile(unit);
+            var evolution = evolutionById[unit.Id];
+            // Preserve metadata supplied by existing in-process compilers unless the document
+            // explicitly takes authority for evolution.
+            var target = evolution is null
+                ? targets.Compile(unit)
+                : targets.Compile(unit, Compile(evolution));
             return refusals.TryGetValue(unit.Id, out var unitRefusals)
                 ? target.WithPlanningRefusals(unitRefusals)
                 : target;

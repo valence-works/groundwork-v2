@@ -525,7 +525,8 @@ public sealed class SchemaGenerator : ISourceGenerator
         {
             return GroundworkSchemaCanonical.Parse(text!);
         }
-        catch (Exception exception) when (exception is FormatException or InvalidOperationException or System.Text.Json.JsonException)
+        catch (Exception exception) when (exception is FormatException or InvalidOperationException or
+                                          ArgumentException or System.Text.Json.JsonException)
         {
             context.ReportDiagnostic(Diagnostic.Create(InvalidSchemaFile, Location.None, selected.Path, exception.Message));
             return null;

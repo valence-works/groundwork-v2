@@ -178,6 +178,18 @@ against. Mark the declaration retired instead, and the plan becomes one authoriz
 var subject = new SchemaSubject(unit, new SchemaEvolutionMetadata(retiresPrimaryStorage: true));
 ```
 
+The canonical document expresses the same declaration without an in-process compiler:
+
+```json
+"evolution": {
+  "isDestructive": true,
+  "semanticMigrationId": null,
+  "retiresPrimaryStorage": true,
+  "supersessions": [],
+  "dualPresenceWindowTicks": 0
+}
+```
+
 ```bash
 groundwork apply --schema groundwork.schema.json --provider postgresql \
   --expected-plan sha256:… --allow-destructive drop-primary-storage:orders
@@ -204,6 +216,28 @@ new SchemaEvolutionMetadata(
     ],
     dualPresenceWindow: TimeSpan.FromHours(24))
 ```
+
+In `groundwork.schema.json`, put the full superseded column beside its replacement:
+
+```json
+"evolution": {
+  "isDestructive": false,
+  "semanticMigrationId": "2026-08-widen-total",
+  "retiresPrimaryStorage": false,
+  "supersessions": [{
+    "supersededColumn": {
+      "name": "total", "type": "Decimal", "nullable": true,
+      "length": null, "precision": 10, "scale": 2,
+      "folding": "None", "generation": "Supplied", "default": null
+    },
+    "replacementColumn": "total_amount"
+  }],
+  "dualPresenceWindowTicks": 864000000000
+}
+```
+
+Default-valued members may be omitted when authoring JSON. Canonical emission writes the complete
+object whenever evolution is active and omits the object entirely when evolution is default.
 
 ```bash
 groundwork apply --schema groundwork.schema.json --provider postgresql --phase expand   …

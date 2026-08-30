@@ -808,7 +808,7 @@ public sealed class GeneratorContractTests
     [Fact]
     public void Additional_file_round_trip_emits_the_same_canonical_fingerprint()
     {
-        const string json = "{\"tables\":[{\"name\":\"tickets\",\"columns\":[{\"name\":\"id\",\"type\":\"String\",\"nullable\":false}],\"key\":[\"id\"],\"indexes\":[]}] }";
+        const string json = "{\"tables\":[{\"name\":\"tickets\",\"columns\":[{\"name\":\"id\",\"type\":\"String\",\"nullable\":false}],\"key\":[\"id\"],\"indexes\":[],\"evolution\":{\"isDestructive\":true,\"retiresPrimaryStorage\":true}}] }";
         var result = Run("public static class Empty { }", new InMemoryAdditionalText("schema/groundwork.json", json));
 
         Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
@@ -819,7 +819,21 @@ public sealed class GeneratorContractTests
         var fingerprint = (string)assemblyAttribute.ConstructorArguments[1].Value!;
         Assert.Equal(GroundworkSchemaCanonical.Fingerprint(GroundworkSchemaCanonical.Parse(canonical)), fingerprint);
         Assert.Equal(GroundworkSchemaCanonical.Fingerprint(GroundworkSchemaCanonical.Parse(json)), fingerprint);
+        Assert.Contains("\"retiresPrimaryStorage\":true", canonical, StringComparison.Ordinal);
         Assert.Contains(result.Generated, generated => generated.Contains("ticketsStorageUnit", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Invalid_additional_file_evolution_reports_a_generator_diagnostic()
+    {
+        const string json =
+            "{\"tables\":[{\"name\":\"tickets\",\"columns\":[{\"name\":\"id\",\"type\":\"String\",\"nullable\":false}]," +
+            "\"key\":[\"id\"],\"indexes\":[],\"evolution\":{\"supersessions\":[{\"supersededColumn\":{\"name\":\"slug\",\"type\":\"String\",\"nullable\":true},\"replacementColumn\":\"slug_v2\"}]}}]}";
+
+        var result = Run("public static class Empty { }", new InMemoryAdditionalText("schema/groundwork.json", json));
+
+        var diagnostic = Assert.Single(result.Diagnostics, item => item.Id == "GW_SCHEMA_JSON_001");
+        Assert.Contains("requires a semantic migration id", diagnostic.GetMessage(), StringComparison.Ordinal);
     }
 
     [Fact]

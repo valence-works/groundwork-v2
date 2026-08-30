@@ -110,23 +110,12 @@ public static class DataMigrationRunner
         ArgumentNullException.ThrowIfNull(unit);
         ArgumentNullException.ThrowIfNull(migration);
         var bounds = (budget ?? DataMigrationBudget.Default).Validate();
-        var projection = migration.ValidateAgainst(unit);
-        EnsureCapabilities(executor);
         mode.CancellationToken.ThrowIfCancellationRequested();
 
         var fingerprint = migration.RequestFingerprint(unit);
         var clock = now ?? DateTimeOffset.UtcNow;
         var recorded = await mode.ReadLedgerEntry(executor, target, migration.Id).ConfigureAwait(false);
-        DataMigrationLedgerEntry entry;
-        DataMigrationCursor? cursor = null;
-        if (recorded is null)
-        {
-            entry = DataMigrationLedgerEntry.Start(target, migration, unit, clock);
-            // Recorded before the first row moves, so an interruption during the very first chunk
-            // still leaves durable evidence that this migration was started and did not finish.
-            await mode.WriteLedgerEntry(executor, entry).ConfigureAwait(false);
-        }
-        else
+        if (recorded is not null)
         {
             if (!string.Equals(recorded.RequestFingerprint, fingerprint, StringComparison.Ordinal))
             {
@@ -146,6 +135,23 @@ public static class DataMigrationRunner
                     recorded.Batches,
                     null);
             }
+        }
+
+        // A completed migration may be replayed after contract has retired one of its source
+        // columns. Validate the live projection only while work can still be scheduled.
+        var projection = migration.ValidateAgainst(unit);
+        EnsureCapabilities(executor);
+        DataMigrationLedgerEntry entry;
+        DataMigrationCursor? cursor = null;
+        if (recorded is null)
+        {
+            entry = DataMigrationLedgerEntry.Start(target, migration, unit, clock);
+            // Recorded before the first row moves, so an interruption during the very first chunk
+            // still leaves durable evidence that this migration was started and did not finish.
+            await mode.WriteLedgerEntry(executor, entry).ConfigureAwait(false);
+        }
+        else
+        {
             entry = recorded;
             if (entry.Cursor is { } canonical && !DataMigrationCursor.TryDecode(unit, canonical, out cursor))
             {

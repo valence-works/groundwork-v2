@@ -218,11 +218,13 @@ exact operation.
 | `GW-EXPAND-005` | Readiness was established for another target or against another applied state |
 | `GW-EXPAND-006` | A declaration withdrew a supersession whose column is still retained |
 
-## Not covered
+## Canonical schema documents
 
-Evolution metadata — `IsDestructive`, `SemanticMigrationId`, `RetiresPrimaryStorage`, and now
-`Supersessions` and `DualPresenceWindow` — is a kernel declaration attached by an
-`IPhysicalSchemaTargetCompiler`. It is not expressible in `groundwork.schema.json`, so a supersession
-cannot be declared through the canonical schema document today. That gap predates this work and
-applies to every member of `SchemaEvolutionMetadata`; closing it belongs with the schema-document
-contract, not here.
+`groundwork.schema.json` carries the same evolution declaration in an optional table-level
+`evolution` object. A supersession names the semantic migration, carries the old column in full,
+names its replacement, and records the window in ticks. The object is omitted for the safe default,
+so existing canonical documents and fingerprints remain byte-identical.
+
+The deployment host supplies the matching transform through its schema-tool session's
+`DataMigrationCatalog`. Apply resolves every declared identity before any target mutates; a missing
+transform refuses with `GW-MIGRATION-008` and names the exact identity.

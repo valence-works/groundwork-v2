@@ -117,6 +117,71 @@ public sealed class SchemaToolContractTests
     }
 
     [Fact]
+    public async Task A_later_targets_missing_transform_blocks_every_target_before_mutation()
+    {
+        const string migration = "missing-orders-transform";
+        var schema = Temp("multi-target-missing-transform.json", """
+            {"tables":[
+              {"name":"customers","columns":[{"name":"id","type":"Guid","nullable":false}],"key":["id"],"indexes":[]},
+              {"name":"orders","columns":[{"name":"id","type":"Guid","nullable":false}],"key":["id"],"indexes":[],"evolution":{"semanticMigrationId":"MIGRATION"}}
+            ]}
+            """.Replace("MIGRATION", migration, StringComparison.Ordinal));
+        using var session = new FakeSession();
+        Assert.Equal(SchemaToolExitCodes.PendingChanges, await RunAsync(
+            ["plan", "--schema", schema, "--provider", "fake", "--output", "json"], _ => session));
+        using var plan = JsonDocument.Parse(output.ToString());
+        var fingerprints = plan.RootElement.GetProperty("targets").EnumerateArray()
+            .Select(target => target.GetProperty("planFingerprint").GetString()!)
+            .ToArray();
+
+        var exit = await RunAsync(
+        [
+            "apply", "--schema", schema, "--provider", "fake", "--output", "json",
+            "--expected-plan", fingerprints[0], "--expected-plan", fingerprints[1],
+            "--allow-semantic", migration
+        ], _ => session);
+
+        Assert.Equal(SchemaToolExitCodes.ValidationFailed, exit);
+        Assert.Contains(DataMigrationCodes.MissingTransform, output.ToString(), StringComparison.Ordinal);
+        Assert.Contains(migration, output.ToString(), StringComparison.Ordinal);
+        Assert.Empty(session.ExecutorImpl.AppliedOperations);
+    }
+
+    [Fact]
+    public async Task A_later_targets_invalid_transform_blocks_every_target_before_mutation()
+    {
+        const string migrationId = "invalid-orders-transform";
+        var schema = Temp("multi-target-invalid-transform.json", """
+            {"tables":[
+              {"name":"customers","columns":[{"name":"id","type":"Guid","nullable":false}],"key":["id"],"indexes":[]},
+              {"name":"orders","columns":[{"name":"id","type":"Guid","nullable":false}],"key":["id"],"indexes":[],"evolution":{"semanticMigrationId":"MIGRATION"}}
+            ]}
+            """.Replace("MIGRATION", migrationId, StringComparison.Ordinal));
+        var migration = new DataMigration(
+            migrationId,
+            new StorageUnitId("orders"),
+            new InvalidOrdersTransform());
+        using var session = new FakeSession(migration: migration);
+        Assert.Equal(SchemaToolExitCodes.PendingChanges, await RunAsync(
+            ["plan", "--schema", schema, "--provider", "fake", "--output", "json"], _ => session));
+        using var plan = JsonDocument.Parse(output.ToString());
+        var fingerprints = plan.RootElement.GetProperty("targets").EnumerateArray()
+            .Select(target => target.GetProperty("planFingerprint").GetString()!)
+            .ToArray();
+
+        var exit = await RunAsync(
+        [
+            "apply", "--schema", schema, "--provider", "fake", "--output", "json",
+            "--expected-plan", fingerprints[0], "--expected-plan", fingerprints[1],
+            "--allow-semantic", migrationId
+        ], _ => session);
+
+        Assert.Equal(SchemaToolExitCodes.ValidationFailed, exit);
+        Assert.Contains(DataMigrationCodes.NotApplicable, output.ToString(), StringComparison.Ordinal);
+        Assert.Empty(session.ExecutorImpl.AppliedOperations);
+    }
+
+    [Fact]
     public async Task Logical_references_appear_as_metadata_in_cli_plans()
     {
         var schema = Temp("reference-plan.json", """
@@ -277,6 +342,24 @@ public sealed class SchemaToolContractTests
         Assert.Equal(SchemaToolExitCodes.ValidationFailed,
             await RunAsync(["validate", "--schema", malformed, "--provider", "fake", "--offline", "--output", "json"]));
         Assert.Contains("GW-CLI-005", output.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Offline_validation_refuses_impossible_or_malformed_supersessions()
+    {
+        var impossible = Temp("impossible-supersession.json", """
+            {"tables":[{"name":"tickets","columns":[{"name":"id","type":"String","nullable":false},{"name":"slug","type":"String","nullable":true}],"key":["id"],"indexes":[],"evolution":{"semanticMigrationId":"move-slug","supersessions":[{"supersededColumn":{"name":"slug","type":"String","nullable":true},"replacementColumn":"slug_v2"}]}}]}
+            """);
+
+        Assert.Equal(SchemaToolExitCodes.ValidationFailed,
+            await RunAsync(["validate", "--schema", impossible, "--provider", "fake", "--offline", "--output", "json"]));
+        Assert.Contains("GW-CLI-005", output.ToString(), StringComparison.Ordinal);
+
+        const string malformed =
+            "{\"tables\":[{\"name\":\"tickets\",\"columns\":[{\"name\":\"id\",\"type\":\"String\",\"nullable\":false}]," +
+            "\"key\":[\"id\"],\"indexes\":[],\"evolution\":{\"semanticMigrationId\":\"move-slug\",\"supersessions\":[null]}}]}";
+        var failure = Assert.Throws<FormatException>(() => GroundworkSchemaCanonical.Parse(malformed));
+        Assert.Contains("supersessions", failure.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -572,14 +655,47 @@ public sealed class SchemaToolContractTests
         return GroundworkSchemaCli.RunAsync(arguments, output, error, resolver ?? (_ => null));
     }
 
-    private sealed class FakeSession(string provider = "fake", string? refusal = null) : ISchemaToolProviderSession
+    private sealed class FakeSession(
+        string provider = "fake",
+        string? refusal = null,
+        DataMigration? migration = null) : ISchemaToolProviderSession, IDataMigrationExecutor
     {
         public FakeExecutor ExecutorImpl { get; } = new();
         public ProviderIdentity Provider { get; } = new(provider, "1");
         public IPhysicalSchemaTargetCompiler Targets => new FakeTargets(Provider, refusal);
         public IPhysicalSchemaExecutor Executor => ExecutorImpl;
         public IPhysicalSchemaHistoryInspector Inspector => ExecutorImpl;
+        public IDataMigrationExecutor? DataMigrations => migration is null ? null : this;
+        public DataMigrationCatalog DataMigrationCatalog => migration is null
+            ? Groundwork.Kernel.Schema.DataMigrationCatalog.Empty
+            : new DataMigrationCatalog([migration]);
+        public DataMigrationCapabilities Capabilities => DataMigrationRunner.Required;
+        public DataMigrationLedgerEntry? ReadLedgerEntry(PhysicalSchemaTargetIdentity target, string migrationId) => null;
+        public ValueTask<DataMigrationLedgerEntry?> ReadLedgerEntryAsync(
+            PhysicalSchemaTargetIdentity target,
+            string migrationId,
+            CancellationToken cancellationToken = default) => new((DataMigrationLedgerEntry?)null);
+        public IReadOnlyList<DataMigrationLedgerEntry> ReadLedgerEntries(PhysicalSchemaTargetIdentity target) => [];
+        public ValueTask<IReadOnlyList<DataMigrationLedgerEntry>> ReadLedgerEntriesAsync(
+            PhysicalSchemaTargetIdentity target,
+            CancellationToken cancellationToken = default) => new((IReadOnlyList<DataMigrationLedgerEntry>)[]);
+        public void WriteLedgerEntry(DataMigrationLedgerEntry entry) => throw new NotSupportedException();
+        public ValueTask WriteLedgerEntryAsync(
+            DataMigrationLedgerEntry entry,
+            CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public DataMigrationChunkOutcome ExecuteChunk(DataMigrationChunkRequest request) => throw new NotSupportedException();
+        public ValueTask<DataMigrationChunkOutcome> ExecuteChunkAsync(
+            DataMigrationChunkRequest request,
+            CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public void Dispose() { }
+    }
+
+    private sealed class InvalidOrdersTransform : IDataMigrationTransform
+    {
+        public string Identity => "invalid-orders/v1";
+        public System.Collections.Immutable.ImmutableArray<string> SourceColumns => ["missing_source"];
+        public System.Collections.Immutable.ImmutableArray<string> TargetColumns => ["id"];
+        public DataMigrationValues Transform(DataMigrationRow row) => DataMigrationValues.Unchanged;
     }
 
     private sealed class FakeTargets(ProviderIdentity provider, string? refusal = null) : IPhysicalSchemaTargetCompiler

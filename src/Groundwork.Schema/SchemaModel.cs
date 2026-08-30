@@ -294,6 +294,84 @@ public sealed record SchemaCheck
     public SchemaDefault Value { get; }
 }
 
+/// <summary>One deployed column replaced across an expand-contract dual-presence window.</summary>
+public sealed record SchemaColumnSupersession
+{
+    public SchemaColumnSupersession(SchemaColumn supersededColumn, string replacementColumn)
+    {
+        SupersededColumn = supersededColumn ?? throw new ArgumentNullException(nameof(supersededColumn));
+        ReplacementColumn = string.IsNullOrWhiteSpace(replacementColumn)
+            ? throw new ArgumentException("A non-empty value is required.", nameof(replacementColumn))
+            : replacementColumn;
+        if (string.Equals(SupersededColumn.Name, ReplacementColumn, StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                $"Column '{replacementColumn}' cannot supersede itself.", nameof(replacementColumn));
+        }
+    }
+
+    public SchemaColumn SupersededColumn { get; }
+    public string ReplacementColumn { get; }
+}
+
+/// <summary>Optional operator-authored evolution metadata for one canonical schema table.</summary>
+public sealed record SchemaEvolution
+{
+    public SchemaEvolution(
+        bool isDestructive = false,
+        string? semanticMigrationId = null,
+        bool retiresPrimaryStorage = false,
+        IEnumerable<SchemaColumnSupersession>? supersessions = null,
+        TimeSpan dualPresenceWindow = default)
+    {
+        if (semanticMigrationId is not null && string.IsNullOrWhiteSpace(semanticMigrationId))
+            throw new ArgumentException("A semantic migration id cannot be empty.", nameof(semanticMigrationId));
+        if (dualPresenceWindow < TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(dualPresenceWindow), "A dual-presence window cannot run backwards.");
+
+        IsDestructive = isDestructive;
+        SemanticMigrationId = semanticMigrationId;
+        RetiresPrimaryStorage = retiresPrimaryStorage;
+        Supersessions = new ReadOnlyCollection<SchemaColumnSupersession>((supersessions ?? [])
+            .Select(item => item ?? throw new ArgumentException(
+                "A column supersession cannot be null.", nameof(supersessions)))
+            .OrderBy(item => item.SupersededColumn.Name, StringComparer.Ordinal)
+            .ToArray());
+        DualPresenceWindow = dualPresenceWindow;
+
+        if (Supersessions.Select(item => item.SupersededColumn.Name)
+                .Distinct(StringComparer.Ordinal).Count() != Supersessions.Count)
+        {
+            throw new ArgumentException(
+                "A column can be superseded only once in one declaration.", nameof(supersessions));
+        }
+        if (Supersessions.Count != 0 && string.IsNullOrWhiteSpace(SemanticMigrationId))
+        {
+            throw new ArgumentException(
+                "A declaration that supersedes a column requires a semantic migration id.",
+                nameof(semanticMigrationId));
+        }
+        if (Supersessions.Count != 0 && RetiresPrimaryStorage)
+        {
+            throw new ArgumentException(
+                "A retired table cannot also supersede one of its columns.", nameof(supersessions));
+        }
+    }
+
+    public bool IsDestructive { get; }
+    public string? SemanticMigrationId { get; }
+    public bool RetiresPrimaryStorage { get; }
+    public IReadOnlyList<SchemaColumnSupersession> Supersessions { get; }
+    public TimeSpan DualPresenceWindow { get; }
+
+    internal bool IsDefault =>
+        !IsDestructive &&
+        SemanticMigrationId is null &&
+        !RetiresPrimaryStorage &&
+        Supersessions.Count == 0 &&
+        DualPresenceWindow == TimeSpan.Zero;
+}
+
 public sealed record SchemaTable
 {
     public SchemaTable(
@@ -367,6 +445,9 @@ public sealed record SchemaTable
     /// switch each of them sets independently.
     /// </summary>
     public SchemaForeignColumns ForeignColumns { get; }
+
+    /// <summary>Evolution metadata emitted only when it differs from the safe default.</summary>
+    public SchemaEvolution? Evolution { get; init; }
 
     private static IReadOnlyList<T> Snapshot<T>(IEnumerable<T> values, string parameterName) =>
         new ReadOnlyCollection<T>((values ?? throw new ArgumentNullException(parameterName)).ToArray());

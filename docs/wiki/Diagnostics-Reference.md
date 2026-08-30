@@ -378,6 +378,7 @@ durable state. See **[expand–contract workflows](../v2/expand-contract.md)**.
 | `GW-MIGRATION-005` | Data-migration ledger state is missing, malformed, or self-contradictory |
 | `GW-MIGRATION-006` | A transform produced a column it did not declare as a target |
 | `GW-MIGRATION-007` | A migration stopped before its source was exhausted and can be resumed |
+| `GW-MIGRATION-008` | The declaration names a semantic migration the running host does not supply; register the exact identity and subject before apply |
 
 ---
 

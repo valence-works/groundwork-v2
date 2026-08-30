@@ -8,6 +8,24 @@ namespace Groundwork.Kernel.Schema;
 public interface IPhysicalSchemaTargetCompiler
 {
     PhysicalSchemaTarget Compile(StorageUnit declaration);
+
+    /// <summary>
+    /// Physicalizes a canonical document declaration while preserving its operator-authored
+    /// evolution metadata. Existing provider compilers inherit this implementation: their normal
+    /// physicalization still owns the definition and provider metadata, while the document owns
+    /// the evolution declaration.
+    /// </summary>
+    PhysicalSchemaTarget Compile(StorageUnit declaration, SchemaEvolutionMetadata evolution)
+    {
+        ArgumentNullException.ThrowIfNull(declaration);
+        ArgumentNullException.ThrowIfNull(evolution);
+        var compiled = Compile(declaration);
+        return new PhysicalSchemaTarget(
+                new SchemaSubject(compiled.Subject.Definition, evolution),
+                compiled.Provider,
+                compiled.ProviderDefinitions)
+            .WithPlanningRefusals(compiled.PlanningRefusals);
+    }
 }
 
 /// <summary>One open deployment-tool connection to a provider's schema machinery.</summary>
@@ -24,6 +42,12 @@ public interface ISchemaToolProviderSession : IDisposable
     /// catalog; a provider that returns null simply reports no data-migration state.
     /// </summary>
     IDataMigrationExecutor? DataMigrations => null;
+
+    /// <summary>
+    /// Host-supplied transforms available to canonical document declarations. The default is empty,
+    /// so a document cannot silently name work the running deployment host cannot perform.
+    /// </summary>
+    DataMigrationCatalog DataMigrationCatalog => DataMigrationCatalog.Empty;
 }
 
 public sealed record SchemaToolProviderOptions(

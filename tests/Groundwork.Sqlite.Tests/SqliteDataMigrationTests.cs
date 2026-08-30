@@ -24,7 +24,7 @@ public sealed class SqliteDataMigrationTests
         var target = Target();
         var executor = Executor(store);
         Assert.Equal(PhysicalSchemaApplicationOutcome.Applied,
-            PhysicalSchemaApplication.Apply(target, executor, Now).Outcome);
+            PhysicalSchemaApplication.Apply(Target(semanticMigrationId: null), executor, Now).Outcome);
         Seed(store, 5);
 
         var first = PhysicalSchemaApplication.Apply(
@@ -67,7 +67,7 @@ public sealed class SqliteDataMigrationTests
         using var store = TemporaryStore.Create();
         var target = Target();
         var executor = Executor(store);
-        PhysicalSchemaApplication.Apply(target, executor, Now);
+        PhysicalSchemaApplication.Apply(Target(semanticMigrationId: null), executor, Now);
         Seed(store, 4);
 
         // The first chunk (rows 1-2) commits; the second throws while transforming row 4.
@@ -90,7 +90,7 @@ public sealed class SqliteDataMigrationTests
         using var store = TemporaryStore.Create();
         var target = Target();
         var executor = Executor(store);
-        PhysicalSchemaApplication.Apply(target, executor, Now);
+        PhysicalSchemaApplication.Apply(Target(semanticMigrationId: null), executor, Now);
         Seed(store, 4);
 
         var stopped = PhysicalSchemaApplication.Apply(
@@ -254,12 +254,14 @@ public sealed class SqliteDataMigrationTests
         Key = new KeyDefinition { Columns = ["id"] }
     };
 
-    private static PhysicalSchemaTarget Target()
+    private static PhysicalSchemaTarget Target(string? semanticMigrationId = MigrationId)
     {
         var physical = SqliteSchemaCoordinator.Physicalize(Unit());
         var basis = SqliteSchemaCoordinator.Target(physical);
+        if (semanticMigrationId is null)
+            return basis;
         return new PhysicalSchemaTarget(
-            new SchemaSubject(physical, new SchemaEvolutionMetadata(semanticMigrationId: MigrationId)),
+            new SchemaSubject(physical, new SchemaEvolutionMetadata(semanticMigrationId: semanticMigrationId)),
             basis.Provider,
             basis.ProviderDefinitions);
     }

@@ -33,7 +33,7 @@ public sealed class SqlServerDataMigrationTests
         try
         {
             Assert.Equal(PhysicalSchemaApplicationOutcome.Applied,
-                PhysicalSchemaApplication.Apply(target, executor, Now).Outcome);
+                PhysicalSchemaApplication.Apply(Target(unit, semanticMigrationId: null), executor, Now).Outcome);
             Seed(connectionString, unit, 5);
 
             var first = PhysicalSchemaApplication.Apply(
@@ -107,12 +107,14 @@ public sealed class SqlServerDataMigrationTests
         };
     }
 
-    private static PhysicalSchemaTarget Target(StorageUnit unit)
+    private static PhysicalSchemaTarget Target(StorageUnit unit, string? semanticMigrationId = MigrationId)
     {
         var physical = SqlServerSchemaCoordinator.Physicalize(unit);
         var basis = SqlServerSchemaCoordinator.Target(physical);
+        if (semanticMigrationId is null)
+            return basis;
         return new PhysicalSchemaTarget(
-            new SchemaSubject(physical, new SchemaEvolutionMetadata(semanticMigrationId: MigrationId)),
+            new SchemaSubject(physical, new SchemaEvolutionMetadata(semanticMigrationId: semanticMigrationId)),
             basis.Provider,
             basis.ProviderDefinitions);
     }

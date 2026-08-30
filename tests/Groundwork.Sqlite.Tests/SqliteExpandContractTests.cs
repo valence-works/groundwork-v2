@@ -46,7 +46,7 @@ public sealed class SqliteExpandContractTests
         // so these two attempts are timed against the real one.
         var expandedAt = DateTimeOffset.UtcNow;
         var early = PhysicalSchemaApplication.Apply(
-            superseding, executor, expandedAt, phase: SchemaEvolutionPhase.Contract);
+            superseding, executor, expandedAt, dataMigrations: Catalog(), phase: SchemaEvolutionPhase.Contract);
 
         Assert.Equal(PhysicalSchemaApplicationOutcome.Rejected, early.Outcome);
         Assert.Equal("GW-EXPAND-003", Assert.Single(early.Plan.Refusals).Code);
@@ -55,7 +55,7 @@ public sealed class SqliteExpandContractTests
         // ---- past the window: the contract removes the superseded column and nothing else.
         var contract = PhysicalSchemaApplication.Apply(
             superseding, executor, expandedAt + Window + TimeSpan.FromHours(1),
-            phase: SchemaEvolutionPhase.Contract);
+            dataMigrations: Catalog(), phase: SchemaEvolutionPhase.Contract);
 
         Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, contract.Outcome);
         Assert.Equal(new[] { "id", "name", "__groundwork_action", "total_amount" }, Columns(store));
@@ -63,33 +63,31 @@ public sealed class SqliteExpandContractTests
 
         // ---- and it is terminal: replanning either phase has nothing left to do.
         Assert.Equal(PhysicalSchemaApplicationOutcome.NoChanges,
-            PhysicalSchemaApplication.Apply(superseding, executor, expandedAt.AddDays(3)).Outcome);
+            PhysicalSchemaApplication.Apply(
+                superseding, executor, expandedAt.AddDays(3), dataMigrations: Catalog()).Outcome);
         Assert.Equal(PhysicalSchemaApplicationOutcome.NoChanges,
             PhysicalSchemaApplication.Apply(
-                superseding, executor, expandedAt.AddDays(3), phase: SchemaEvolutionPhase.Contract).Outcome);
+                superseding, executor, expandedAt.AddDays(3), dataMigrations: Catalog(),
+                phase: SchemaEvolutionPhase.Contract).Outcome);
         Assert.Equal(new[] { "id", "name", "__groundwork_action", "total_amount" }, Columns(store));
     }
 
     [Fact]
-    public void A_contract_without_a_recorded_backfill_refuses_and_leaves_the_column_in_place()
+    public void A_missing_host_transform_refuses_before_expand_mutates_the_catalog()
     {
         using var store = TemporaryStore.Create();
         var executor = Executor(store);
         PhysicalSchemaApplication.Apply(Target(Before(), evolution: null), executor, T0);
         Seed(store);
         var superseding = Target(After(), Superseding());
-        // The expand runs without a transform catalog, so the replacement column exists and is empty
-        // and the data-migration ledger records nothing at all.
-        PhysicalSchemaApplication.Apply(superseding, executor, T0.AddHours(1));
+        var refusal = Assert.Throws<DataMigrationRefusedException>(() =>
+            PhysicalSchemaApplication.Apply(superseding, executor, T0.AddHours(1)));
 
-        var contract = PhysicalSchemaApplication.Apply(
-            superseding, executor, DateTimeOffset.UtcNow.AddDays(30), phase: SchemaEvolutionPhase.Contract);
-
-        Assert.Equal(PhysicalSchemaApplicationOutcome.Rejected, contract.Outcome);
-        Assert.Equal("GW-EXPAND-002", Assert.Single(contract.Plan.Refusals).Code);
-        Assert.Equal(new[] { "id", "name", "total", "__groundwork_action", "total_amount" }, Columns(store));
+        Assert.Equal(DataMigrationCodes.MissingTransform, refusal.Code);
+        Assert.Contains(MigrationId, refusal.Message, StringComparison.Ordinal);
+        Assert.Equal(new[] { "id", "name", "total", "__groundwork_action" }, Columns(store));
         Assert.Equal(new decimal?[] { 1.25m, 2.50m, 3.75m }, Values(store, "total"));
-        Assert.Equal(new decimal?[] { null, null, null }, Values(store, "total_amount"));
+        Assert.Null(executor.ReadLedgerEntry(superseding.Identity, MigrationId));
     }
 
     // ------------------------------------------------------------------ fixtures

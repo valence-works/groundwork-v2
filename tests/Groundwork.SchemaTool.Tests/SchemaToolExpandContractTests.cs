@@ -21,7 +21,7 @@ public sealed class SchemaToolExpandContractTests : IDisposable
 
     private const string AfterSchema =
         """
-        {"tables":[{"name":"tickets","columns":[{"name":"id","type":"String","nullable":false,"length":64,"precision":null,"scale":null,"folding":"None","generation":"Supplied"},{"name":"slug_v2","type":"String","nullable":true,"length":128,"precision":null,"scale":null,"folding":"None","generation":"Supplied"}],"key":["id"],"indexes":[]}]}
+        {"tables":[{"name":"tickets","columns":[{"name":"id","type":"String","nullable":false,"length":64,"precision":null,"scale":null,"folding":"None","generation":"Supplied"},{"name":"slug_v2","type":"String","nullable":true,"length":128,"precision":null,"scale":null,"folding":"None","generation":"Supplied"}],"key":["id"],"indexes":[],"evolution":{"isDestructive":false,"semanticMigrationId":"2026-08-slugify","retiresPrimaryStorage":false,"supersessions":[{"supersededColumn":{"name":"slug","type":"String","nullable":true,"length":64,"precision":null,"scale":null,"folding":"None","generation":"Supplied"},"replacementColumn":"slug_v2"}],"dualPresenceWindowTicks":36000000000}}]}
         """;
 
     [Fact]
@@ -33,7 +33,6 @@ public sealed class SchemaToolExpandContractTests : IDisposable
         Assert.Equal(SchemaToolExitCodes.Success, await RunAsync(
             ["apply", "--schema", before, "--provider", "expanding", "--safe"], session));
 
-        session.Superseding = true;
         // The expand half carries the semantic migration that populates the replacement, so even
         // the additive plan is authorized against its exact fingerprint.
         Assert.Equal(SchemaToolExitCodes.Success, await ApplyExpandAsync(session, after));
@@ -69,7 +68,6 @@ public sealed class SchemaToolExpandContractTests : IDisposable
         var before = Temp("before.json", BeforeSchema);
         var after = Temp("after.json", AfterSchema);
         await RunAsync(["apply", "--schema", before, "--provider", "expanding", "--safe"], session);
-        session.Superseding = true;
         await ApplyExpandAsync(session, after);
         Complete(session);
 
@@ -115,6 +113,23 @@ public sealed class SchemaToolExpandContractTests : IDisposable
         Assert.StartsWith("GW-CLI-001", error.ToString());
     }
 
+    [Fact]
+    public async Task Apply_refuses_a_document_migration_the_host_does_not_supply_before_publication()
+    {
+        var session = new SupersedingSession { OffersMigration = false };
+        var before = Temp("before.json", BeforeSchema);
+        var after = Temp("after.json", AfterSchema);
+        Assert.Equal(SchemaToolExitCodes.Success, await RunAsync(
+            ["apply", "--schema", before, "--provider", "expanding", "--safe"], session));
+
+        var result = await ApplyExpandAsync(session, after);
+
+        Assert.Equal(SchemaToolExitCodes.ValidationFailed, result);
+        Assert.Contains(DataMigrationCodes.MissingTransform, output.ToString(), StringComparison.Ordinal);
+        Assert.Contains(MigrationId, output.ToString(), StringComparison.Ordinal);
+        Assert.Equal(1, session.PublishCount);
+    }
+
     // ------------------------------------------------------------------ fixtures
 
     private readonly string directory =
@@ -158,12 +173,15 @@ public sealed class SchemaToolExpandContractTests : IDisposable
     }
 
     /// <summary>Records the backfill as durably finished, which is the only thing that opens the gate.</summary>
-    private static void Complete(SupersedingSession session) =>
+    private static void Complete(SupersedingSession session)
+    {
+        session.Ledger.Clear();
         session.Ledger.Add(new DataMigrationLedgerEntry(
-            session.Target!, MigrationId, "tickets", "fingerprint",
+            session.Target!, MigrationId, "tickets", session.Migration.RequestFingerprint(session.Definition!),
             DataMigrationRunState.Completed, cursor: null,
             rowsScanned: 4, rowsChanged: 4, batches: 1,
             DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch));
+    }
 
     private string Temp(string name, string contents)
     {
@@ -180,8 +198,8 @@ public sealed class SchemaToolExpandContractTests : IDisposable
     }
 
     /// <summary>
-    /// A provider session whose compiler attaches the supersession, because evolution metadata is a
-    /// kernel declaration rather than part of the canonical schema document.
+    /// A provider session whose ordinary compiler knows only physicalization. The canonical
+    /// document supplies evolution through the interface's default evolution-aware overload.
     /// </summary>
     private sealed class SupersedingSession : ISchemaToolProviderSession, IDataMigrationExecutor
     {
@@ -189,9 +207,16 @@ public sealed class SchemaToolExpandContractTests : IDisposable
 
         public List<DataMigrationLedgerEntry> Ledger { get; } = [];
 
-        public bool Superseding { get; set; }
+        public bool OffersMigration { get; init; } = true;
+
+        public int PublishCount { get; private set; }
 
         public PhysicalSchemaTargetIdentity? Target { get; private set; }
+
+        public StorageUnit? Definition { get; private set; }
+
+        public DataMigration Migration { get; } =
+            new(MigrationId, new StorageUnitId("tickets"), new CopySlugTransform());
 
         public ProviderIdentity Provider { get; } = new("expanding", "1");
 
@@ -202,6 +227,10 @@ public sealed class SchemaToolExpandContractTests : IDisposable
         public IPhysicalSchemaHistoryInspector Inspector => new Executing(this);
 
         public IDataMigrationExecutor? DataMigrations => this;
+
+        public DataMigrationCatalog DataMigrationCatalog => OffersMigration
+            ? new DataMigrationCatalog([Migration])
+            : DataMigrationCatalog.Empty;
 
         public DataMigrationCapabilities Capabilities => DataMigrationRunner.Required;
 
@@ -242,19 +271,9 @@ public sealed class SchemaToolExpandContractTests : IDisposable
         {
             public PhysicalSchemaTarget Compile(StorageUnit declaration)
             {
-                var evolution = owner.Superseding
-                    ? new SchemaEvolutionMetadata(
-                        semanticMigrationId: MigrationId,
-                        supersessions:
-                        [
-                            new ColumnSupersession(
-                                new ColumnDefinition { Name = "slug", Type = PortableType.String, MaxLength = 64 },
-                                "slug_v2")
-                        ],
-                        dualPresenceWindow: TimeSpan.FromHours(1))
-                    : null;
+                owner.Definition = declaration;
                 var target = new PhysicalSchemaTarget(
-                    new SchemaSubject(SearchKeyProjection.Expand(declaration), evolution),
+                    new SchemaSubject(SearchKeyProjection.Expand(declaration)),
                     owner.Provider);
                 owner.Target = target.Identity;
                 return target;
@@ -287,7 +306,11 @@ public sealed class SchemaToolExpandContractTests : IDisposable
             public void PublishAppliedState(
                 PhysicalSchemaAppliedState state,
                 string? expectedAppliedTargetFingerprint,
-                IPhysicalSchemaApplicationLock applicationLock) => owner.applied = state;
+                IPhysicalSchemaApplicationLock applicationLock)
+            {
+                owner.applied = state;
+                owner.PublishCount++;
+            }
 
             private sealed class Lease(PhysicalSchemaTargetIdentity target) : IPhysicalSchemaApplicationLock
             {
@@ -297,6 +320,18 @@ public sealed class SchemaToolExpandContractTests : IDisposable
                 {
                 }
             }
+        }
+
+        private sealed class CopySlugTransform : IDataMigrationTransform
+        {
+            public string Identity => "copy-slug-v1";
+
+            public System.Collections.Immutable.ImmutableArray<string> SourceColumns => ["slug"];
+
+            public System.Collections.Immutable.ImmutableArray<string> TargetColumns => ["slug_v2"];
+
+            public DataMigrationValues Transform(DataMigrationRow row) =>
+                DataMigrationValues.Set(new Dictionary<string, object?> { ["slug_v2"] = row["slug"] });
         }
     }
 }
