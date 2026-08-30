@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export LC_ALL=C
 
 script_directory=$(cd "$(dirname "$0")" && pwd)
 repository_root=$(git -C "$script_directory/.." rev-parse --show-toplevel)
@@ -74,6 +73,7 @@ manifest="$output_root/manifest.txt"
   echo "lock_backend=$lock_backend"
   echo "idle_load_limit=1.0"
   uname -a
+  locale
   dotnet --info
 } > "$manifest"
 
@@ -96,11 +96,11 @@ record_idle_sample() {
   local sample=$1
   local load_one
   if [[ -r /proc/loadavg ]]; then
-    load_one=$(awk '{ print $1 }' /proc/loadavg)
+    load_one=$(LC_ALL=C awk '{ print $1 }' /proc/loadavg)
   elif [[ "$(uname -s)" == "Darwin" ]]; then
-    load_one=$(sysctl -n vm.loadavg | tr -d '{}' | awk '{ print $1 }')
+    load_one=$(LC_ALL=C sysctl -n vm.loadavg | LC_ALL=C tr -d '{}' | LC_ALL=C awk '{ print $1 }')
   else
-    load_one=$(uptime | sed -E 's/.*load average(s)?:[[:space:]]*([0-9]+([.][0-9]+)?).*/\2/')
+    load_one=$(LC_ALL=C uptime | LC_ALL=C sed -E 's/.*load average(s)?:[[:space:]]*([0-9]+([.][0-9]+)?).*/\2/')
   fi
   if [[ ! "$load_one" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
     {
@@ -113,7 +113,7 @@ record_idle_sample() {
     echo "idle_sample_${sample}_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "idle_sample_${sample}_load_1m=$load_one"
   } >> "$manifest"
-  if ! awk -v load="$load_one" 'BEGIN { exit !(load <= 1.0) }'; then
+  if ! LC_ALL=C awk -v load="$load_one" 'BEGIN { exit !(load <= 1.0) }'; then
     {
       echo "load_refusal=One-minute load $load_one exceeds the idle-host limit of 1.0."
       echo "final_status=invalid-load-sample-$sample"

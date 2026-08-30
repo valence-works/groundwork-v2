@@ -83,7 +83,7 @@ public sealed class CiWorkflowContractTests
             "run-full-solution-recurrence.sh"));
 
         Assert.Contains("GROUNDWORK_CONFIRM_IDLE_HOST", script, StringComparison.Ordinal);
-        Assert.Contains("export LC_ALL=C", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("export LC_ALL=C", script, StringComparison.Ordinal);
         Assert.Contains("eng/verify-exact-head.sh", script, StringComparison.Ordinal);
         Assert.Contains("git status --porcelain", script, StringComparison.Ordinal);
         Assert.Contains("/tmp/groundwork-tests.lock", script, StringComparison.Ordinal);
@@ -94,7 +94,9 @@ public sealed class CiWorkflowContractTests
         Assert.Contains("sleep 30", script, StringComparison.Ordinal);
         Assert.Contains("load <= 1.0", script, StringComparison.Ordinal);
         Assert.Contains("/proc/loadavg", script, StringComparison.Ordinal);
-        Assert.Contains("sysctl -n vm.loadavg", script, StringComparison.Ordinal);
+        Assert.Contains("LC_ALL=C sysctl -n vm.loadavg", script, StringComparison.Ordinal);
+        Assert.Contains("LC_ALL=C uptime", script, StringComparison.Ordinal);
+        Assert.Contains("locale", script, StringComparison.Ordinal);
         Assert.Contains("/$attempt_id", script, StringComparison.Ordinal);
         Assert.Contains("seq 1 5", script, StringComparison.Ordinal);
         Assert.Contains("dotnet restore Groundwork.slnx", script, StringComparison.Ordinal);
