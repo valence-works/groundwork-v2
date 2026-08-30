@@ -175,6 +175,55 @@ public sealed class RecordTableTests
     }
 
     [Fact]
+    public void Double_members_infer_storage_types_and_nullable_values_round_trip()
+    {
+        var table = RecordTable.For<DoubleRecord>("double_records")
+            .Key(row => row.Id)
+            .Build();
+
+        Assert.Equal(
+            [PortableType.Guid, PortableType.Double, PortableType.Double],
+            table.Definition.Columns.Select(column => column.Type));
+        Assert.False(table.Definition.Columns.Single(column => column.Name == "value").IsNullable);
+        Assert.True(table.Definition.Columns.Single(column => column.Name == "optionalValue").IsNullable);
+
+        var value = new DoubleRecord(Guid.NewGuid(), 0.1d + 0.2d, double.Epsilon);
+        var row = table.ToRowValues(value);
+
+        Assert.Equal(value.Value, Assert.IsType<double>(row["value"]));
+        Assert.Equal(value.OptionalValue, Assert.IsType<double>(row["optionalValue"]));
+        Assert.Equal(value, table.FromRowValues(row));
+    }
+
+    [Fact]
+    public void Double_members_are_excluded_from_the_typed_record_query_model()
+    {
+        var table = RecordTable.For<DoubleRecord>("double_query_records")
+            .Key(row => row.Id)
+            .Build();
+
+        var exception = Assert.Throws<Groundwork.Query.Linq.LinqTranslationException>(() => table.Query.OrderBy(row => row.Value));
+
+        Assert.Contains(exception.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-LINQ-101" &&
+            diagnostic.Message.Contains("not a mapped column", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Double_members_are_refused_as_record_index_columns()
+    {
+        var exception = Assert.Throws<StorageDeclarationException>(() =>
+            RecordTable.For<DoubleRecord>("double_index_records")
+                .Key(row => row.Id)
+                .Index("by_value", row => row.Value)
+                .Build());
+
+        Assert.Contains(exception.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-PORT-012" &&
+            diagnostic.Message.Contains("Double", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Unindexed_json_members_remain_valid_and_mappable()
     {
         var table = RecordTable.For<JsonCustomer>("json_records")
@@ -629,6 +678,7 @@ public sealed class RecordTableTests
     public sealed record VersionedCustomer(Guid Id, string Name, long Version);
     public sealed record InvalidVersionCustomer(Guid Id, string Name, string Version);
     public sealed record JsonCustomer(Guid Id, object Payload);
+    public sealed record DoubleRecord(Guid Id, double Value, double? OptionalValue);
     public sealed record AggregatedCustomer(Guid Id, string Name, int Amount);
     public sealed record AggregatedSummary(long Count, long Total);
     public sealed record JoinedCustomer(long Id, string Name);

@@ -293,7 +293,7 @@ public sealed partial class RecordTable<T>
             PortableType.Binary => QueryType.Binary,
             _ => default
         };
-        return type != PortableType.Json;
+        return type is not (PortableType.Json or PortableType.Double);
     }
 
     private static QueryRequest WithProjection(QueryRequest request, IReadOnlyList<ColumnRef> columns) =>

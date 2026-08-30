@@ -253,11 +253,14 @@ public sealed class DocumentUnitBuilder<T>
                     "GW-DOC-DECL-005",
                     $"Index '{index.Name}' targets path '{indexPath}', which has no projected column. Declare Project() first.",
                     $"indexes.{index.Name}"));
-            else if (projection.Type == PortableType.Json)
+            else if (projection.Type is PortableType.Json or PortableType.Double)
+            {
+                var typeName = projection.Type == PortableType.Json ? "JSON" : "Double";
                 diagnostics.Add(new(
                     "GW-DOC-DECL-006",
-                    $"Index '{index.Name}' targets JSON path '{indexPath}', but JSON projections are not portable index keys. Project a scalar value instead.",
+                    $"Index '{index.Name}' targets {typeName} path '{indexPath}', but {typeName} projections are not portable index keys. Project a portable comparable value instead.",
                     $"indexes.{index.Name}"));
+            }
         }
 
         if (diagnostics.Count != 0)
@@ -387,6 +390,7 @@ public sealed class DocumentUnitBuilder<T>
         if (type == typeof(int)) return PortableType.Int32;
         if (type == typeof(long)) return PortableType.Int64;
         if (type == typeof(decimal)) return PortableType.Decimal;
+        if (type == typeof(double)) return PortableType.Double;
         if (type == typeof(bool)) return PortableType.Boolean;
         if (type == typeof(DateTimeOffset)) return PortableType.DateTimeOffset;
         if (type == typeof(Guid)) return PortableType.Guid;
@@ -757,6 +761,7 @@ public sealed class DocumentUnit<T>
             PortableType.DateTimeOffset => current.GetDateTimeOffset(),
             PortableType.Guid => current.GetGuid(),
             PortableType.Binary => current.GetBytesFromBase64(),
+            PortableType.Double => current.GetDouble(),
             PortableType.Json => current.Clone(),
             _ => current.Clone()
         };
