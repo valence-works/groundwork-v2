@@ -71,7 +71,7 @@ literal framework of its own, and `Groundwork.Packaging.Tests` enforces that.
 | **`Groundwork.Records.Store`** | You want typed rows (`RecordTable<T>`) — **this is the one to reference**, not `Groundwork.Records` | Records + Store |
 | **`Groundwork.Documents`** | You want typed JSON documents with schema versioning | Records + Store |
 | **`Groundwork.Extensions.DependencyInjection`** | You are hosting Groundwork in an ASP.NET Core or generic host | Store, Kernel, `Microsoft.Extensions.*` — **no provider** |
-| **`Groundwork.EntityFrameworkCore`** | You are scaffolding Groundwork declarations from an existing EF Core model | Kernel + EF Core relational metadata — **no provider and no application assembly loading** |
+| **`Groundwork.EntityFrameworkCore`** | You are [scaffolding and migrating](EF-Core-Migration) from an existing EF Core model | Kernel + EF Core relational metadata — **no provider and no application assembly loading** |
 
 > **Common mistake:** referencing `Groundwork.Records` directly. That package deliberately has *no*
 > provider dependency, so it has no `table.Open(connection)`. Reference **`Groundwork.Records.Store`**,

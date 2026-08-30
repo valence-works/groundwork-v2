@@ -4,6 +4,7 @@
 - [Installation](Installation)
 - [Package Map](Package-Map)
 - [Core Concepts](Core-Concepts)
+- [Migrate from EF Core](EF-Core-Migration)
 
 **Declaring**
 - [Declaring Storage](Declaring-Storage)

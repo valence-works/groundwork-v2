@@ -433,6 +433,9 @@ release, restored from a backup, or provisioned by the platform team — while G
 history row saying so. Starting against it refuses, and applying would try to create what is
 already there.
 
+When that catalog is owned by an EF Core application, first follow **[Migrate from EF Core](EF-Core-Migration)**.
+Model similarity is not enough: adoption still requires Groundwork's exact physical representation.
+
 `groundwork adopt` is the way in. It **executes no DDL**. Under the schema application lock it
 inspects the deployed catalog, proves it matches the compiled target exactly — every column's type,
 nullability, default, collation, key position and generation, plus every declared index — and then

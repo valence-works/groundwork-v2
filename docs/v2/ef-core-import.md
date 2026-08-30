@@ -65,3 +65,5 @@ other annotations that the compiled model did not retain.
 
 The findings are scaffolding diagnostics, not runtime exceptions. Their stable meanings are listed
 in the [Diagnostics Reference](../wiki/Diagnostics-Reference.md#gw-ef---ef-core-model-import).
+For the complete concept map, catalog-adoption boundary, and a worked application cutover, see
+[Migrate from EF Core](../wiki/EF-Core-Migration.md).
