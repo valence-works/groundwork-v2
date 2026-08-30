@@ -109,8 +109,11 @@ All five conformance providers (InMemory, SQLite, PostgreSQL, SQL Server, MongoD
 `None` and `Optimistic`, verified by the shared suite: catalog/index checks, CRUD outcomes, optimistic
 conflict behavior, scope isolation, and unit-of-work commit/rollback.
 
-- **SQL Server** uses `sp_getapplock` plus a durable fence/history pair for schema coordination, and
-  serializable write transactions for optimistic concurrency.
+- **SQL Server** uses one database-scoped `sp_getapplock` plus per-target durable fences/history for
+  schema coordination, preventing different declarations from deadlocking through the shared server
+  catalog. Pre-database-lock previews do not coordinate with the new resource, so rolling upgrades
+  must pre-apply schema or restrict schema application to one release line. It uses serializable
+  write transactions for optimistic concurrency.
 - **SQLite** uses `BeginTransaction(IsolationLevel.Serializable, deferred: false)` — an immediate
   write transaction — which avoids upgrading a read transaction and the resulting `BUSY_SNAPSHOT`.
 - **MongoDB** transactional same-identity races return portable deterministic outcomes;

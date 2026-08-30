@@ -18,11 +18,67 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
     public async Task Concurrent_first_schema_applies_serialize_infrastructure_creation()
     {
         var connectionString = fixture.Reset();
+        await ApplyDifferentTargetsConcurrently(connectionString, "sql_infrastructure_race");
+    }
+
+    [SkippableFact]
+    [Trait("Category", "Concurrency")]
+    public async Task Concurrent_schema_applies_for_different_targets_share_the_database_lock()
+    {
+        var connectionString = fixture.Reset();
+        using (var bootstrap = new SqlConnection(connectionString))
+        {
+            bootstrap.Open();
+            new SqlServerDialect().EnsureInfrastructure(bootstrap);
+        }
+
+        await ApplyDifferentTargetsConcurrently(connectionString, "sql_catalog_race");
+    }
+
+    [SkippableFact]
+    [Trait("Category", "Concurrency")]
+    public async Task Database_schema_lock_blocks_a_different_target_until_release()
+    {
+        var connectionString = fixture.Reset();
+        var dialect = new SqlServerDialect();
+        using var first = new SqlConnection(connectionString);
+        using var second = new SqlConnection(connectionString);
+        first.Open();
+        second.Open();
+        dialect.AcquireApplicationLock(first, "groundwork:schema:first");
+
+        using var waiterStarted = new ManualResetEventSlim();
+        var waiter = Task.Run(() =>
+        {
+            waiterStarted.Set();
+            dialect.AcquireApplicationLock(second, "groundwork:schema:second");
+            return true;
+        });
+
+        try
+        {
+            Assert.True(waiterStarted.Wait(TimeSpan.FromSeconds(10)));
+            await Task.Delay(TimeSpan.FromMilliseconds(250));
+            Assert.False(waiter.IsCompleted);
+            dialect.ReleaseApplicationLock(first, "groundwork:schema:first");
+            Assert.True(await waiter.WaitAsync(TimeSpan.FromSeconds(10)));
+        }
+        finally
+        {
+            if (dialect.VerifyApplicationLock(first, "groundwork:schema:first"))
+                dialect.ReleaseApplicationLock(first, "groundwork:schema:first");
+            if (waiter.IsCompletedSuccessfully)
+                dialect.ReleaseApplicationLock(second, "groundwork:schema:second");
+        }
+    }
+
+    private static async Task ApplyDifferentTargetsConcurrently(string connectionString, string prefix)
+    {
         using var ready = new Barrier(2);
         var tasks = Enumerable.Range(0, 2).Select(index => Task.Run(() =>
         {
             ready.SignalAndWait(TimeSpan.FromSeconds(10));
-            var name = $"sql_infrastructure_race_{index}_{Guid.NewGuid():N}";
+            var name = $"{prefix}_{index}_{Guid.NewGuid():N}";
             var unit = new StorageUnit
             {
                 Id = new StorageUnitId(name),
@@ -900,6 +956,7 @@ public sealed class SqlServerFixture
                OR t.name IN (N'__groundwork_search_key_algorithms',N'__groundwork_data_migrations')
                OR t.name LIKE N'conformance[_]global%'
                OR t.name LIKE N'sql[_]infrastructure[_]race[_]%'
+               OR t.name LIKE N'sql[_]catalog[_]race[_]%'
                OR t.name LIKE N'conformance[_]scoped%'
                OR t.name LIKE N'boundary[_]%'
                OR t.name LIKE N'sqlserver[_]batch[_]boundary[_]%'
