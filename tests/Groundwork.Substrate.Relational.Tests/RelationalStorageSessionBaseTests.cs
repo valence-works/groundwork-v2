@@ -60,7 +60,13 @@ public sealed class RelationalStorageSessionBaseTests
         var connection = new TrackingConnection();
         var storage = new TrackingStorageAdapter(connection);
         var append = new TrackingAppendAdapter(storage);
-        var session = new TrackingSession(Unit(), connection, storage, append);
+        var session = new TrackingSession(
+            Unit(),
+            connection,
+            storage,
+            append,
+            access: StorageAccess.PrivilegedAcrossScopes(
+                new StorageAccessAudit("operator", "closed-session-ordering")));
         session.Close();
 
         Assert.Throws<ObjectDisposedException>(() => session.Append(
@@ -126,10 +132,11 @@ public sealed class RelationalStorageSessionBaseTests
         TrackingConnection connection,
         TrackingStorageAdapter storage,
         TrackingAppendAdapter append,
-        DbTransaction? transaction = null)
+        DbTransaction? transaction = null,
+        StorageAccess? access = null)
         : RelationalStorageSessionBase(
             unit,
-            StorageAccess.Global,
+            access ?? StorageAccess.Global,
             storage,
             append,
             retentionAdapter: null,

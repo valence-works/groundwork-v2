@@ -400,6 +400,7 @@ public abstract class RelationalStorageSessionBase : IStorageSession
 
     private OnAppendRetentionCoordinator.AppendRegistration? BeginOnAppend(bool eligible)
     {
+        execution.EnsureOpen();
         StorageAccessValidation.EnsurePointOperation(Access, "write");
         return eligible && execution.Transaction is null
             ? OnAppendRetentionCoordinator.Begin(
