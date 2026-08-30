@@ -46,6 +46,6 @@ through the discovered MySQL schema-tool factory. The job inspects its TRX files
 live conformance or schema-tool proof was skipped.
 
 The main-only and exact-ref `Concurrency` workflow supplies the same live MySQL service to the
-provider-neutral harness. It requires all nine MySQL concurrency cases to pass on each target
+provider-neutral harness. It requires all ten MySQL concurrency cases to pass on each target
 framework. This remains separate from ordinary pull-request correctness feedback, and a skipped job
 is never reported as evidence.

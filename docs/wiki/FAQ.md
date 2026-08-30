@@ -118,11 +118,12 @@ No. Allocation is **strictly increasing**, but concurrent transactions can commi
 a different order — so the value is not a commit-order timestamp. **Gaps are valid.** It is an
 identity, not a clock.
 
-### Why does MongoDB need a replica set?
+### Why does MongoDB need a transaction-capable deployment?
 
 Transactions. Sequences, idempotent append, exact append, durable high-water inspection, exact
-retention, compare-and-delete, and atomic commit all require them. Standalone MongoDB does not
-advertise those capabilities and refuses before doing I/O.
+retention, compare-and-delete, and atomic commit all require them. A transaction-capable replica set
+or sharded deployment can advertise those capabilities; only replica sets are production-supported
+in this release. Standalone MongoDB does not advertise them and refuses before doing I/O.
 
 ### Why is SQLite rejecting a second connection?
 
