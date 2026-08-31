@@ -1,4 +1,6 @@
 using System.Linq.Expressions;
+using BenchmarkDotNet.Configs;
+using BenchmarkDotNet.Running;
 using Groundwork.Kernel;
 using Groundwork.MongoDb;
 using Groundwork.PostgreSql;
@@ -13,7 +15,11 @@ using Groundwork.Testing;
 using KernelStorageUnit = Groundwork.Kernel.StorageUnit;
 
 if (args.Length > 0 && string.Equals(args[0], "benchmarks", StringComparison.OrdinalIgnoreCase))
-    return Groundwork.Benchmarks.BenchmarkSuite.Run(args[1..]);
+{
+    _ = BenchmarkSwitcher.FromAssembly(typeof(Groundwork.Benchmarks.StorageBenchmarks).Assembly)
+        .Run(args[1..], DefaultConfig.Instance);
+    return 0;
+}
 
 if (args.Length == 0 || (args[0] is not "roundtrips" and not "linq" and not "records"))
 {

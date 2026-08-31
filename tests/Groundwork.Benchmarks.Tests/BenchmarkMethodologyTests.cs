@@ -91,125 +91,113 @@ public sealed class BenchmarkMethodologyTests
     [Fact]
     public void Applied_sqlite_catalog_matches_the_canonical_benchmark_schema()
     {
-        var benchmarks = new StorageBenchmarks();
-        benchmarks.Setup();
-        try
+        using var fixture = new StorageBenchmarkFixture();
+        var benchmarks = fixture.Benchmarks;
+
+        using var connection = new SqliteConnection(benchmarks.DatabaseConnectionString);
+        connection.Open();
+
+        using var tableInfo = connection.CreateCommand();
+        tableInfo.CommandText = "PRAGMA table_info('benchmark_items');";
+        using var tableReader = tableInfo.ExecuteReader();
+        var columns = new List<(string Name, string Type, long NotNull, long PrimaryKey)>();
+        while (tableReader.Read())
         {
-            using var connection = new SqliteConnection(benchmarks.DatabaseConnectionString);
-            connection.Open();
-
-            using var tableInfo = connection.CreateCommand();
-            tableInfo.CommandText = "PRAGMA table_info('benchmark_items');";
-            using var tableReader = tableInfo.ExecuteReader();
-            var columns = new List<(string Name, string Type, long NotNull, long PrimaryKey)>();
-            while (tableReader.Read())
-            {
-                columns.Add((
-                    tableReader.GetString(1),
-                    tableReader.GetString(2),
-                    tableReader.GetInt64(3),
-                    tableReader.GetInt64(5)));
-            }
-            Assert.Equal(
-                new[]
-                {
-                    ("id", "TEXT", 1L, 1L),
-                    ("category", "TEXT", 1L, 0L),
-                    ("sequence", "INTEGER", 1L, 0L),
-                    ("payload", "TEXT", 1L, 0L),
-                    ("__groundwork_action", "TEXT", 1L, 0L)
-                },
-                columns);
-
-            using var tableSql = connection.CreateCommand();
-            tableSql.CommandText = "SELECT sql FROM sqlite_master WHERE type='table' AND name='benchmark_items';";
-            var sql = Assert.IsType<string>(tableSql.ExecuteScalar());
-            Assert.Equal(
-                "CREATE TABLE \"benchmark_items\" (" +
-                "\"id\" TEXT COLLATE GROUNDWORK_UTF16_ORDINAL NOT NULL, " +
-                "\"category\" TEXT COLLATE GROUNDWORK_UTF16_ORDINAL NOT NULL, " +
-                "\"sequence\" INTEGER COLLATE BINARY NOT NULL, " +
-                "\"payload\" TEXT COLLATE GROUNDWORK_UTF16_ORDINAL NOT NULL, " +
-                "\"__groundwork_action\" TEXT COLLATE GROUNDWORK_UTF16_ORDINAL NOT NULL DEFAULT 'I', " +
-                "PRIMARY KEY (\"id\"))",
-                sql);
-
-            using var indexList = connection.CreateCommand();
-            indexList.CommandText = "PRAGMA index_list('benchmark_items');";
-            using var listReader = indexList.ExecuteReader();
-            var declaredIndexes = new List<(string Name, long Unique)>();
-            while (listReader.Read())
-            {
-                if (string.Equals(listReader.GetString(3), "c", StringComparison.Ordinal))
-                    declaredIndexes.Add((listReader.GetString(1), listReader.GetInt64(2)));
-            }
-            var declaredIndex = Assert.Single(declaredIndexes);
-            Assert.Equal(
-                "__groundwork_ix_15_benchmark_items_30_ix_benchmark_items_category_id",
-                declaredIndex.Name);
-            Assert.Equal(0L, declaredIndex.Unique);
-
-            using var indexInfo = connection.CreateCommand();
-            var escapedIndexName = declaredIndex.Name.Replace("'", "''", StringComparison.Ordinal);
-            indexInfo.CommandText = $"PRAGMA index_xinfo('{escapedIndexName}');";
-            using var indexReader = indexInfo.ExecuteReader();
-            var indexed = new List<(string Name, long Descending, string Collation)>();
-            while (indexReader.Read())
-            {
-                if (indexReader.GetInt64(5) == 1)
-                    indexed.Add((indexReader.GetString(2), indexReader.GetInt64(3), indexReader.GetString(4)));
-            }
-            Assert.Equal(
-                new[]
-                {
-                    ("category", 0L, "GROUNDWORK_UTF16_ORDINAL"),
-                    ("id", 0L, "GROUNDWORK_UTF16_ORDINAL"),
-                    ("sequence", 0L, "BINARY"),
-                    ("payload", 0L, "GROUNDWORK_UTF16_ORDINAL")
-                },
-                indexed);
+            columns.Add((
+                tableReader.GetString(1),
+                tableReader.GetString(2),
+                tableReader.GetInt64(3),
+                tableReader.GetInt64(5)));
         }
-        finally
+        Assert.Equal(
+            new[]
+            {
+                ("id", "TEXT", 1L, 1L),
+                ("category", "TEXT", 1L, 0L),
+                ("sequence", "INTEGER", 1L, 0L),
+                ("payload", "TEXT", 1L, 0L),
+                ("__groundwork_action", "TEXT", 1L, 0L)
+            },
+            columns);
+
+        using var tableSql = connection.CreateCommand();
+        tableSql.CommandText = "SELECT sql FROM sqlite_master WHERE type='table' AND name='benchmark_items';";
+        var sql = Assert.IsType<string>(tableSql.ExecuteScalar());
+        Assert.Equal(
+            "CREATE TABLE \"benchmark_items\" (" +
+            "\"id\" TEXT COLLATE GROUNDWORK_UTF16_ORDINAL NOT NULL, " +
+            "\"category\" TEXT COLLATE GROUNDWORK_UTF16_ORDINAL NOT NULL, " +
+            "\"sequence\" INTEGER COLLATE BINARY NOT NULL, " +
+            "\"payload\" TEXT COLLATE GROUNDWORK_UTF16_ORDINAL NOT NULL, " +
+            "\"__groundwork_action\" TEXT COLLATE GROUNDWORK_UTF16_ORDINAL NOT NULL DEFAULT 'I', " +
+            "PRIMARY KEY (\"id\"))",
+            sql);
+
+        using var indexList = connection.CreateCommand();
+        indexList.CommandText = "PRAGMA index_list('benchmark_items');";
+        using var listReader = indexList.ExecuteReader();
+        var declaredIndexes = new List<(string Name, long Unique)>();
+        while (listReader.Read())
         {
-            benchmarks.Cleanup();
+            if (string.Equals(listReader.GetString(3), "c", StringComparison.Ordinal))
+                declaredIndexes.Add((listReader.GetString(1), listReader.GetInt64(2)));
         }
+        var declaredIndex = Assert.Single(declaredIndexes);
+        Assert.Equal(
+            "__groundwork_ix_15_benchmark_items_30_ix_benchmark_items_category_id",
+            declaredIndex.Name);
+        Assert.Equal(0L, declaredIndex.Unique);
+
+        using var indexInfo = connection.CreateCommand();
+        var escapedIndexName = declaredIndex.Name.Replace("'", "''", StringComparison.Ordinal);
+        indexInfo.CommandText = $"PRAGMA index_xinfo('{escapedIndexName}');";
+        using var indexReader = indexInfo.ExecuteReader();
+        var indexed = new List<(string Name, long Descending, string Collation)>();
+        while (indexReader.Read())
+        {
+            if (indexReader.GetInt64(5) == 1)
+                indexed.Add((indexReader.GetString(2), indexReader.GetInt64(3), indexReader.GetString(4)));
+        }
+        Assert.Equal(
+            new[]
+            {
+                ("category", 0L, "GROUNDWORK_UTF16_ORDINAL"),
+                ("id", 0L, "GROUNDWORK_UTF16_ORDINAL"),
+                ("sequence", 0L, "BINARY"),
+                ("payload", 0L, "GROUNDWORK_UTF16_ORDINAL")
+            },
+            indexed);
     }
 
     [Fact]
     public void Groundwork_covered_query_uses_the_declared_covering_index()
     {
-        var benchmarks = new StorageBenchmarks();
-        benchmarks.Setup();
-        try
-        {
-            var request = benchmarks.GroundworkCoveredQueryRequest;
-            var query = new SqliteQueryRenderer().Render(request);
-            Assert.False(request.Projection.AllColumns);
-            Assert.Equal(
-                new[] { "id", "category", "sequence", "payload" },
-                request.Projection.Columns.Select(column => column.Name));
-            Assert.DoesNotContain("SELECT *", query.CommandText, StringComparison.Ordinal);
-            Assert.DoesNotContain("__groundwork_action", query.CommandText, StringComparison.Ordinal);
+        using var fixture = new StorageBenchmarkFixture();
+        var benchmarks = fixture.Benchmarks;
 
-            using var connection = new SqliteConnection(benchmarks.DatabaseConnectionString);
-            connection.Open();
-            connection.CreateCollation("GROUNDWORK_UTF16_ORDINAL", string.CompareOrdinal);
-            using var explain = connection.CreateCommand();
-            explain.CommandText = "EXPLAIN QUERY PLAN " + query.CommandText;
-            RelationalQueryResultReader.AddParameters(explain, query);
-            using var reader = explain.ExecuteReader();
-            var details = new List<string>();
-            while (reader.Read())
-                details.Add(reader.GetString(3));
+        var request = benchmarks.GroundworkCoveredQueryRequest;
+        var query = new SqliteQueryRenderer().Render(request);
+        Assert.False(request.Projection.AllColumns);
+        Assert.Equal(
+            new[] { "id", "category", "sequence", "payload" },
+            request.Projection.Columns.Select(column => column.Name));
+        Assert.DoesNotContain("SELECT *", query.CommandText, StringComparison.Ordinal);
+        Assert.DoesNotContain("__groundwork_action", query.CommandText, StringComparison.Ordinal);
 
-            Assert.Contains(details, detail => detail.Contains(
-                "USING COVERING INDEX __groundwork_ix_15_benchmark_items_30_ix_benchmark_items_category_id",
-                StringComparison.Ordinal));
-        }
-        finally
-        {
-            benchmarks.Cleanup();
-        }
+        using var connection = new SqliteConnection(benchmarks.DatabaseConnectionString);
+        connection.Open();
+        connection.CreateCollation("GROUNDWORK_UTF16_ORDINAL", string.CompareOrdinal);
+        using var explain = connection.CreateCommand();
+        explain.CommandText = "EXPLAIN QUERY PLAN " + query.CommandText;
+        RelationalQueryResultReader.AddParameters(explain, query);
+        using var reader = explain.ExecuteReader();
+        var details = new List<string>();
+        while (reader.Read())
+            details.Add(reader.GetString(3));
+
+        Assert.Contains(details, detail => detail.Contains(
+            "USING COVERING INDEX __groundwork_ix_15_benchmark_items_30_ix_benchmark_items_category_id",
+            StringComparison.Ordinal));
     }
 
     [Fact]
@@ -230,65 +218,59 @@ public sealed class BenchmarkMethodologyTests
     [Fact]
     public async Task Every_comparison_path_executes_once_against_the_shared_physical_schema()
     {
-        var benchmarks = new StorageBenchmarks();
-        benchmarks.Setup();
-        try
-        {
-            var groundworkPoint = await benchmarks.PointRead_Groundwork();
-            var efPoint = await benchmarks.PointRead_EFCoreCompiledModel();
-            var dapperPoint = await benchmarks.PointRead_Dapper();
-            Assert.Equal("item-0500", groundworkPoint.Id);
-            Assert.Equal("category-0", groundworkPoint.Category);
-            Assert.Equal(500, groundworkPoint.Sequence);
-            Assert.Equal("payload-0500", groundworkPoint.Payload);
-            AssertEquivalent(groundworkPoint, efPoint);
-            AssertEquivalent(groundworkPoint, dapperPoint);
+        using var fixture = new StorageBenchmarkFixture();
+        var benchmarks = fixture.Benchmarks;
 
-            var groundworkCovered = await benchmarks.CoveredQuery_Groundwork();
-            var efCovered = await benchmarks.CoveredQuery_EFCoreCompiledModel();
-            var dapperCovered = await benchmarks.CoveredQuery_Dapper();
-            Assert.Equal(BenchmarkMethodology.PageSize, groundworkCovered.Count);
-            AssertEquivalent(groundworkCovered, efCovered);
-            AssertEquivalent(groundworkCovered, dapperCovered);
-            AssertEquivalent(
-                new BenchmarkItem
-                {
-                    Id = "item-0003",
-                    Category = "category-3",
-                    Sequence = 3,
-                    Payload = "payload-0003"
-                },
-                groundworkCovered[0]);
-            AssertEquivalent(
-                new BenchmarkItem
-                {
-                    Id = "item-0243",
-                    Category = "category-3",
-                    Sequence = 243,
-                    Payload = "payload-0243"
-                },
-                groundworkCovered[^1]);
+        var groundworkPoint = await benchmarks.PointRead_Groundwork();
+        var efPoint = await benchmarks.PointRead_EFCoreCompiledModel();
+        var dapperPoint = await benchmarks.PointRead_Dapper();
+        Assert.Equal("item-0500", groundworkPoint.Id);
+        Assert.Equal("category-0", groundworkPoint.Category);
+        Assert.Equal(500, groundworkPoint.Sequence);
+        Assert.Equal("payload-0500", groundworkPoint.Payload);
+        AssertEquivalent(groundworkPoint, efPoint);
+        AssertEquivalent(groundworkPoint, dapperPoint);
 
-            var groundworkPage = await benchmarks.PagedQuery_Groundwork();
-            var efPage = await benchmarks.PagedQuery_EFCoreCompiledModel();
-            var dapperPage = await benchmarks.PagedQuery_Dapper();
-            Assert.Equal(BenchmarkMethodology.PageSize, groundworkPage.Count);
-            AssertEquivalent(groundworkPage, efPage);
-            AssertEquivalent(groundworkPage, dapperPage);
-            Assert.Equal("item-0500", groundworkPage[0].Id);
-            Assert.Equal("item-0524", groundworkPage[^1].Id);
+        var groundworkCovered = await benchmarks.CoveredQuery_Groundwork();
+        var efCovered = await benchmarks.CoveredQuery_EFCoreCompiledModel();
+        var dapperCovered = await benchmarks.CoveredQuery_Dapper();
+        Assert.Equal(BenchmarkMethodology.PageSize, groundworkCovered.Count);
+        AssertEquivalent(groundworkCovered, efCovered);
+        AssertEquivalent(groundworkCovered, dapperCovered);
+        AssertEquivalent(
+            new BenchmarkItem
+            {
+                Id = "item-0003",
+                Category = "category-3",
+                Sequence = 3,
+                Payload = "payload-0003"
+            },
+            groundworkCovered[0]);
+        AssertEquivalent(
+            new BenchmarkItem
+            {
+                Id = "item-0243",
+                Category = "category-3",
+                Sequence = 243,
+                Payload = "payload-0243"
+            },
+            groundworkCovered[^1]);
 
-            Assert.Equal(BenchmarkMethodology.BatchSize, (await benchmarks.BatchedWrite_Groundwork()).Count);
-            Assert.Equal(BenchmarkMethodology.BatchSize, await benchmarks.BatchedWrite_EFCoreCompiledModel());
-            Assert.Equal(BenchmarkMethodology.BatchSize, await benchmarks.BatchedWrite_Dapper());
-            Assert.Equal(1, await benchmarks.UnitOfWorkCommit_Groundwork());
-            Assert.Equal(1, await benchmarks.UnitOfWorkCommit_EFCoreCompiledModel());
-            Assert.Equal(1, await benchmarks.UnitOfWorkCommit_Dapper());
-        }
-        finally
-        {
-            benchmarks.Cleanup();
-        }
+        var groundworkPage = await benchmarks.PagedQuery_Groundwork();
+        var efPage = await benchmarks.PagedQuery_EFCoreCompiledModel();
+        var dapperPage = await benchmarks.PagedQuery_Dapper();
+        Assert.Equal(BenchmarkMethodology.PageSize, groundworkPage.Count);
+        AssertEquivalent(groundworkPage, efPage);
+        AssertEquivalent(groundworkPage, dapperPage);
+        Assert.Equal("item-0500", groundworkPage[0].Id);
+        Assert.Equal("item-0524", groundworkPage[^1].Id);
+
+        Assert.Equal(BenchmarkMethodology.BatchSize, (await benchmarks.BatchedWrite_Groundwork()).Count);
+        Assert.Equal(BenchmarkMethodology.BatchSize, await benchmarks.BatchedWrite_EFCoreCompiledModel());
+        Assert.Equal(BenchmarkMethodology.BatchSize, await benchmarks.BatchedWrite_Dapper());
+        Assert.Equal(1, await benchmarks.UnitOfWorkCommit_Groundwork());
+        Assert.Equal(1, await benchmarks.UnitOfWorkCommit_EFCoreCompiledModel());
+        Assert.Equal(1, await benchmarks.UnitOfWorkCommit_Dapper());
     }
 
     [Fact]
@@ -345,17 +327,9 @@ public sealed class BenchmarkMethodologyTests
         Func<StorageBenchmarks, Task> operation,
         params string[] ids)
     {
-        var benchmarks = new StorageBenchmarks();
-        benchmarks.Setup();
-        try
-        {
-            await operation(benchmarks);
-            return await benchmarks.ReadItemsAsync(ids);
-        }
-        finally
-        {
-            benchmarks.Cleanup();
-        }
+        using var fixture = new StorageBenchmarkFixture();
+        await operation(fixture.Benchmarks);
+        return await fixture.Benchmarks.ReadItemsAsync(ids);
     }
 
     private static void AssertEquivalent(BenchmarkItem expected, BenchmarkItem actual)
@@ -387,5 +361,17 @@ public sealed class BenchmarkMethodologyTests
         Assert.Equal(expected.Count, actual.Count);
         for (var index = 0; index < expected.Count; index++)
             AssertEquivalent(expected[index], actual[index]);
+    }
+
+    private sealed class StorageBenchmarkFixture : IDisposable
+    {
+        public StorageBenchmarkFixture()
+        {
+            Benchmarks.Setup();
+        }
+
+        public StorageBenchmarks Benchmarks { get; } = new();
+
+        public void Dispose() => Benchmarks.Cleanup();
     }
 }
