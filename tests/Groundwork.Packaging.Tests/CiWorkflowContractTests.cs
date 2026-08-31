@@ -132,6 +132,42 @@ public sealed class CiWorkflowContractTests
     }
 
     [Fact]
+    public void Full_solution_recurrence_workflow_is_manual_exact_head_and_preserves_all_evidence()
+    {
+        var workflow = ReadWorkflow("concurrency.yml").ReplaceLineEndings("\n");
+        var triggers = workflow[
+            workflow.IndexOf("\non:", StringComparison.Ordinal)..
+            workflow.IndexOf("\npermissions:", StringComparison.Ordinal)];
+        var jobStart = workflow.IndexOf("  full-solution-recurrence:", StringComparison.Ordinal);
+        Assert.True(jobStart >= 0);
+        var job = workflow[jobStart..];
+
+        Assert.Contains("workflow_dispatch:", triggers, StringComparison.Ordinal);
+        Assert.Contains("full_solution_recurrence:", triggers, StringComparison.Ordinal);
+        Assert.Contains("required: false", triggers, StringComparison.Ordinal);
+        Assert.Contains("default: false", triggers, StringComparison.Ordinal);
+        Assert.Contains("type: boolean", triggers, StringComparison.Ordinal);
+        Assert.Contains(
+            "if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' && inputs.full_solution_recurrence }}",
+            job,
+            StringComparison.Ordinal);
+        Assert.Contains("runs-on: ubuntu-latest", job, StringComparison.Ordinal);
+        Assert.Contains("timeout-minutes: 60", job, StringComparison.Ordinal);
+        Assert.Contains("ref: ${{ inputs.ref }}", job, StringComparison.Ordinal);
+        Assert.Contains("EXPECTED_REF: ${{ inputs.ref }}", job, StringComparison.Ordinal);
+        Assert.Contains("bash eng/verify-exact-head.sh \"$EXPECTED_REF\"", job, StringComparison.Ordinal);
+        Assert.Contains("GROUNDWORK_CONFIRM_IDLE_HOST: \"true\"", job, StringComparison.Ordinal);
+        Assert.Contains("bash eng/run-full-solution-recurrence.sh \"$EXPECTED_REF\"", job, StringComparison.Ordinal);
+        Assert.Contains("if: always()", job, StringComparison.Ordinal);
+        Assert.Contains("path: artifacts/recurrence/full-solution/**", job, StringComparison.Ordinal);
+        Assert.Contains("if-no-files-found: warn", job, StringComparison.Ordinal);
+        Assert.Contains("retention-days: 30", job, StringComparison.Ordinal);
+        Assert.DoesNotContain("services:", job, StringComparison.Ordinal);
+        Assert.DoesNotContain("matrix:", job, StringComparison.Ordinal);
+        Assert.DoesNotContain("--filter", job, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void MySql_live_evidence_covers_correctness_schema_tool_and_main_concurrency()
     {
         var correctness = ReadWorkflow("ci.yml");
