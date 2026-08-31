@@ -151,7 +151,7 @@ jobs:
         run: |
           outcomes() {
             grep -o "testName=\"Groundwork.Differential.Tests.SetMutationDifferentialTests[^\"]*\"[^>]*outcome=\"[A-Za-z]*\"" \
-              artifacts/differential/*.trx | grep -c "outcome=\"$1\"" || true
+              artifacts/differential/*/*.trx | grep -c "outcome=\"$1\"" || true
           }
           executed=$(outcomes Passed)
           notExecuted=$(outcomes NotExecuted)
@@ -165,10 +165,10 @@ jobs:
         run: |
           outcomes() {
             grep -o "testName=\"Groundwork.Differential.Tests.LinqExecutionDifferentialTests[^\"]*\"[^>]*outcome=\"[A-Za-z]*\"" \
-              artifacts/differential/*.trx | grep -c "outcome=\"$1\"" || true
+              artifacts/differential/*/*.trx | grep -c "outcome=\"$1\"" || true
           }
           total=$(grep -o "testName=\"Groundwork.Differential.Tests.LinqExecutionDifferentialTests[^\"]*\"[^>]*outcome=\"[A-Za-z]*\"" \
-              artifacts/differential/*.trx | wc -l)
+              artifacts/differential/*/*.trx | wc -l)
           executed=$(outcomes Passed)
           notExecuted=$(outcomes NotExecuted)
           echo "LinqExecutionDifferentialTests total: $total, passed: $executed, not executed: $notExecuted"

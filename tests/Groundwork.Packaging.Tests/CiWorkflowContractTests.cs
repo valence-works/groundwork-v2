@@ -201,6 +201,7 @@ public sealed class CiWorkflowContractTests
         Assert.Contains("for tfm in net8.0 net10.0", differential, StringComparison.Ordinal);
         Assert.Contains("--framework \"$tfm\"", differential, StringComparison.Ordinal);
         Assert.Contains("differential-$tfm.trx", differential, StringComparison.Ordinal);
+        Assert.Contains("artifacts/differential/*/*.trx", differential, StringComparison.Ordinal);
         Assert.Contains("executed\" -ne 12", differential, StringComparison.Ordinal);
 
         Assert.Contains("image: mysql:8.4.6", concurrency, StringComparison.Ordinal);
