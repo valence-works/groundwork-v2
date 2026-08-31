@@ -153,8 +153,9 @@ docker exec gw-mongo mongosh --quiet --eval \
   'rs.initiate({_id:"rs0",members:[{_id:0,host:"localhost:27017"}]})'
 ```
 
-Remember: MongoDB **must** be a replica set for the transactional capabilities. A standalone instance
-will legitimately skip or refuse those tests.
+Remember: MongoDB needs a transaction-capable replica set or sharded deployment for transactional
+capabilities; the documented local fixture and production-supported topology use a replica set. A
+standalone instance will legitimately skip or refuse those tests.
 
 ### The variable gates the tests; the database still has to exist
 

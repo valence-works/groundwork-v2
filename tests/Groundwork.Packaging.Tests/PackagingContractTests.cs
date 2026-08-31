@@ -37,6 +37,27 @@ public sealed class PackagingContractTests
     ];
 
     [Fact]
+    public void Native_aot_sample_local_package_sources_exist_in_a_clean_checkout()
+    {
+        var sampleRoot = Path.Combine(RepositoryRoot.Find(), "samples", "Groundwork.Samples.NativeAotApi");
+        var config = XDocument.Load(Path.Combine(sampleRoot, "NuGet.Config"));
+        var localSources = config
+            .Descendants("packageSources")
+            .Elements("add")
+            .Select(source => source.Attribute("value")?.Value)
+            .OfType<string>()
+            .Where(source => !Uri.TryCreate(source, UriKind.Absolute, out _))
+            .ToArray();
+
+        Assert.NotEmpty(localSources);
+        Assert.All(
+            localSources,
+            source => Assert.True(
+                Directory.Exists(Path.GetFullPath(Path.Combine(sampleRoot, source))),
+                $"The local package source '{source}' must exist in a clean checkout."));
+    }
+
+    [Fact]
     public void Public_package_allowlist_is_explicit_and_excludes_non_release_projects()
     {
         var root = RepositoryRoot.Find();
@@ -70,8 +91,58 @@ public sealed class PackagingContractTests
 
         Assert.True(File.Exists(Path.Combine(root, "docs/v2/versioning.md")));
         Assert.True(File.Exists(Path.Combine(root, "docs/v2/support-matrix.md")));
+        Assert.True(File.Exists(Path.Combine(root, "docs/v2/production-operations.md")));
         Assert.True(File.Exists(Path.Combine(root, ".github/workflows/publish-feedz.yml")));
         Assert.True(File.Exists(Path.Combine(root, ".github/workflows/publish-nuget.yml")));
+    }
+
+    [Fact]
+    public void Production_support_policy_names_tiers_topologies_ownership_and_runbooks()
+    {
+        var root = RepositoryRoot.Find();
+        var matrix = File.ReadAllText(Path.Combine(root, "docs", "v2", "support-matrix.md"));
+        var operations = File.ReadAllText(Path.Combine(root, "docs", "v2", "production-operations.md"));
+
+        Assert.Contains("**Production-supported**", matrix, StringComparison.Ordinal);
+        Assert.Contains("**Compatibility-only**", matrix, StringComparison.Ordinal);
+        Assert.Contains("**Development/reference-only**", matrix, StringComparison.Ordinal);
+        Assert.Contains("one application writer process per database file", matrix, StringComparison.Ordinal);
+        Assert.Contains("| MySQL 8.4.6 | **Production-supported** |", matrix, StringComparison.Ordinal);
+        Assert.Contains("| MariaDB 11.4.13+ | **Compatibility-only** |", matrix, StringComparison.Ordinal);
+        Assert.Contains("| MongoDB replica set | **Production-supported** |", matrix, StringComparison.Ordinal);
+        Assert.Contains("| MongoDB sharded cluster | **Compatibility-only** |", matrix, StringComparison.Ordinal);
+        Assert.DoesNotContain("MySQL/MariaDB | **Production-supported**", matrix, StringComparison.Ordinal);
+        Assert.DoesNotContain("replica set or sharded cluster reached", matrix, StringComparison.Ordinal);
+        Assert.Contains("Groundwork maintainers", operations, StringComparison.Ordinal);
+        Assert.Contains("deployment owner", operations, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("## SQLite: single-writer file", operations, StringComparison.Ordinal);
+        Assert.Contains("## PostgreSQL: writable primary", operations, StringComparison.Ordinal);
+        Assert.Contains("## SQL Server: writable primary database", operations, StringComparison.Ordinal);
+        Assert.Contains("## MySQL 8.4.6: InnoDB writable primary", operations, StringComparison.Ordinal);
+        Assert.Contains("## MongoDB: replica-set deployment", operations, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Wiki_support_guidance_defers_to_the_canonical_policy_instead_of_repeating_topology_promises()
+    {
+        var root = RepositoryRoot.Find();
+        var canonicalMatrix = "https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/support-matrix.md";
+        var canonicalRunbook = "https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/production-operations.md";
+        var providers = File.ReadAllText(Path.Combine(root, "docs", "wiki", "Providers.md"));
+        var versioning = File.ReadAllText(Path.Combine(root, "docs", "wiki", "Versioning-and-Support.md"));
+        var faq = File.ReadAllText(Path.Combine(root, "docs", "wiki", "FAQ.md"));
+        var operations = File.ReadAllText(Path.Combine(root, "docs", "wiki", "Production-Operations.md"));
+
+        Assert.Contains(canonicalMatrix, providers, StringComparison.Ordinal);
+        Assert.Contains(canonicalMatrix, versioning, StringComparison.Ordinal);
+        Assert.Contains(canonicalMatrix, faq, StringComparison.Ordinal);
+        Assert.Contains(canonicalRunbook, operations, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("| Provider | Tier | Supported topology |", providers, StringComparison.Ordinal);
+        Assert.DoesNotContain("| Component / provider | Tier | Supported topology |", versioning, StringComparison.Ordinal);
+        Assert.DoesNotContain("writable-primary MySQL/MariaDB", faq, StringComparison.Ordinal);
+        Assert.DoesNotContain("replica set or sharded cluster", faq, StringComparison.Ordinal);
+        Assert.DoesNotContain("## SQLite", operations, StringComparison.Ordinal);
     }
 
     [Fact]

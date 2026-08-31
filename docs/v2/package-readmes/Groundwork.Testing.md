@@ -5,13 +5,17 @@ the deterministic `InMemoryProviderFactory`, the concurrency harness, and the sc
 harness.
 
 If you implement `IStorageProviderConnection`, running these suites is how you find out whether you
-implemented the contract or merely something that compiles. The same suites gate the four
-first-party providers.
+implemented the contract or merely something that compiles. The same suites gate the shipped
+providers.
 
 **This is not an application database.** `InMemoryProviderFactory` exists to make provider contracts
 testable deterministically, not to back your service. `Groundwork.Testing` is a *consumer* of
 `Groundwork.Store`, never a dependency of it — if production code references it, something is wrong,
 and CI enforces the direction.
+
+**Support tier:** Development/reference-only. It is supported as provider-author tooling, not as
+production application storage. See the
+[support matrix](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/support-matrix.md).
 
 ## Referencing it
 

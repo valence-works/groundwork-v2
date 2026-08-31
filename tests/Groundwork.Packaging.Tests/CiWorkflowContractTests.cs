@@ -5,6 +5,262 @@ namespace Groundwork.Packaging.Tests;
 public sealed class CiWorkflowContractTests
 {
     [Fact]
+    public void Measured_performance_evidence_is_manual_and_separate_from_correctness_gates()
+    {
+        var workflow = ReadWorkflow("performance.yml").ReplaceLineEndings("\n");
+        var correctness = ReadWorkflow("ci.yml");
+        var concurrency = ReadWorkflow("concurrency.yml");
+        var solution = File.ReadAllText(Path.Combine(RepositoryRoot.Find(), "Groundwork.slnx"));
+        var triggers = workflow[workflow.IndexOf("\non:", StringComparison.Ordinal)..workflow.IndexOf("\npermissions:", StringComparison.Ordinal)];
+
+        Assert.Contains("workflow_dispatch:", triggers, StringComparison.Ordinal);
+        Assert.DoesNotContain("pull_request:", triggers, StringComparison.Ordinal);
+        Assert.DoesNotContain("push:", triggers, StringComparison.Ordinal);
+        Assert.Contains("bash eng/verify-exact-head.sh \"$EXPECTED_REF\"", workflow, StringComparison.Ordinal);
+        Assert.Contains("Diagnostic evidence (not a comparative latency baseline)", workflow, StringComparison.Ordinal);
+        Assert.Contains("evidence_kind=diagnostic-not-comparative-baseline", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("benchmarks --filter", workflow, StringComparison.Ordinal);
+
+        Assert.Contains(
+            "dotnet test Groundwork.slnx --no-restore --configuration Release --filter \"Category!=Concurrency\"",
+            correctness,
+            StringComparison.Ordinal);
+        Assert.Contains("tests/Groundwork.Benchmarks.Tests/Groundwork.Benchmarks.Tests.csproj", solution, StringComparison.Ordinal);
+        Assert.DoesNotContain("benchmarks --filter", correctness, StringComparison.Ordinal);
+        Assert.DoesNotContain("benchmarks --filter", concurrency, StringComparison.Ordinal);
+
+        var collector = File.ReadAllText(Path.Combine(
+            RepositoryRoot.Find(),
+            "eng",
+            "collect-comparative-performance.sh"));
+        Assert.Contains("GROUNDWORK_CONFIRM_IDLE_HOST", collector, StringComparison.Ordinal);
+        Assert.Contains("GROUNDWORK_CONTROLLED_HOST_ID", collector, StringComparison.Ordinal);
+        Assert.Contains("stable, publish-safe host identifier", collector, StringComparison.Ordinal);
+        Assert.Contains("non-parent-traversing relative directory", collector, StringComparison.Ordinal);
+        Assert.Contains("output must be a new directory", collector, StringComparison.Ordinal);
+        Assert.Contains("output must not traverse symbolic links", collector, StringComparison.Ordinal);
+        Assert.Contains("resolved outside the workspace", collector, StringComparison.Ordinal);
+        Assert.Contains("resolved_benchmark_output_root", collector, StringComparison.Ordinal);
+        Assert.Contains("pwd -P", collector, StringComparison.Ordinal);
+        Assert.Contains("eng/verify-exact-head.sh", collector, StringComparison.Ordinal);
+        Assert.Contains("benchmarks --list flat", collector, StringComparison.Ordinal);
+        const string allWorkloads =
+            "--filter '*PointRead*' '*CoveredQuery*' '*PagedQuery*' '*BatchedWrite*' '*UnitOfWorkCommit*'";
+        Assert.Equal(2, collector.Split(allWorkloads, StringSplitOptions.None).Length - 1);
+        Assert.Contains("--exporters json markdown csv", collector, StringComparison.Ordinal);
+        Assert.Contains("benchmark_results=(", collector, StringComparison.Ordinal);
+        Assert.Contains("Expected exactly one BenchmarkDotNet JSON result", collector, StringComparison.Ordinal);
+        Assert.Contains("command -v sha256sum", collector, StringComparison.Ordinal);
+        Assert.Contains("command -v shasum", collector, StringComparison.Ordinal);
+        Assert.Contains("Neither sha256sum nor shasum is available", collector, StringComparison.Ordinal);
+        Assert.Contains("benchmark_result=", collector, StringComparison.Ordinal);
+        Assert.Contains("benchmark_result_sha256=", collector, StringComparison.Ordinal);
+        Assert.Contains("<workspace>", collector, StringComparison.Ordinal);
+        Assert.Contains("sanitize_private_paths", collector, StringComparison.Ordinal);
+        Assert.Contains("trap remove_private_logs EXIT", collector, StringComparison.Ordinal);
+        Assert.Contains("find \"$benchmark_output_root\" -type f -name '*.log' -delete", collector, StringComparison.Ordinal);
+        Assert.Contains("require_publication_safe_output", collector, StringComparison.Ordinal);
+        Assert.Contains("grep -R -I -F -q", collector, StringComparison.Ordinal);
+        Assert.Contains("sub(/[[:space:]]+$/, \"\")", collector, StringComparison.Ordinal);
+        Assert.Contains("for (line_number = 1; line_number <= count; line_number++)", collector, StringComparison.Ordinal);
+        Assert.DoesNotContain("uname -a", collector, StringComparison.Ordinal);
+        Assert.DoesNotContain("threshold", collector, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("baseline.json", collector, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Controlled_performance_comparison_is_manual_service_free_and_uses_only_checked_in_evidence()
+    {
+        var workflow = ReadWorkflow("performance-comparison.yml").ReplaceLineEndings("\n");
+        var triggers = workflow[
+            workflow.IndexOf("\non:", StringComparison.Ordinal)..workflow.IndexOf("\npermissions:", StringComparison.Ordinal)];
+
+        Assert.Contains("workflow_dispatch:", triggers, StringComparison.Ordinal);
+        Assert.DoesNotContain("pull_request:", triggers, StringComparison.Ordinal);
+        Assert.DoesNotContain("push:", triggers, StringComparison.Ordinal);
+        foreach (var input in new[]
+                 {
+                     "ref:",
+                     "policy:",
+                     "baseline_manifest:",
+                     "baseline_result:",
+                     "candidate_sha:",
+                     "candidate_manifest:",
+                     "candidate_result:",
+                     "reason:"
+                 })
+            Assert.Contains(input, triggers, StringComparison.Ordinal);
+
+        Assert.Contains("bash eng/verify-exact-head.sh \"$EXPECTED_REF\"", workflow, StringComparison.Ordinal);
+        Assert.Contains("vars.GROUNDWORK_CI_PAUSED != 'true'", workflow, StringComparison.Ordinal);
+        Assert.Contains("Evidence paths must be non-empty repository-relative paths", workflow, StringComparison.Ordinal);
+        Assert.Contains("Checked-in evidence file not found", workflow, StringComparison.Ordinal);
+        Assert.Contains("git ls-files --error-unmatch", workflow, StringComparison.Ordinal);
+        Assert.Contains("realpath -e", workflow, StringComparison.Ordinal);
+        Assert.Contains("Evidence paths must not traverse symbolic links", workflow, StringComparison.Ordinal);
+        Assert.Contains("REASON: ${{ inputs.reason }}", workflow, StringComparison.Ordinal);
+        Assert.Contains("GITHUB_STEP_SUMMARY", workflow, StringComparison.Ordinal);
+        Assert.Contains("--no-restore --configuration Release -- performance-gate", workflow, StringComparison.Ordinal);
+        Assert.Contains("--policy \"$POLICY\"", workflow, StringComparison.Ordinal);
+        Assert.Contains("--candidate-sha \"$CANDIDATE_SHA\"", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("services:", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("benchmarks --", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("collect-comparative-performance.sh", workflow, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Comparative_benchmark_key_scenarios_are_an_explicit_stable_catalog()
+    {
+        var root = RepositoryRoot.Find();
+        var scenarios = File.ReadAllLines(Path.Combine(
+            root,
+            "benchmarks/Groundwork.Benchmarks/evidence/key-scenarios.txt"));
+
+        Assert.Equal(
+            new[]
+            {
+                "Groundwork.Benchmarks.StorageBenchmarks.BatchedWrite_Groundwork",
+                "Groundwork.Benchmarks.StorageBenchmarks.BatchedWrite_EFCoreCompiledModel",
+                "Groundwork.Benchmarks.StorageBenchmarks.BatchedWrite_Dapper",
+                "Groundwork.Benchmarks.StorageBenchmarks.CoveredQuery_Groundwork",
+                "Groundwork.Benchmarks.StorageBenchmarks.CoveredQuery_EFCoreCompiledModel",
+                "Groundwork.Benchmarks.StorageBenchmarks.CoveredQuery_Dapper",
+                "Groundwork.Benchmarks.StorageBenchmarks.PagedQuery_Groundwork",
+                "Groundwork.Benchmarks.StorageBenchmarks.PagedQuery_EFCoreCompiledModel",
+                "Groundwork.Benchmarks.StorageBenchmarks.PagedQuery_Dapper",
+                "Groundwork.Benchmarks.StorageBenchmarks.PointRead_Groundwork",
+                "Groundwork.Benchmarks.StorageBenchmarks.PointRead_EFCoreCompiledModel",
+                "Groundwork.Benchmarks.StorageBenchmarks.PointRead_Dapper",
+                "Groundwork.Benchmarks.StorageBenchmarks.UnitOfWorkCommit_Groundwork",
+                "Groundwork.Benchmarks.StorageBenchmarks.UnitOfWorkCommit_EFCoreCompiledModel",
+                "Groundwork.Benchmarks.StorageBenchmarks.UnitOfWorkCommit_Dapper",
+            },
+            scenarios);
+    }
+
+    [Fact]
+    public void Full_solution_recurrence_harness_preserves_the_clean_window_contract()
+    {
+        var script = File.ReadAllText(Path.Combine(
+            RepositoryRoot.Find(),
+            "eng",
+            "run-full-solution-recurrence.sh"));
+
+        Assert.Contains("GROUNDWORK_CONFIRM_IDLE_HOST", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("export LC_ALL=C", script, StringComparison.Ordinal);
+        Assert.Contains("eng/verify-exact-head.sh", script, StringComparison.Ordinal);
+        Assert.Contains("git status --porcelain", script, StringComparison.Ordinal);
+        Assert.Contains("/tmp/groundwork-tests.lock", script, StringComparison.Ordinal);
+        Assert.Contains("flock -n 9", script, StringComparison.Ordinal);
+        Assert.Contains("lockf -t 0 9", script, StringComparison.Ordinal);
+        Assert.Contains("[d]otnet[[:space:]]+test|[t]esthost|[v]stest", script, StringComparison.Ordinal);
+        Assert.Contains("seq 1 11", script, StringComparison.Ordinal);
+        Assert.Contains("sleep 30", script, StringComparison.Ordinal);
+        Assert.Contains("current_load <= 1.0", script, StringComparison.Ordinal);
+        Assert.Contains("-v current_load=\"$load_one\"", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("-v load=\"$load_one\"", script, StringComparison.Ordinal);
+        Assert.Contains("/proc/loadavg", script, StringComparison.Ordinal);
+        Assert.Contains("LC_ALL=C sysctl -n vm.loadavg", script, StringComparison.Ordinal);
+        Assert.Contains("LC_ALL=C uptime", script, StringComparison.Ordinal);
+        Assert.Contains("locale", script, StringComparison.Ordinal);
+        Assert.Contains("/$attempt_id", script, StringComparison.Ordinal);
+        Assert.Contains("seq 1 5", script, StringComparison.Ordinal);
+        Assert.Contains("dotnet restore Groundwork.slnx", script, StringComparison.Ordinal);
+        Assert.Contains("GROUNDWORK_SUPPRESS_RAW_OUTPUT", script, StringComparison.Ordinal);
+        Assert.Contains("console_sink=/dev/null", script, StringComparison.Ordinal);
+        Assert.Contains("tee \"$output_root/restore.log\" > \"$console_sink\"", script, StringComparison.Ordinal);
+        Assert.Contains("dotnet test Groundwork.slnx", script, StringComparison.Ordinal);
+        Assert.Contains("--no-restore --configuration Release", script, StringComparison.Ordinal);
+        Assert.Contains("--logger trx", script, StringComparison.Ordinal);
+        Assert.Contains("--results-directory \"$run_directory\"", script, StringComparison.Ordinal);
+        Assert.Contains("--blame-hang --blame-hang-timeout 20m --blame-hang-dump-type full", script, StringComparison.Ordinal);
+        Assert.Contains("PIPESTATUS[@]", script, StringComparison.Ordinal);
+        Assert.Contains("console_log_status", script, StringComparison.Ordinal);
+        Assert.Contains("tee \"$run_directory/console.log\" > \"$console_sink\"", script, StringComparison.Ordinal);
+        Assert.Contains("run_${iteration}_trx_present", script, StringComparison.Ordinal);
+        Assert.Contains("verify_exact_clean \"after-idle-preflight\"", script, StringComparison.Ordinal);
+        Assert.Contains("verify_exact_clean \"before-run-$iteration\"", script, StringComparison.Ordinal);
+        Assert.Contains("verify_exact_clean \"after-run-$iteration\"", script, StringComparison.Ordinal);
+        Assert.Contains("verify_exact_clean \"final\"", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("--filter", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("-m:1", script, StringComparison.Ordinal);
+
+        var summaryScript = File.ReadAllText(Path.Combine(
+            RepositoryRoot.Find(),
+            "eng",
+            "prepare-recurrence-summary.sh"));
+        Assert.Contains("summary_kind=publication-safe-recurrence", summaryScript, StringComparison.Ordinal);
+        Assert.Contains("final_status=incomplete", summaryScript, StringComparison.Ordinal);
+        Assert.Contains("find \"$evidence_root\" -type f -name manifest.txt -print0", summaryScript, StringComparison.Ordinal);
+        Assert.DoesNotContain("host|", summaryScript, StringComparison.Ordinal);
+        Assert.DoesNotContain("console.log", summaryScript, StringComparison.Ordinal);
+        Assert.DoesNotContain(".dmp", summaryScript, StringComparison.Ordinal);
+
+        var restore = script.IndexOf("dotnet restore Groundwork.slnx", StringComparison.Ordinal);
+        var test = script.IndexOf("dotnet test Groundwork.slnx", StringComparison.Ordinal);
+        var afterPreflight = script.IndexOf("verify_exact_clean \"after-idle-preflight\"", StringComparison.Ordinal);
+        var trx = script.IndexOf("run_${iteration}_trx_present", StringComparison.Ordinal);
+        var failure = script.IndexOf("if [[ \"$test_status\" -ne 0 ]]", StringComparison.Ordinal);
+        Assert.True(afterPreflight >= 0 && afterPreflight < restore && restore < test);
+        Assert.True(trx >= 0 && trx < failure);
+    }
+
+    [Fact]
+    public void Full_solution_recurrence_workflow_is_manual_exact_head_and_defaults_to_safe_summary_evidence()
+    {
+        var workflow = ReadWorkflow("concurrency.yml").ReplaceLineEndings("\n");
+        var triggers = workflow[
+            workflow.IndexOf("\non:", StringComparison.Ordinal)..workflow.IndexOf("\npermissions:", StringComparison.Ordinal)];
+        var jobStart = workflow.IndexOf("  full-solution-recurrence:", StringComparison.Ordinal);
+        Assert.True(jobStart >= 0);
+        var job = workflow[jobStart..];
+
+        Assert.Contains("workflow_dispatch:", triggers, StringComparison.Ordinal);
+        Assert.Contains("full_solution_recurrence:", triggers, StringComparison.Ordinal);
+        Assert.Contains("upload_sensitive_recurrence_artifacts:", triggers, StringComparison.Ordinal);
+        Assert.Contains("required: false", triggers, StringComparison.Ordinal);
+        Assert.Contains("default: false", triggers, StringComparison.Ordinal);
+        Assert.Contains("type: boolean", triggers, StringComparison.Ordinal);
+        Assert.Contains(
+            "if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' && inputs.full_solution_recurrence }}",
+            job,
+            StringComparison.Ordinal);
+        Assert.Contains("runs-on: ubuntu-latest", job, StringComparison.Ordinal);
+        Assert.Contains("timeout-minutes: 60", job, StringComparison.Ordinal);
+        Assert.Contains("ref: ${{ inputs.ref }}", job, StringComparison.Ordinal);
+        Assert.Contains("EXPECTED_REF: ${{ inputs.ref }}", job, StringComparison.Ordinal);
+        Assert.Contains("bash eng/verify-exact-head.sh \"$EXPECTED_REF\"", job, StringComparison.Ordinal);
+        Assert.Contains("GROUNDWORK_CONFIRM_IDLE_HOST: \"true\"", job, StringComparison.Ordinal);
+        Assert.Contains("GROUNDWORK_SUPPRESS_RAW_OUTPUT: \"true\"", job, StringComparison.Ordinal);
+        Assert.Contains("bash eng/run-full-solution-recurrence.sh \"$EXPECTED_REF\"", job, StringComparison.Ordinal);
+        Assert.Contains("bash eng/prepare-recurrence-summary.sh artifacts/recurrence/full-solution", job, StringComparison.Ordinal);
+        Assert.Contains("if: always()", job, StringComparison.Ordinal);
+        Assert.Contains("path: artifacts/recurrence/full-solution/**/summary.txt", job, StringComparison.Ordinal);
+        Assert.Contains("if-no-files-found: warn", job, StringComparison.Ordinal);
+        Assert.Contains("retention-days: 7", job, StringComparison.Ordinal);
+        Assert.Contains("if: ${{ always() && inputs.upload_sensitive_recurrence_artifacts }}", job, StringComparison.Ordinal);
+        Assert.Contains("name: SENSITIVE-full-solution-recurrence-", job, StringComparison.Ordinal);
+        Assert.Contains("retention-days: 1", job, StringComparison.Ordinal);
+        Assert.DoesNotContain("retention-days: 30", job, StringComparison.Ordinal);
+        Assert.DoesNotContain("services:", job, StringComparison.Ordinal);
+        Assert.DoesNotContain("matrix:", job, StringComparison.Ordinal);
+        Assert.DoesNotContain("--filter", job, StringComparison.Ordinal);
+
+        var workflowDocs = File.ReadAllText(Path.Combine(
+            RepositoryRoot.Find(),
+            "docs/agents/ci-workflows.md"));
+        Assert.Contains("workflow_ref=", workflowDocs, StringComparison.Ordinal);
+        Assert.Contains("gh workflow run concurrency.yml --ref \"$workflow_ref\"", workflowDocs, StringComparison.Ordinal);
+        Assert.Contains("-f ref=\"$head\" -f full_solution_recurrence=true", workflowDocs, StringComparison.Ordinal);
+        Assert.Contains("-f upload_sensitive_recurrence_artifacts=true", workflowDocs, StringComparison.Ordinal);
+        Assert.Contains("publishes only a whitelisted `summary.txt` by default", workflowDocs, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "gh workflow run concurrency.yml --ref codex/groundwork-2-delivery \\",
+            workflowDocs,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void MySql_live_evidence_covers_correctness_schema_tool_and_main_concurrency()
     {
         var correctness = ReadWorkflow("ci.yml");
@@ -17,9 +273,36 @@ public sealed class CiWorkflowContractTests
         Assert.Contains("SchemaToolMySqlEndToEndTests", correctness, StringComparison.Ordinal);
         Assert.Contains("Refuse a run whose MySQL proofs did not execute", correctness, StringComparison.Ordinal);
 
+        var differentialStart = correctness.IndexOf("  query-differential:", StringComparison.Ordinal);
+        var differentialEnd = correctness.IndexOf("  sqlite-provider:", differentialStart, StringComparison.Ordinal);
+        Assert.True(differentialStart >= 0 && differentialEnd > differentialStart);
+        var differential = correctness[differentialStart..differentialEnd];
+        Assert.Contains("Run five-provider query differential suite", differential, StringComparison.Ordinal);
+        Assert.Contains("image: mysql:8.4.6", differential, StringComparison.Ordinal);
+        Assert.Contains("GROUNDWORK_MYSQL_CONNECTION:", differential, StringComparison.Ordinal);
+        Assert.Contains("for tfm in net8.0 net10.0", differential, StringComparison.Ordinal);
+        Assert.Contains("--framework \"$tfm\"", differential, StringComparison.Ordinal);
+        Assert.Contains("differential-$tfm.trx", differential, StringComparison.Ordinal);
+        Assert.Contains("artifacts/differential/*/*.trx", differential, StringComparison.Ordinal);
+        Assert.Contains("executed\" -ne 12", differential, StringComparison.Ordinal);
+
         Assert.Contains("image: mysql:8.4.6", concurrency, StringComparison.Ordinal);
         Assert.Contains("GROUNDWORK_MYSQL_CONNECTION:", concurrency, StringComparison.Ordinal);
         Assert.Contains("MySQL: live provider-neutral harness", concurrency, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Mongo_schema_tool_gate_scopes_skips_to_the_live_mongo_proofs()
+    {
+        var correctness = ReadWorkflow("ci.yml");
+        var jobStart = correctness.IndexOf("  mongo-schema-tool:", StringComparison.Ordinal);
+        var jobEnd = correctness.IndexOf("  mongo-standalone-exact-append:", jobStart, StringComparison.Ordinal);
+        Assert.True(jobStart >= 0 && jobEnd > jobStart);
+        var job = correctness[jobStart..jobEnd];
+
+        Assert.Contains("outcomes SchemaToolMongoEndToEndTests NotExecuted", job, StringComparison.Ordinal);
+        Assert.DoesNotContain("Tests not executed in the whole suite", job, StringComparison.Ordinal);
+        Assert.DoesNotContain("skipped=$(grep -c", job, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -76,6 +359,24 @@ public sealed class CiWorkflowContractTests
         var exactOnce = job.IndexOf("Refuse a run whose SQL Server W2 proof", StringComparison.Ordinal);
         var upload = job.IndexOf("Upload SQL Server W2 diagnostics", StringComparison.Ordinal);
         Assert.True(exactHead >= 0 && exactHead < test && test < exactOnce && exactOnce < upload);
+    }
+
+    [Fact]
+    public void PostgreSql_provider_tfms_are_serialized_against_the_shared_live_database()
+    {
+        var workflow = ReadWorkflow("ci.yml");
+        var jobStart = workflow.IndexOf("  postgresql-provider:", StringComparison.Ordinal);
+        var jobEnd = workflow.IndexOf("  mysql-provider:", jobStart, StringComparison.Ordinal);
+        Assert.True(jobStart >= 0 && jobEnd > jobStart);
+        var job = workflow[jobStart..jobEnd];
+
+        const string command =
+            "dotnet test tests/Groundwork.PostgreSql.Tests/Groundwork.PostgreSql.Tests.csproj";
+        Assert.Equal(2, job.Split(command, StringSplitOptions.None).Length - 1);
+        var net8 = job.IndexOf("--framework net8.0", StringComparison.Ordinal);
+        var net10 = job.IndexOf("--framework net10.0", StringComparison.Ordinal);
+        Assert.True(net8 >= 0 && net8 < net10);
+        Assert.Equal(2, job.Split("--filter \"Category!=Concurrency\"", StringSplitOptions.None).Length - 1);
     }
 
     private static string ReadWorkflow(string name) =>

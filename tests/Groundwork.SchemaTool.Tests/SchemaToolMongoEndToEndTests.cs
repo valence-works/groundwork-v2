@@ -318,16 +318,18 @@ public sealed class SchemaToolMongoEndToEndTests : IDisposable
     /// Every operation the declaration itself names, as the report spells it. Operations over
     /// provider-owned columns are excluded because those are not declared: SQLite physicalizes an
     /// append-action column that MongoDB has no equivalent of, and comparing them would be
-    /// comparing two physicalizations rather than one report format. The two target-scoped
-    /// bookkeeping operations are excluded for the same reason: their identity is derived from the
-    /// target fingerprint, which names the provider by construction.
+    /// comparing two physicalizations rather than one report format. Target-scoped validation and
+    /// publication plus provider-definition and physical-index bookkeeping are excluded for the
+    /// same reason: their identities and shapes name the provider by construction.
     /// </summary>
     private static string[] Operations(SchemaToolCliRun run, string property) =>
         run.Report.RootElement.GetProperty(property).EnumerateArray()
             .Where(operation => !operation.GetProperty("subjectIdentity").GetString()!
                 .StartsWith("__groundwork_", StringComparison.Ordinal))
             .Where(operation => operation.GetProperty("kind").GetString() is not
-                ("ValidatePhysicalSchema" or "PublishAppliedState"))
+                ("ValidatePhysicalSchema" or "PublishAppliedState" or
+                 "ApplyProviderDefinition" or "DropProviderDefinition" or
+                 "CreatePhysicalIndex" or "DropPhysicalIndex"))
             .Select(operation => operation.GetProperty("kind").GetString() + " " +
                                  operation.GetProperty("identity").GetString())
             .OrderBy(text => text, StringComparer.Ordinal)

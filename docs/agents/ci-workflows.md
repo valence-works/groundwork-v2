@@ -41,6 +41,61 @@ has time to upload the dump, sequence XML, and any partial TRX from
 observed 11–13 minute successful W2 case duration; increasing the outer job timeout is not a hang
 diagnostic. Preserve the exact-head check and exact-once TRX guard when changing this command.
 
+### Full-solution recurrence evidence
+
+Use `eng/run-full-solution-recurrence.sh` only when investigating an intermittent failure whose
+signal depends on the unfiltered, cross-assembly solution shape. It is not a routine pull-request
+gate. Reserve an idle host, check out the exact candidate commit in a clean worktree, and run:
+
+```bash
+GROUNDWORK_CONFIRM_IDLE_HOST=true \
+  eng/run-full-solution-recurrence.sh <40-character-commit-sha>
+```
+
+The harness holds `/tmp/groundwork-tests.lock` for the complete operation (`flock` on Linux,
+`lockf` on macOS), rejects neighboring test processes and a one-minute load above 1.0 throughout a
+five-minute preflight, restores once, and then runs the unfiltered Release solution five times in
+sequence. It stops on the first failure. Every iteration has its own directory containing console
+output and TRX results; a crash or hang also retains its sequence XML and any full dump requested
+after the 20-minute VSTest hang threshold. The manifest records the exact SHA, host, lock
+implementation, preflight samples, and per-run outcome. Every invocation writes to a unique
+timestamped attempt directory below the SHA, so an invalid busy-window attempt remains available
+for audit without blocking a later retry.
+
+A failure is recurrence evidence and must be classified locally from its TRX, console output, and
+dump. Those files can contain host paths, identifiers, query values, and process memory. The hosted
+workflow therefore publishes only a whitelisted `summary.txt` by default and retains it for seven
+days. It also suppresses raw restore and test output from the hosted job log. Raw logs, TRX,
+sequence files, and dumps remain runner-local unless the dispatch explicitly
+sets `upload_sensitive_recurrence_artifacts=true`; that sensitive artifact is conspicuously named
+and retained for one day. Five passes mean only “not reproduced in this clean window”; they are not
+proof that an intermittent bug is fixed.
+
+For the independent hosted observation, enable the recurrence option when manually dispatching the
+`Concurrency` workflow from the candidate branch that contains this optional job. The workflow ref
+and the tested SHA must refer to the same candidate checkpoint:
+
+```bash
+workflow_ref=codex/210-recurrence-result
+# After the PR is merged, use the target integration branch instead.
+head=$(git rev-parse "$workflow_ref")
+gh workflow run concurrency.yml --ref "$workflow_ref" \
+  -f ref="$head" -f full_solution_recurrence=true
+```
+
+Only when an authorized investigation requires the raw hosted diagnostics, add
+`-f upload_sensitive_recurrence_artifacts=true`. Treat the downloaded artifact as sensitive and
+delete local copies after classification.
+
+The optional recurrence job uses a fresh service-free runner, verifies the requested exact head,
+delegates the five-minute idle preflight and five unfiltered Release iterations to the same harness,
+and uploads a publication-safe summary whenever the harness produced an attempt manifest, including
+after a later fast failure. The other dedicated concurrency jobs run alongside it for the same
+exact-SHA checkpoint. Its 60-minute outer timeout leaves the 20-minute VSTest hang threshold time to
+produce diagnostics. A skipped run while the repository cost brake is active is not evidence.
+Record the exact run URL and head SHA when classifying the result, and retain the local observation
+as a separate provenance source.
+
 ## Native AOT correctness
 
 `.github/workflows/aot.yml` (`Native AOT conformance`) packs the exact-head public packages, restores
@@ -77,18 +132,62 @@ performance workflow.
 
 ## Performance evidence
 
-`.github/workflows/performance.yml` (`Performance evidence`) is manual-only. Run it for the final
-performance phase, a release milestone, or an explicit investigation—not during ordinary feature
-iteration:
+`.github/workflows/performance.yml` (`Performance evidence`) remains a manual-only diagnostic lane
+for Native AOT startup, Records, and provider round-trip evidence. Its hosted runner is not stable
+enough to publish comparative latency baselines. Do not run it during ordinary feature iteration:
 
 ```bash
 head=$(git rev-parse origin/main)
-gh workflow run performance.yml --ref main -f ref="$head" -f reason='0.2.0 release evidence'
+gh workflow run performance.yml --ref main -f ref="$head" -f reason='provider investigation'
 ```
 
-The artifact records the commit, ref, runner, reason, .NET environment, Records hot-path output,
-and per-provider write round-trip measurements. Performance evidence is diagnostic and reproducible;
-it is not allowed to hide a correctness failure.
+For publishable comparative evidence, reserve a named controlled host, check out the exact commit
+with a clean worktree, and explicitly confirm that the host is idle:
+
+```bash
+GROUNDWORK_CONFIRM_IDLE_HOST=true \
+  GROUNDWORK_CONTROLLED_HOST_ID=groundwork-controlled-m2 \
+  eng/collect-comparative-performance.sh "$head"
+```
+
+The collector records exact-head, schema, stable publish-safe host identity, load, runtime, package,
+catalog, and structured BenchmarkDotNet evidence. It scrubs private host/home/workspace markers,
+recursively removes raw execution logs on success or failure, and refuses an output tree if either
+kind of private evidence remains. Every collection uses a new output tree whose root and
+BenchmarkDotNet child resolve beneath the physical workspace without traversing a symbolic link.
+Follow
+`benchmarks/Groundwork.Benchmarks/evidence/methodology.md` to review and check a valid result into the
+exact-SHA run directory. Dry output and busy-host results are not publishable. Within-run ratios are
+diagnostic evidence, not cross-machine comparisons or SLAs.
+
+Ordinary correctness gating executes the benchmark contract tests through `Groundwork.slnx`; it
+checks the matrix, compiled model, canonical schema, and every comparison path without using
+wall-clock thresholds. Performance evidence is never allowed to hide a correctness failure.
+
+After a controlled baseline, candidate bundle, and variance-informed policy have been reviewed and
+checked in, `.github/workflows/performance-comparison.yml` applies those budgets without running a
+benchmark or starting provider services. Dispatch it from the exact evidence commit and pass only
+repository-relative paths from that checkout:
+
+```bash
+evidence_ref=<40-character-evidence-commit>
+gh workflow run performance-comparison.yml --ref main \
+  -f ref="$evidence_ref" \
+  -f policy='benchmarks/Groundwork.Benchmarks/evidence/performance-policy.json' \
+  -f baseline_manifest='benchmarks/Groundwork.Benchmarks/evidence/runs/<baseline-sha>/manifest.txt' \
+  -f baseline_result='benchmarks/Groundwork.Benchmarks/evidence/runs/<baseline-sha>/benchmarkdotnet/results/<report>.json' \
+  -f candidate_sha='<measured-candidate-sha>' \
+  -f candidate_manifest='benchmarks/Groundwork.Benchmarks/evidence/runs/<candidate-sha>/manifest.txt' \
+  -f candidate_result='benchmarks/Groundwork.Benchmarks/evidence/runs/<candidate-sha>/benchmarkdotnet/results/<report>.json' \
+  -f reason='release performance checkpoint'
+```
+
+The policy pins the approved baseline SHA and report digest. The comparator also requires matching
+named host, BenchmarkDotNet environment, and hardware intrinsics, so changing input paths cannot
+silently replace the baseline or compare unlike machines. Workflow inputs must resolve to tracked
+regular files in the exact checkout without traversing symbolic links. A red comparison is
+performance evidence; it remains separate from correctness and concurrency and never triggers an
+Actions measurement.
 
 ## Enforcement note
 

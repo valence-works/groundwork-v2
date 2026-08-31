@@ -614,7 +614,7 @@ public sealed class PostgreSqlDialectTests
     }
 
     [SkippableFact]
-    public void Live_schema_validation_refuses_a_default_null_ordering_index()
+    public void Live_schema_validation_tolerates_default_null_ordering_as_index_only_drift()
     {
         using var database = PostgreSqlFixture.OpenOrSkip();
         var unit = NullOrderingUnit("pg-null-drift");
@@ -630,8 +630,12 @@ public sealed class PostgreSqlDialectTests
             command.ExecuteNonQuery();
         }
 
-        var exception = Assert.Throws<InvalidOperationException>(() => connection.Schema.Apply(unit));
-        Assert.Contains("by_name", exception.Message, StringComparison.Ordinal);
+        // Index-only drift is observable and enforced at query admission, but a no-change schema
+        // apply intentionally remains non-fatal so operators can inspect and repair it.
+        var result = connection.Schema.Apply(unit);
+        Assert.True(result.Applied);
+        Assert.True(result.IsNoOp);
+        Assert.True(connection.Schema.Diff(unit).IsEmpty);
     }
 
     [SkippableFact]

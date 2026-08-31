@@ -15,6 +15,12 @@ The repository's [provider evidence report](https://github.com/valence-works/gro
 records the reproducible before/after source comparison and the live correctness, schema-tool, and
 concurrency lanes.
 
+**Support tier:** Production-supported for the live-tested MySQL 8.4.6 topology using InnoDB, the
+runtime-verified NO PAD `utf8mb4_0900_bin`, and one writable primary endpoint. Other MySQL 8.0.17+
+releases and MariaDB 11.4.13+ are compatibility-only until matching live evidence exists. See the
+[support matrix](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/support-matrix.md)
+and [operations runbook](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/production-operations.md).
+
 ## Referencing it
 
 ```bash

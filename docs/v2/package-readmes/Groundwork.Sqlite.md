@@ -15,6 +15,12 @@ ordinary indexes inherit it, so equality and range predicates and index ordering
 ordinal semantics — including supplementary characters — and native plans can use the declared
 indexes.
 
+**Support tier:** Production-supported for a file-backed SQLite 3.35.0+ database on local-locking
+storage, with one long-lived provider connection and one application writer process per file.
+`:memory:` is development/reference-only. See the
+[support matrix](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/support-matrix.md)
+and [operations runbook](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/production-operations.md).
+
 Full provider notes:
 [docs/sqlite-provider.md](https://github.com/valence-works/groundwork-v2/blob/main/docs/sqlite-provider.md).
 

@@ -118,11 +118,12 @@ No. Allocation is **strictly increasing**, but concurrent transactions can commi
 a different order — so the value is not a commit-order timestamp. **Gaps are valid.** It is an
 identity, not a clock.
 
-### Why does MongoDB need a replica set?
+### Why does MongoDB need a transaction-capable deployment?
 
 Transactions. Sequences, idempotent append, exact append, durable high-water inspection, exact
-retention, compare-and-delete, and atomic commit all require them. Standalone MongoDB does not
-advertise those capabilities and refuses before doing I/O.
+retention, compare-and-delete, and atomic commit all require them. A transaction-capable replica set
+or sharded deployment can advertise those capabilities; only replica sets are production-supported
+in this release. Standalone MongoDB does not advertise them and refuses before doing I/O.
 
 ### Why is SQLite rejecting a second connection?
 
@@ -142,9 +143,15 @@ exists. See **[Versioning & Support](Versioning-and-Support)**.
 
 ### Is it production-ready?
 
-Not yet declared so. All providers are **conformance-passing / preview**. Production support
-additionally requires a supported topology, operational guidance, and an owner for provider-specific
-incidents — see **[Versioning & Support](Versioning-and-Support)**.
+Yes, on the exact provider versions and topologies marked **Production-supported** in the canonical
+**[v2 support matrix](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/support-matrix.md)**.
+Compatible but unevidenced deployments remain **Compatibility-only**, and `Groundwork.Testing`
+remains **Development/reference-only**. The wiki deliberately does not repeat the topology table.
+
+Support is best effort, not an SLA. Your team owns database availability, capacity, credentials,
+backups, upgrades, and failover; Groundwork maintainers own reproducible package defects on a
+supported topology. See **[Versioning & Support](Versioning-and-Support)** and
+**[Production Operations](Production-Operations)**.
 
 ### Where's the async API?
 

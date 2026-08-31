@@ -9,6 +9,12 @@ so scopes and nonces stay case-distinct, and an existing lifecycle table created
 collation is refused with migration guidance rather than silently producing different comparison
 semantics from the other providers.
 
+**Support tier:** Production-supported on a writable SQL Server 2022-compatible primary database
+with the documented database-scoped `sp_getapplock` and schema permissions. Read-only replica
+routing is outside the supported topology. See the
+[support matrix](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/support-matrix.md)
+and [operations runbook](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/production-operations.md).
+
 Full provider notes:
 [docs/sqlserver-provider.md](https://github.com/valence-works/groundwork-v2/blob/main/docs/sqlserver-provider.md).
 

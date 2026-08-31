@@ -21,6 +21,7 @@ concurrency:
 
 jobs:
   performance-evidence:
+    name: Diagnostic evidence (not a comparative latency baseline)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     services:
@@ -93,6 +94,7 @@ jobs:
             echo "workflow_ref=$GITHUB_REF"
             echo "runner=$RUNNER_NAME"
             echo "reason=$EVIDENCE_REASON"
+            echo "evidence_kind=diagnostic-not-comparative-baseline"
             dotnet --info
           } | tee artifacts/performance/manifest.txt
       - name: Measure Records hot paths

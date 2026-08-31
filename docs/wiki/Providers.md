@@ -2,26 +2,24 @@
 
 One declaration, five databases. This page is what you need to know about each before choosing.
 
-## Support matrix
+## Support tiers and topology
 
-“**Conformance**” means the provider passes the provider-neutral contract suites.
-“**Production-supported**” additionally requires a supported deployment topology, operational
-guidance, and an owner for provider-specific incidents. In the first preview, **nothing is
-production-supported yet** — conformance is evidence of contract behavior, not a support promise.
+Conformance is evidence, not a support tier. **Production-supported** means maintainers accept a
+reproducible Groundwork defect on the named topology and keep an operational runbook.
+**Compatibility-only** means capability-gated use without a production suitability promise.
+**Development/reference-only** means non-production use. Support is open-source and best effort; it
+does not include a response-time or availability SLA.
 
-| Provider | Status | Required topology |
-| --- | --- | --- |
-| **SQLite** | Conformance-passing / preview | File-backed or in-memory, with the documented connection lifetime. **SQLite 3.35.0+**. |
-| **MySQL/MariaDB** | Conformance-passing / preview | MySQL 8.0.17+ or MariaDB 11.4.13+ with InnoDB and NO PAD `utf8mb4_0900_bin` |
-| **PostgreSQL** | Conformance-passing / preview | PostgreSQL 17-compatible |
-| **SQL Server** | Conformance-passing / preview | SQL Server 2022-compatible |
-| **MongoDB** | Conformance-passing / preview | **Replica set or sharded** for transactional and exact-append behavior |
-| `Groundwork.Testing` | Public provider-author package | Deterministic reference provider — **not an application database** |
-| `Groundwork.Tool` | Preview | Deployment-time planning + explicit authorization only |
+The authoritative provider/version/topology assignments live in the versioned
+**[v2 support matrix](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/support-matrix.md)**.
+It distinguishes live-evidenced production topologies from compatible but unevidenced deployments;
+the wiki does not maintain a second copy of that table.
 
-> **MongoDB standalone is intentionally not production-supported.** It cannot provide the
-> transaction/session guarantees required by exact append and durable idempotency, so it simply does
-> not advertise those capabilities.
+The deployment owner retains database availability, capacity, credentials, backups, upgrades, and
+topology. Groundwork maintainers own reproducible package/portable-contract defects. Use the
+**[canonical production operations runbooks](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/production-operations.md)**
+for deployment and incident handling,
+and check capabilities at runtime even on a supported topology.
 
 ## Capability differences at a glance
 

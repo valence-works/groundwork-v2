@@ -4,6 +4,7 @@
 .idea/
 .vscode/
 TestResults/
+BenchmarkDotNet.Artifacts/
 artifacts/
 *.user
 *.suo
