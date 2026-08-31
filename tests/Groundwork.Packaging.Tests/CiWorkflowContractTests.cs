@@ -191,9 +191,35 @@ public sealed class CiWorkflowContractTests
         Assert.Contains("SchemaToolMySqlEndToEndTests", correctness, StringComparison.Ordinal);
         Assert.Contains("Refuse a run whose MySQL proofs did not execute", correctness, StringComparison.Ordinal);
 
+        var differentialStart = correctness.IndexOf("  query-differential:", StringComparison.Ordinal);
+        var differentialEnd = correctness.IndexOf("  sqlite-provider:", differentialStart, StringComparison.Ordinal);
+        Assert.True(differentialStart >= 0 && differentialEnd > differentialStart);
+        var differential = correctness[differentialStart..differentialEnd];
+        Assert.Contains("Run five-provider query differential suite", differential, StringComparison.Ordinal);
+        Assert.Contains("image: mysql:8.4.6", differential, StringComparison.Ordinal);
+        Assert.Contains("GROUNDWORK_MYSQL_CONNECTION:", differential, StringComparison.Ordinal);
+        Assert.Contains("for tfm in net8.0 net10.0", differential, StringComparison.Ordinal);
+        Assert.Contains("--framework \"$tfm\"", differential, StringComparison.Ordinal);
+        Assert.Contains("differential-$tfm.trx", differential, StringComparison.Ordinal);
+        Assert.Contains("executed\" -ne 12", differential, StringComparison.Ordinal);
+
         Assert.Contains("image: mysql:8.4.6", concurrency, StringComparison.Ordinal);
         Assert.Contains("GROUNDWORK_MYSQL_CONNECTION:", concurrency, StringComparison.Ordinal);
         Assert.Contains("MySQL: live provider-neutral harness", concurrency, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Mongo_schema_tool_gate_scopes_skips_to_the_live_mongo_proofs()
+    {
+        var correctness = ReadWorkflow("ci.yml");
+        var jobStart = correctness.IndexOf("  mongo-schema-tool:", StringComparison.Ordinal);
+        var jobEnd = correctness.IndexOf("  mongo-standalone-exact-append:", jobStart, StringComparison.Ordinal);
+        Assert.True(jobStart >= 0 && jobEnd > jobStart);
+        var job = correctness[jobStart..jobEnd];
+
+        Assert.Contains("outcomes SchemaToolMongoEndToEndTests NotExecuted", job, StringComparison.Ordinal);
+        Assert.DoesNotContain("Tests not executed in the whole suite", job, StringComparison.Ordinal);
+        Assert.DoesNotContain("skipped=$(grep -c", job, StringComparison.Ordinal);
     }
 
     [Fact]
