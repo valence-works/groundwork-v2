@@ -1818,6 +1818,111 @@ public sealed class MongoProviderIntegrationTests
         }
     }
 
+    [SkippableTheory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Concurrent_transactional_multi_row_conflicts_stop_before_the_trailing_row(
+        bool asynchronous,
+        bool compareAndSwap)
+    {
+        var connectionString = LiveMongo.ConnectionString;
+        Skip.If(string.IsNullOrWhiteSpace(connectionString),
+            "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
+        using var nativeSetup = new MongoDbProviderFactory().Create(connectionString!);
+        Skip.If(nativeSetup.ProviderSequenceFit is ProviderFit.Unsupported,
+            "MongoDB standalone deployments cannot execute unit-of-work transactions.");
+
+        var name = "mongo_batch_conflict_" + Guid.NewGuid().ToString("N")[..20];
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new() { Name = "identity", Type = PortableType.String, IsNullable = false, MaxLength = 128 },
+                new() { Name = "owner", Type = PortableType.String, IsNullable = false, MaxLength = 128 }
+            ],
+            Key = new KeyDefinition { Columns = ["identity"] },
+            Concurrency = ConcurrencyDeclaration.Optimistic()
+        };
+        Assert.True(nativeSetup.Schema.Apply(unit).Applied);
+
+        if (compareAndSwap)
+        {
+            var seed = nativeSetup.OpenSession(unit, MongoStorageAccess.Global);
+            var seeded = seed.Insert(MongoReservationValues("provider|subject", "seed"));
+            Assert.Equal(MongoWriteOutcomeStatus.Inserted, seeded.Status);
+        }
+
+        using var firstConnection = new MongoProviderFactory().Create(connectionString!);
+        using var secondConnection = new MongoProviderFactory().Create(connectionString!);
+        using var first = firstConnection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
+        using var second = secondConnection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
+        var options = compareAndSwap ? WriteOptions.IfVersion(1) : WriteOptions.CreateOnly;
+        first.Stage(RowWrite.ConditionalUpsert(unit, ReservationValues("provider|subject", "first"), options));
+        first.Stage(RowWrite.ConditionalUpsert(unit, ReservationValues("trailing-first", "first"), WriteOptions.CreateOnly));
+        second.Stage(RowWrite.ConditionalUpsert(unit, ReservationValues("provider|subject", "second"), options));
+        second.Stage(RowWrite.ConditionalUpsert(unit, ReservationValues("trailing-second", "second"), WriteOptions.CreateOnly));
+
+        using var start = new Barrier(2);
+        var firstTask = Task.Run(() => CommitReservation(first, start, asynchronous));
+        var secondTask = Task.Run(() => CommitReservation(second, start, asynchronous));
+        var results = await Task.WhenAll(firstTask, secondTask);
+
+        Assert.Single(results, result => result.Report?.IsSuccessful == true);
+        var loser = Assert.Single(results, result => result.Report is null);
+        var batchError = Assert.IsType<BatchWriteException>(loser.Error);
+        var failure = Assert.Single(batchError.Outcomes);
+        Assert.Equal(WriteOutcomeStatus.ConcurrencyConflict, failure.Outcome.Status);
+        Assert.Equal("provider|subject", failure.Write.Values!.Values["identity"]);
+
+        var winner = firstConnection.OpenSession(unit, StorageAccess.Global).Read(new StorageKey(
+            new Dictionary<string, object?> { ["identity"] = "provider|subject" }));
+        Assert.NotNull(winner);
+        var winnerOwner = Assert.IsType<string>(winner!.Values.Values["owner"]);
+        Assert.True(compareAndSwap ? winnerOwner == "first" || winnerOwner == "second" : winnerOwner is "first" or "second");
+        var winnerTrailing = winnerOwner == "first" ? "trailing-first" : "trailing-second";
+        var loserTrailing = winnerOwner == "first" ? "trailing-second" : "trailing-first";
+        Assert.NotNull(firstConnection.OpenSession(unit, StorageAccess.Global).Read(new StorageKey(
+            new Dictionary<string, object?> { ["identity"] = winnerTrailing })));
+        Assert.Null(firstConnection.OpenSession(unit, StorageAccess.Global).Read(new StorageKey(
+            new Dictionary<string, object?> { ["identity"] = loserTrailing })));
+
+        static StorageValues ReservationValues(string identity, string owner) =>
+            new(new Dictionary<string, object?>
+            {
+                ["identity"] = identity,
+                ["owner"] = owner
+            });
+
+        static MongoStorageValues MongoReservationValues(string identity, string owner) =>
+            new(new Dictionary<string, object?>
+            {
+                ["identity"] = identity,
+                ["owner"] = owner
+            });
+
+        static async Task<ReservationCommitResult> CommitReservation(
+            IUnitOfWork work,
+            Barrier start,
+            bool asynchronous)
+        {
+            start.SignalAndWait();
+            try
+            {
+                return asynchronous
+                    ? new ReservationCommitResult(await work.CommitWithOutcomesAsync(), null)
+                    : new ReservationCommitResult(work.CommitWithOutcomes(), null);
+            }
+            catch (Exception exception)
+            {
+                return new ReservationCommitResult(null, exception);
+            }
+        }
+    }
+
     [SkippableFact]
     public void Transaction_body_retries_a_transient_write_conflict_before_returning_success()
     {

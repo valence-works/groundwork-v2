@@ -1581,7 +1581,9 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         var nativeOnAppend = IsNativeAppendBatch(writes);
         var outcomes = await ExecuteWithTransactionIfNeeded(
             transactional => transactional.ApplyBatchCore(writes, exactOutcomes, mode), mode).ConfigureAwait(false);
-        if (nativeOnAppend && OnAppendRetentionCoordinator.ContainsAppend(outcomes))
+        if (nativeOnAppend &&
+            !outcomes.Any(item => IsBatchAbortingOutcome(item.Outcome)) &&
+            OnAppendRetentionCoordinator.ContainsAppend(outcomes))
             await ApplyOnAppendRetention(mode).ConfigureAwait(false);
         return outcomes;
     }
@@ -1620,10 +1622,13 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             var exact = new List<RowWriteOutcome>(writes.Count);
             for (var index = 0; index < writes.Count; index++)
             {
-                exact.Add(new RowWriteOutcome(writes[index], ToStore(await ExactOutcomeUpsert(
+                var outcome = new RowWriteOutcome(writes[index], ToStore(await ExactOutcomeUpsert(
                     new MongoStorageValues(physicalWrites[index].Values!.Values),
                     ToNative(writes[index].Options),
-                    mode).ConfigureAwait(false))));
+                    mode).ConfigureAwait(false)));
+                exact.Add(outcome);
+                if (IsBatchAbortingOutcome(outcome.Outcome))
+                    return await CompleteBatchOutcomes(exact, mode).ConfigureAwait(false);
             }
             return exact;
         }
@@ -1694,17 +1699,19 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                     ? collection.BulkWrite(models, bulkOptions)
                     : collection.BulkWrite(transactionSession, models, bulkOptions)).ConfigureAwait(false);
             ThrowIfIncompleteUpsertWasNotApplied(result, incompleteWrites, []);
-            return writes.Select(write => new RowWriteOutcome(write,
-                new WriteOutcome(WriteOutcomeStatus.Upserted))).ToArray();
+            return await CompleteBatchOutcomes(
+                writes.Select(write => new RowWriteOutcome(write,
+                    new WriteOutcome(WriteOutcomeStatus.Upserted))).ToArray(),
+                mode).ConfigureAwait(false);
         }
         catch (MongoBulkWriteException<BsonDocument> exception)
         {
             var failures = exception.WriteErrors.ToDictionary(error => error.Index, error => error);
             ThrowIfIncompleteUpsertWasNotApplied(exception.Result, incompleteWrites, failures.Keys);
-            return writes.Select((write, index) =>
+            return await CompleteBatchOutcomes(writes.Select((write, index) =>
                 new RowWriteOutcome(write, failures.TryGetValue(index, out var error)
                     ? new WriteOutcome(WriteOutcomeStatus.UniqueViolation, null, ExtractIndexName(error.Message))
-                    : new WriteOutcome(WriteOutcomeStatus.Upserted))).ToArray();
+                    : new WriteOutcome(WriteOutcomeStatus.Upserted))).ToArray(), mode).ConfigureAwait(false);
         }
     }
 
@@ -1732,7 +1739,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         var outcomes = new List<RowWriteOutcome>(writes.Count);
         foreach (var write in writes)
         {
-            outcomes.Add(new RowWriteOutcome(write, ToStore(await (write.Mode switch
+            var outcome = new RowWriteOutcome(write, ToStore(await (write.Mode switch
             {
                 RowWriteMode.Insert => InsertAsync(new MongoStorageValues(write.Values!.Values), ToNative(write.Options), mode),
                 RowWriteMode.Update => UpdateAsync(new MongoStorageValues(write.Values!.Values), ToNative(write.Options), mode),
@@ -1743,10 +1750,43 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 RowWriteMode.Delete => DeleteAsync(new MongoStorageKey(write.Key!.Values), ToNative(write.Options), mode),
                 RowWriteMode.CompareAndDelete => CompareAndDeleteAsync(new MongoStorageKey(write.Key!.Values), write.ExpectedValues, ToNative(write.Options), mode),
                 _ => throw new ArgumentOutOfRangeException(nameof(writes), write.Mode, null)
-            }).ConfigureAwait(false))));
+            }).ConfigureAwait(false)));
+            outcomes.Add(outcome);
+            if (IsBatchAbortingOutcome(outcome.Outcome))
+                return await CompleteBatchOutcomes(outcomes, mode).ConfigureAwait(false);
         }
         return outcomes;
     }
+
+    private async ValueTask<IReadOnlyList<RowWriteOutcome>> CompleteBatchOutcomes(
+        IReadOnlyList<RowWriteOutcome> outcomes,
+        MongoExecution mode)
+    {
+        if (!outcomes.Any(item => IsBatchAbortingOutcome(item.Outcome)))
+            return outcomes;
+
+        // An explicit unit of work has no outer operation replay boundary. A conflict that aborts
+        // its transaction must therefore be surfaced as the documented provider-neutral batch
+        // failure, after making the unit terminal. The exception carries only attributed failures;
+        // successful rows are rolled back and are not reported as committed outcomes.
+        if (transactionSession is not null && unitOfWork is not null)
+        {
+            try { await Abort(transactionSession, mode).ConfigureAwait(false); }
+            catch (MongoException) { }
+            unitOfWork.Poison();
+            var failures = outcomes
+                .Where(item => IsBatchAbortingOutcome(item.Outcome))
+                .ToArray();
+            throw new BatchWriteException(
+                "A MongoDB batch write conflict aborted the whole unit of work; retry the complete unit of work.",
+                failures);
+        }
+
+        return outcomes;
+    }
+
+    private static bool IsBatchAbortingOutcome(WriteOutcome outcome) =>
+        outcome.Status is WriteOutcomeStatus.UniqueViolation or WriteOutcomeStatus.ConcurrencyConflict;
 
     private static MongoWriteOptions? ToNative(WriteOptions options) =>
         new() { Precondition = options.Precondition };
@@ -3415,6 +3455,18 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             try
             {
                 var result = await operation(transactional).ConfigureAwait(false);
+                if (result is IReadOnlyList<RowWriteOutcome> batchResult &&
+                    batchResult.Any(item => IsBatchAbortingOutcome(item.Outcome)))
+                {
+                    // A row-level conflict can abort the transaction before the fallback has
+                    // finished walking its rows. Do not attempt the next row or commit the
+                    // already-aborted transaction; return the positional prefix so the shared
+                    // batch layer can raise BatchWriteException with the attributed failure.
+                    try { await Abort(session, mode).ConfigureAwait(false); }
+                    catch (MongoException) { }
+                    operationCompleted = true;
+                    return result;
+                }
                 if (result is MongoWriteOutcome
                     {
                         Status: MongoWriteOutcomeStatus.UniqueViolation or
