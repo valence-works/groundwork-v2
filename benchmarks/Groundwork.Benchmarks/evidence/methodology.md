@@ -70,9 +70,9 @@ GitHub-hosted hardware. Changing the baseline or a budget is a review-visible ev
 automatic response to a red gate.
 
 The manual `Controlled performance comparison` workflow is that service-free lane. It checks out an
-exact evidence commit, refuses missing, absolute, or parent-traversing paths, and passes the reviewed
-policy plus the two publication-safe bundles to `performance-gate`. Its hosted runner evaluates JSON and
-does not produce timing evidence.
+exact evidence commit, accepts only tracked regular files whose physical paths do not traverse a
+symbolic link, and passes the reviewed policy plus the two publication-safe bundles to
+`performance-gate`. Its hosted runner evaluates JSON and does not produce timing evidence.
 
 Ordinary correctness workflows validate the workflow shape, catalog, paths, and benchmark behavior.
 They do not compare elapsed time. The manual GitHub `Performance evidence` workflow preserves

@@ -62,9 +62,14 @@ implementation, preflight samples, and per-run outcome. Every invocation writes 
 timestamped attempt directory below the SHA, so an invalid busy-window attempt remains available
 for audit without blocking a later retry.
 
-A failure is recurrence evidence and must be classified from its TRX, console output, and dump. Five
-passes mean only “not reproduced in this clean window”; they are not proof that an intermittent bug
-is fixed.
+A failure is recurrence evidence and must be classified locally from its TRX, console output, and
+dump. Those files can contain host paths, identifiers, query values, and process memory. The hosted
+workflow therefore publishes only a whitelisted `summary.txt` by default and retains it for seven
+days. It also suppresses raw restore and test output from the hosted job log. Raw logs, TRX,
+sequence files, and dumps remain runner-local unless the dispatch explicitly
+sets `upload_sensitive_recurrence_artifacts=true`; that sensitive artifact is conspicuously named
+and retained for one day. Five passes mean only “not reproduced in this clean window”; they are not
+proof that an intermittent bug is fixed.
 
 For the independent hosted observation, enable the recurrence option when manually dispatching the
 `Concurrency` workflow from the candidate branch that contains this optional job. The workflow ref
@@ -78,13 +83,18 @@ gh workflow run concurrency.yml --ref "$workflow_ref" \
   -f ref="$head" -f full_solution_recurrence=true
 ```
 
+Only when an authorized investigation requires the raw hosted diagnostics, add
+`-f upload_sensitive_recurrence_artifacts=true`. Treat the downloaded artifact as sensitive and
+delete local copies after classification.
+
 The optional recurrence job uses a fresh service-free runner, verifies the requested exact head,
 delegates the five-minute idle preflight and five unfiltered Release iterations to the same harness,
-and uploads the complete attempt directory even after a fast failure. The other dedicated
-concurrency jobs run alongside it for the same exact-SHA checkpoint. Its 60-minute outer timeout
-leaves the 20-minute VSTest hang threshold time to produce diagnostics. A skipped run while the
-repository cost brake is active is not evidence. Record the exact run URL and head SHA when
-classifying the result, and retain the local observation as a separate provenance source.
+and uploads a publication-safe summary whenever the harness produced an attempt manifest, including
+after a later fast failure. The other dedicated concurrency jobs run alongside it for the same
+exact-SHA checkpoint. Its 60-minute outer timeout leaves the 20-minute VSTest hang threshold time to
+produce diagnostics. A skipped run while the repository cost brake is active is not evidence.
+Record the exact run URL and head SHA when classifying the result, and retain the local observation
+as a separate provenance source.
 
 ## Native AOT correctness
 
@@ -174,8 +184,10 @@ gh workflow run performance-comparison.yml --ref main \
 
 The policy pins the approved baseline SHA and report digest. The comparator also requires matching
 named host, BenchmarkDotNet environment, and hardware intrinsics, so changing input paths cannot
-silently replace the baseline or compare unlike machines. A red comparison is performance evidence;
-it remains separate from correctness and concurrency and never triggers an Actions measurement.
+silently replace the baseline or compare unlike machines. Workflow inputs must resolve to tracked
+regular files in the exact checkout without traversing symbolic links. A red comparison is
+performance evidence; it remains separate from correctness and concurrency and never triggers an
+Actions measurement.
 
 ## Enforcement note
 

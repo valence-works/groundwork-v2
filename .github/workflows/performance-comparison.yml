@@ -70,11 +70,22 @@ jobs:
           CANDIDATE_MANIFEST: ${{ inputs.candidate_manifest }}
           CANDIDATE_RESULT: ${{ inputs.candidate_result }}
         run: |
+          repository_root=$(pwd -P)
           for path in "$POLICY" "$BASELINE_MANIFEST" "$BASELINE_RESULT" "$CANDIDATE_MANIFEST" "$CANDIDATE_RESULT"; do
             case "$path" in
               ""|/*|*..*) echo "Evidence paths must be non-empty repository-relative paths: $path" >&2; exit 2 ;;
             esac
             test -f "$path" || { echo "Checked-in evidence file not found: $path" >&2; exit 2; }
+            git ls-files --error-unmatch -- "$path" >/dev/null 2>&1 || {
+              echo "Evidence file is not tracked by the exact checkout: $path" >&2; exit 2;
+            }
+            resolved_path=$(realpath -e -- "$path") || {
+              echo "Evidence file could not be physically resolved: $path" >&2; exit 2;
+            }
+            if test -L "$path" || [[ "$resolved_path" != "$repository_root/$path" ]]; then
+              echo "Evidence paths must not traverse symbolic links: $path" >&2
+              exit 2
+            fi
           done
       - name: Record comparison intent
         env:
