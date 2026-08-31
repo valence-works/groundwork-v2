@@ -74,7 +74,9 @@ public sealed class PostgreSqlDataMigrationTests
         var result = await PhysicalSchemaApplication.ApplyAsync(
             target, executor, Now, null, Catalog(), new DataMigrationBudget { MaxRowsPerBatch = 2 });
 
-        Assert.Equal(PhysicalSchemaApplicationOutcome.NoChanges, result.Outcome);
+        // Adding the semantic migration changes the target fingerprint, so this first complete
+        // application publishes the migration-bearing target as well as migrating its rows.
+        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, result.Outcome);
         Assert.Equal(DataMigrationStatus.Completed, Assert.Single(result.DataMigrations).Status);
         Assert.Equal(new long?[] { 10, 20, 30, 40, 50 }, Scores(database));
         var entries = await executor.ReadLedgerEntriesAsync(target.Identity);

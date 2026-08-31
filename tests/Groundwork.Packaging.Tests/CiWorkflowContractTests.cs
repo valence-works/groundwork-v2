@@ -132,6 +132,53 @@ public sealed class CiWorkflowContractTests
     }
 
     [Fact]
+    public void Full_solution_recurrence_workflow_is_manual_exact_head_and_preserves_all_evidence()
+    {
+        var workflow = ReadWorkflow("concurrency.yml").ReplaceLineEndings("\n");
+        var triggers = workflow[
+            workflow.IndexOf("\non:", StringComparison.Ordinal)..
+            workflow.IndexOf("\npermissions:", StringComparison.Ordinal)];
+        var jobStart = workflow.IndexOf("  full-solution-recurrence:", StringComparison.Ordinal);
+        Assert.True(jobStart >= 0);
+        var job = workflow[jobStart..];
+
+        Assert.Contains("workflow_dispatch:", triggers, StringComparison.Ordinal);
+        Assert.Contains("full_solution_recurrence:", triggers, StringComparison.Ordinal);
+        Assert.Contains("required: false", triggers, StringComparison.Ordinal);
+        Assert.Contains("default: false", triggers, StringComparison.Ordinal);
+        Assert.Contains("type: boolean", triggers, StringComparison.Ordinal);
+        Assert.Contains(
+            "if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' && inputs.full_solution_recurrence }}",
+            job,
+            StringComparison.Ordinal);
+        Assert.Contains("runs-on: ubuntu-latest", job, StringComparison.Ordinal);
+        Assert.Contains("timeout-minutes: 60", job, StringComparison.Ordinal);
+        Assert.Contains("ref: ${{ inputs.ref }}", job, StringComparison.Ordinal);
+        Assert.Contains("EXPECTED_REF: ${{ inputs.ref }}", job, StringComparison.Ordinal);
+        Assert.Contains("bash eng/verify-exact-head.sh \"$EXPECTED_REF\"", job, StringComparison.Ordinal);
+        Assert.Contains("GROUNDWORK_CONFIRM_IDLE_HOST: \"true\"", job, StringComparison.Ordinal);
+        Assert.Contains("bash eng/run-full-solution-recurrence.sh \"$EXPECTED_REF\"", job, StringComparison.Ordinal);
+        Assert.Contains("if: always()", job, StringComparison.Ordinal);
+        Assert.Contains("path: artifacts/recurrence/full-solution/**", job, StringComparison.Ordinal);
+        Assert.Contains("if-no-files-found: warn", job, StringComparison.Ordinal);
+        Assert.Contains("retention-days: 30", job, StringComparison.Ordinal);
+        Assert.DoesNotContain("services:", job, StringComparison.Ordinal);
+        Assert.DoesNotContain("matrix:", job, StringComparison.Ordinal);
+        Assert.DoesNotContain("--filter", job, StringComparison.Ordinal);
+
+        var workflowDocs = File.ReadAllText(Path.Combine(
+            RepositoryRoot.Find(),
+            "docs/agents/ci-workflows.md"));
+        Assert.Contains("workflow_ref=", workflowDocs, StringComparison.Ordinal);
+        Assert.Contains("gh workflow run concurrency.yml --ref \"$workflow_ref\"", workflowDocs, StringComparison.Ordinal);
+        Assert.Contains("-f ref=\"$head\" -f full_solution_recurrence=true", workflowDocs, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "gh workflow run concurrency.yml --ref codex/groundwork-2-delivery \\",
+            workflowDocs,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void MySql_live_evidence_covers_correctness_schema_tool_and_main_concurrency()
     {
         var correctness = ReadWorkflow("ci.yml");
@@ -144,9 +191,36 @@ public sealed class CiWorkflowContractTests
         Assert.Contains("SchemaToolMySqlEndToEndTests", correctness, StringComparison.Ordinal);
         Assert.Contains("Refuse a run whose MySQL proofs did not execute", correctness, StringComparison.Ordinal);
 
+        var differentialStart = correctness.IndexOf("  query-differential:", StringComparison.Ordinal);
+        var differentialEnd = correctness.IndexOf("  sqlite-provider:", differentialStart, StringComparison.Ordinal);
+        Assert.True(differentialStart >= 0 && differentialEnd > differentialStart);
+        var differential = correctness[differentialStart..differentialEnd];
+        Assert.Contains("Run five-provider query differential suite", differential, StringComparison.Ordinal);
+        Assert.Contains("image: mysql:8.4.6", differential, StringComparison.Ordinal);
+        Assert.Contains("GROUNDWORK_MYSQL_CONNECTION:", differential, StringComparison.Ordinal);
+        Assert.Contains("for tfm in net8.0 net10.0", differential, StringComparison.Ordinal);
+        Assert.Contains("--framework \"$tfm\"", differential, StringComparison.Ordinal);
+        Assert.Contains("differential-$tfm.trx", differential, StringComparison.Ordinal);
+        Assert.Contains("artifacts/differential/*/*.trx", differential, StringComparison.Ordinal);
+        Assert.Contains("executed\" -ne 12", differential, StringComparison.Ordinal);
+
         Assert.Contains("image: mysql:8.4.6", concurrency, StringComparison.Ordinal);
         Assert.Contains("GROUNDWORK_MYSQL_CONNECTION:", concurrency, StringComparison.Ordinal);
         Assert.Contains("MySQL: live provider-neutral harness", concurrency, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Mongo_schema_tool_gate_scopes_skips_to_the_live_mongo_proofs()
+    {
+        var correctness = ReadWorkflow("ci.yml");
+        var jobStart = correctness.IndexOf("  mongo-schema-tool:", StringComparison.Ordinal);
+        var jobEnd = correctness.IndexOf("  mongo-standalone-exact-append:", jobStart, StringComparison.Ordinal);
+        Assert.True(jobStart >= 0 && jobEnd > jobStart);
+        var job = correctness[jobStart..jobEnd];
+
+        Assert.Contains("outcomes SchemaToolMongoEndToEndTests NotExecuted", job, StringComparison.Ordinal);
+        Assert.DoesNotContain("Tests not executed in the whole suite", job, StringComparison.Ordinal);
+        Assert.DoesNotContain("skipped=$(grep -c", job, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -203,6 +277,24 @@ public sealed class CiWorkflowContractTests
         var exactOnce = job.IndexOf("Refuse a run whose SQL Server W2 proof", StringComparison.Ordinal);
         var upload = job.IndexOf("Upload SQL Server W2 diagnostics", StringComparison.Ordinal);
         Assert.True(exactHead >= 0 && exactHead < test && test < exactOnce && exactOnce < upload);
+    }
+
+    [Fact]
+    public void PostgreSql_provider_tfms_are_serialized_against_the_shared_live_database()
+    {
+        var workflow = ReadWorkflow("ci.yml");
+        var jobStart = workflow.IndexOf("  postgresql-provider:", StringComparison.Ordinal);
+        var jobEnd = workflow.IndexOf("  mysql-provider:", jobStart, StringComparison.Ordinal);
+        Assert.True(jobStart >= 0 && jobEnd > jobStart);
+        var job = workflow[jobStart..jobEnd];
+
+        const string command =
+            "dotnet test tests/Groundwork.PostgreSql.Tests/Groundwork.PostgreSql.Tests.csproj";
+        Assert.Equal(2, job.Split(command, StringSplitOptions.None).Length - 1);
+        var net8 = job.IndexOf("--framework net8.0", StringComparison.Ordinal);
+        var net10 = job.IndexOf("--framework net10.0", StringComparison.Ordinal);
+        Assert.True(net8 >= 0 && net8 < net10);
+        Assert.Equal(2, job.Split("--filter \"Category!=Concurrency\"", StringSplitOptions.None).Length - 1);
     }
 
     private static string ReadWorkflow(string name) =>

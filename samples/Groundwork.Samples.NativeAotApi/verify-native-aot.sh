@@ -30,12 +30,11 @@ test -n "$version" || {
   exit 1
 }
 
-mkdir -p "$build_root/feed"
 cp "$sample_root/Groundwork.Samples.NativeAotApi.csproj" "$build_root/"
 cp "$sample_root/Program.cs" "$build_root/"
 cp "$sample_root/TodoItem.cs" "$build_root/"
 cp "$sample_root/NuGet.Config" "$build_root/"
-cp "$feed"/Groundwork.*.nupkg "$build_root/feed/"
+cp "$feed"/Groundwork.*.nupkg "$build_root/"
 
 isolation_args=(
   -p:ImportDirectoryBuildProps=false

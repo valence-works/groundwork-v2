@@ -9,6 +9,11 @@ on:
         description: Exact 40-character commit SHA to verify
         required: true
         type: string
+      full_solution_recurrence:
+        description: Run the five-iteration unfiltered full-solution recurrence harness
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -325,3 +330,34 @@ jobs:
           path: artifacts/retention-concurrency/**
           if-no-files-found: ignore
           retention-days: 14
+
+  full-solution-recurrence:
+    if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' && inputs.full_solution_recurrence }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Verify the requested exact head
+        env:
+          EXPECTED_REF: ${{ inputs.ref }}
+        run: bash eng/verify-exact-head.sh "$EXPECTED_REF"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - name: Run five full-solution recurrence iterations
+        env:
+          EXPECTED_REF: ${{ inputs.ref }}
+          GROUNDWORK_CONFIRM_IDLE_HOST: "true"
+        run: bash eng/run-full-solution-recurrence.sh "$EXPECTED_REF"
+      - name: Upload recurrence evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-solution-recurrence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/recurrence/full-solution/**
+          if-no-files-found: warn
+          retention-days: 30

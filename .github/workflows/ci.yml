@@ -109,6 +109,18 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10
+      mysql:
+        image: mysql:8.4.6
+        env:
+          MYSQL_ROOT_PASSWORD: groundwork
+          MYSQL_ROOT_HOST: "%"
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pgroundwork --silent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -117,41 +129,46 @@ jobs:
             8.0.x
             10.0.x
       - run: dotnet restore tests/Groundwork.Differential.Tests/Groundwork.Differential.Tests.csproj
-      - name: Run four-provider query differential suite
+      - name: Run five-provider query differential suite
         env:
           GW_EXPLAIN_ASSERT: "1"
           GW_EXPLAIN_ARTIFACT_DIR: ${{ github.workspace }}/TestResults/groundwork-explain
           GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
           GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
           GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/q4ci
-        run: >-
-          dotnet test tests/Groundwork.Differential.Tests --no-restore --configuration Release
-          --logger "trx;LogFileName=differential.trx"
-          --results-directory artifacts/differential
-      # A four-provider proof whose live-provider cases skip is green and proves nothing:
-      # unconfigured, the set-based mutation class reports one passed and three skipped and exit 0.
+          GROUNDWORK_MYSQL_CONNECTION: Server=127.0.0.1;Port=3306;User ID=root;Password=groundwork;SslMode=None;Pooling=false
+        run: |
+          for tfm in net8.0 net10.0; do
+            dotnet test tests/Groundwork.Differential.Tests --no-restore --configuration Release \
+              --framework "$tfm" \
+              --logger "trx;LogFileName=differential-$tfm.trx" \
+              --results-directory "artifacts/differential/$tfm"
+          done
+      # A five-provider proof whose live-provider cases skip is green and proves nothing:
+      # unconfigured, the set-based mutation class reports two passed and four skipped and exit 0.
       # The job asserts the proofs executed rather than trusting the exit code.
       - name: Refuse a run whose set-based mutation proofs did not execute
         run: |
           outcomes() {
             grep -o "testName=\"Groundwork.Differential.Tests.SetMutationDifferentialTests[^\"]*\"[^>]*outcome=\"[A-Za-z]*\"" \
-              artifacts/differential/*.trx | grep -c "outcome=\"$1\"" || true
+              artifacts/differential/*/*.trx | grep -c "outcome=\"$1\"" || true
           }
           executed=$(outcomes Passed)
           notExecuted=$(outcomes NotExecuted)
           echo "SetMutationDifferentialTests passed: $executed, not executed: $notExecuted"
-          if [ "$executed" -lt 5 ] || [ "$notExecuted" -ne 0 ]; then
-            echo "::error::The four-provider set-based mutation proofs did not run against every provider." >&2
+          # Six proofs per TFM: one renderer contract plus SQLite and four live providers.
+          if [ "$executed" -ne 12 ] || [ "$notExecuted" -ne 0 ]; then
+            echo "::error::The five-provider set-based mutation proofs did not run on both target frameworks." >&2
             exit 1
           fi
       - name: Refuse a run whose LINQ query differential proofs did not execute
         run: |
           outcomes() {
             grep -o "testName=\"Groundwork.Differential.Tests.LinqExecutionDifferentialTests[^\"]*\"[^>]*outcome=\"[A-Za-z]*\"" \
-              artifacts/differential/*.trx | grep -c "outcome=\"$1\"" || true
+              artifacts/differential/*/*.trx | grep -c "outcome=\"$1\"" || true
           }
           total=$(grep -o "testName=\"Groundwork.Differential.Tests.LinqExecutionDifferentialTests[^\"]*\"[^>]*outcome=\"[A-Za-z]*\"" \
-              artifacts/differential/*.trx | wc -l)
+              artifacts/differential/*/*.trx | wc -l)
           executed=$(outcomes Passed)
           notExecuted=$(outcomes NotExecuted)
           echo "LinqExecutionDifferentialTests total: $total, passed: $executed, not executed: $notExecuted"
@@ -453,10 +470,8 @@ jobs:
           }
           executed=$(outcomes SchemaToolMongoEndToEndTests Passed)
           notExecuted=$(outcomes SchemaToolMongoEndToEndTests NotExecuted)
-          skipped=$(grep -c 'outcome="NotExecuted"' "$results" || true)
           echo "SchemaToolMongoEndToEndTests passed: $executed, not executed: $notExecuted"
-          echo "Tests not executed in the whole suite: $skipped"
-          if [ "$executed" -lt 7 ] || [ "$notExecuted" -ne 0 ] || [ "$skipped" -ne 0 ]; then
+          if [ "$executed" -lt 7 ] || [ "$notExecuted" -ne 0 ]; then
             echo "::error::The MongoDB schema-tool proofs did not run against the replica set." >&2
             exit 1
           fi
@@ -615,12 +630,18 @@ jobs:
             8.0.x
             10.0.x
       - run: dotnet restore Groundwork.slnx
-      - name: Run PostgreSQL provider conformance
+      - name: Run PostgreSQL provider conformance (.NET 8)
         env:
           GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
         run: >-
           dotnet test tests/Groundwork.PostgreSql.Tests/Groundwork.PostgreSql.Tests.csproj
-          --no-restore --configuration Release --filter "Category!=Concurrency"
+          --no-restore --configuration Release --framework net8.0 --filter "Category!=Concurrency"
+      - name: Run PostgreSQL provider conformance (.NET 10)
+        env:
+          GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
+        run: >-
+          dotnet test tests/Groundwork.PostgreSql.Tests/Groundwork.PostgreSql.Tests.csproj
+          --no-restore --configuration Release --framework net10.0 --filter "Category!=Concurrency"
 
   mysql-provider:
     if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' }}

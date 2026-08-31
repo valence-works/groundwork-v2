@@ -41,7 +41,7 @@ has time to upload the dump, sequence XML, and any partial TRX from
 observed 11–13 minute successful W2 case duration; increasing the outer job timeout is not a hang
 diagnostic. Preserve the exact-head check and exact-once TRX guard when changing this command.
 
-### Local full-solution recurrence evidence
+### Full-solution recurrence evidence
 
 Use `eng/run-full-solution-recurrence.sh` only when investigating an intermittent failure whose
 signal depends on the unfiltered, cross-assembly solution shape. It is not a routine pull-request
@@ -64,8 +64,27 @@ for audit without blocking a later retry.
 
 A failure is recurrence evidence and must be classified from its TRX, console output, and dump. Five
 passes mean only “not reproduced in this clean window”; they are not proof that an intermittent bug
-is fixed. Pair the local observation with the issue's required independent or hosted evidence before
-closing it.
+is fixed.
+
+For the independent hosted observation, enable the recurrence option when manually dispatching the
+`Concurrency` workflow from the candidate branch that contains this optional job. The workflow ref
+and the tested SHA must refer to the same candidate checkpoint:
+
+```bash
+workflow_ref=codex/210-recurrence-result
+# After the PR is merged, use the target integration branch instead.
+head=$(git rev-parse "$workflow_ref")
+gh workflow run concurrency.yml --ref "$workflow_ref" \
+  -f ref="$head" -f full_solution_recurrence=true
+```
+
+The optional recurrence job uses a fresh service-free runner, verifies the requested exact head,
+delegates the five-minute idle preflight and five unfiltered Release iterations to the same harness,
+and uploads the complete attempt directory even after a fast failure. The other dedicated
+concurrency jobs run alongside it for the same exact-SHA checkpoint. Its 60-minute outer timeout
+leaves the 20-minute VSTest hang threshold time to produce diagnostics. A skipped run while the
+repository cost brake is active is not evidence. Record the exact run URL and head SHA when
+classifying the result, and retain the local observation as a separate provenance source.
 
 ## Native AOT correctness
 
