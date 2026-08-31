@@ -40,6 +40,13 @@ public sealed class CiWorkflowContractTests
             "--filter '*PointRead*' '*CoveredQuery*' '*PagedQuery*' '*BatchedWrite*' '*UnitOfWorkCommit*'";
         Assert.Equal(2, collector.Split(allWorkloads, StringSplitOptions.None).Length - 1);
         Assert.Contains("--exporters json markdown csv", collector, StringComparison.Ordinal);
+        Assert.Contains("benchmark_results=(", collector, StringComparison.Ordinal);
+        Assert.Contains("Expected exactly one BenchmarkDotNet JSON result", collector, StringComparison.Ordinal);
+        Assert.Contains("command -v sha256sum", collector, StringComparison.Ordinal);
+        Assert.Contains("command -v shasum", collector, StringComparison.Ordinal);
+        Assert.Contains("Neither sha256sum nor shasum is available", collector, StringComparison.Ordinal);
+        Assert.Contains("benchmark_result=", collector, StringComparison.Ordinal);
+        Assert.Contains("benchmark_result_sha256=", collector, StringComparison.Ordinal);
         Assert.DoesNotContain("threshold", collector, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("baseline.json", collector, StringComparison.OrdinalIgnoreCase);
     }
