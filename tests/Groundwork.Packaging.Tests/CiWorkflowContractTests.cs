@@ -252,6 +252,24 @@ public sealed class CiWorkflowContractTests
         Assert.True(exactHead >= 0 && exactHead < test && test < exactOnce && exactOnce < upload);
     }
 
+    [Fact]
+    public void PostgreSql_provider_tfms_are_serialized_against_the_shared_live_database()
+    {
+        var workflow = ReadWorkflow("ci.yml");
+        var jobStart = workflow.IndexOf("  postgresql-provider:", StringComparison.Ordinal);
+        var jobEnd = workflow.IndexOf("  mysql-provider:", jobStart, StringComparison.Ordinal);
+        Assert.True(jobStart >= 0 && jobEnd > jobStart);
+        var job = workflow[jobStart..jobEnd];
+
+        const string command =
+            "dotnet test tests/Groundwork.PostgreSql.Tests/Groundwork.PostgreSql.Tests.csproj";
+        Assert.Equal(2, job.Split(command, StringSplitOptions.None).Length - 1);
+        var net8 = job.IndexOf("--framework net8.0", StringComparison.Ordinal);
+        var net10 = job.IndexOf("--framework net10.0", StringComparison.Ordinal);
+        Assert.True(net8 >= 0 && net8 < net10);
+        Assert.Equal(2, job.Split("--filter \"Category!=Concurrency\"", StringSplitOptions.None).Length - 1);
+    }
+
     private static string ReadWorkflow(string name) =>
         File.ReadAllText(Path.Combine(RepositoryRoot.Find(), ".github/workflows", name));
 }
