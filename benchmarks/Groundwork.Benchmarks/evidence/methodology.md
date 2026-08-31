@@ -62,6 +62,11 @@ compare a later checked-in bundle and
 fail that performance lane without re-measuring on GitHub-hosted hardware. Changing the baseline or a
 budget is a review-visible evidence change, not an automatic response to a red gate.
 
+The manual `Controlled performance comparison` workflow is that service-free lane. It checks out an
+exact evidence commit, refuses missing, absolute, or parent-traversing paths, and passes the reviewed
+policy plus the two untouched bundles to `performance-gate`. Its hosted runner evaluates JSON and
+does not produce timing evidence.
+
 Ordinary correctness workflows validate the workflow shape, catalog, paths, and benchmark behavior.
 They do not compare elapsed time. The manual GitHub `Performance evidence` workflow preserves
 Native AOT startup, Records, and provider round-trip diagnostics for explicit investigations, but

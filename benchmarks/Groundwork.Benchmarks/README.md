@@ -61,6 +61,9 @@ applying explicit mean and allocation-ratio budgets to Groundwork's five cases. 
 run a benchmark and is not an active gate
 until an approved controlled baseline, candidate result, and reviewed policy exist. The exact
 arguments and lifecycle are documented in [`evidence/methodology.md`](evidence/methodology.md).
+Once reviewed bundles and a policy are checked in, the manual
+`Controlled performance comparison` workflow runs this comparator against repository-relative
+evidence paths. It starts no services and collects no timing on GitHub-hosted hardware.
 
 When the EF mapping changes, regenerate its compiled model with the repository's matching EF tool:
 

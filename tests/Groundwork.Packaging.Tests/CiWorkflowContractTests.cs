@@ -52,6 +52,44 @@ public sealed class CiWorkflowContractTests
     }
 
     [Fact]
+    public void Controlled_performance_comparison_is_manual_service_free_and_uses_only_checked_in_evidence()
+    {
+        var workflow = ReadWorkflow("performance-comparison.yml").ReplaceLineEndings("\n");
+        var triggers = workflow[
+            workflow.IndexOf("\non:", StringComparison.Ordinal)..
+            workflow.IndexOf("\npermissions:", StringComparison.Ordinal)];
+
+        Assert.Contains("workflow_dispatch:", triggers, StringComparison.Ordinal);
+        Assert.DoesNotContain("pull_request:", triggers, StringComparison.Ordinal);
+        Assert.DoesNotContain("push:", triggers, StringComparison.Ordinal);
+        foreach (var input in new[]
+                 {
+                     "ref:",
+                     "policy:",
+                     "baseline_manifest:",
+                     "baseline_result:",
+                     "candidate_sha:",
+                     "candidate_manifest:",
+                     "candidate_result:",
+                     "reason:"
+                 })
+            Assert.Contains(input, triggers, StringComparison.Ordinal);
+
+        Assert.Contains("bash eng/verify-exact-head.sh \"$EXPECTED_REF\"", workflow, StringComparison.Ordinal);
+        Assert.Contains("vars.GROUNDWORK_CI_PAUSED != 'true'", workflow, StringComparison.Ordinal);
+        Assert.Contains("Evidence paths must be non-empty repository-relative paths", workflow, StringComparison.Ordinal);
+        Assert.Contains("Checked-in evidence file not found", workflow, StringComparison.Ordinal);
+        Assert.Contains("REASON: ${{ inputs.reason }}", workflow, StringComparison.Ordinal);
+        Assert.Contains("GITHUB_STEP_SUMMARY", workflow, StringComparison.Ordinal);
+        Assert.Contains("--no-restore --configuration Release -- performance-gate", workflow, StringComparison.Ordinal);
+        Assert.Contains("--policy \"$POLICY\"", workflow, StringComparison.Ordinal);
+        Assert.Contains("--candidate-sha \"$CANDIDATE_SHA\"", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("services:", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("benchmarks --", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("collect-comparative-performance.sh", workflow, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Comparative_benchmark_key_scenarios_are_an_explicit_stable_catalog()
     {
         var root = RepositoryRoot.Find();
