@@ -139,6 +139,7 @@ internal static class BenchmarkRegressionGate
 
     private static ValidatedPolicy ReadPolicy(string path)
     {
+        RejectSymlinkOrReparsePath(path, "policy");
         var policy = JsonSerializer.Deserialize<GatePolicy>(File.ReadAllText(path), PolicyJsonOptions)
             ?? throw new GateInputException("The performance gate policy is empty.");
         if (policy.SchemaVersion != 1)
@@ -193,6 +194,8 @@ internal static class BenchmarkRegressionGate
         string resultPath,
         string? expectedResultHash)
     {
+        RejectSymlinkOrReparsePath(path, $"{label} manifest");
+
         var values = new Dictionary<string, List<string>>(StringComparer.Ordinal);
         foreach (var line in File.ReadLines(path))
         {
@@ -243,6 +246,7 @@ internal static class BenchmarkRegressionGate
         {
             throw new GateInputException($"{label} benchmark result is outside its manifest bundle.");
         }
+        RejectSymlinkOrReparsePath(resultPath, $"{label} benchmark result");
         var declaredResultPath = ExactlyOne(values, "benchmark_result", label);
         if (!IsBundleRelativePath(declaredResultPath))
             throw new GateInputException($"{label} manifest benchmark_result is outside its manifest bundle.");
@@ -386,6 +390,34 @@ internal static class BenchmarkRegressionGate
             hertz.ValueKind == JsonValueKind.Number &&
             hertz.TryGetInt64(out var frequency) &&
             frequency > 0;
+    }
+
+    private static void RejectSymlinkOrReparsePath(string path, string label)
+    {
+        var fullPath = Path.GetFullPath(path);
+        var root = Path.GetPathRoot(fullPath)
+            ?? throw new GateInputException($"{label} path '{path}' has no filesystem root.");
+        var currentPath = root;
+        foreach (var component in fullPath[root.Length..].Split(
+                     [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            currentPath = Path.Combine(currentPath, component);
+            FileSystemInfo fileSystemInfo = Directory.Exists(currentPath)
+                ? new DirectoryInfo(currentPath)
+                : new FileInfo(currentPath);
+            RejectSymlinkOrReparseEntry(fileSystemInfo, path, label);
+        }
+    }
+
+    private static void RejectSymlinkOrReparseEntry(FileSystemInfo fileSystemInfo, string path, string label)
+    {
+        if ((fileSystemInfo.Attributes & FileAttributes.ReparsePoint) != 0 ||
+            fileSystemInfo.LinkTarget is not null)
+        {
+            throw new GateInputException(
+                $"{label} path '{path}' contains a symbolic link or reparse point at '{fileSystemInfo.FullName}'.");
+        }
     }
 
     private static void ValidateEnvironment(

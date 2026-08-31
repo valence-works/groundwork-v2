@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text.Json.Nodes;
 using Groundwork.Benchmarks;
 using Xunit;
+using Xunit.Sdk;
 
 namespace Groundwork.Benchmarks.Tests;
 
@@ -346,6 +347,81 @@ public sealed class BenchmarkRegressionGateTests
         Assert.Contains($"FAIL {GroundworkMethods[0]}", result.Output, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("policy")]
+    [InlineData("baseline-manifest")]
+    [InlineData("baseline-result")]
+    [InlineData("candidate-manifest")]
+    [InlineData("candidate-result")]
+    public void Gate_refuses_symlinked_input_files(string input)
+    {
+        var result = RunGate(
+            CompletePolicy(),
+            CompleteEvidence(),
+            CompleteEvidence(),
+            arrange: files => ReplaceWithFileSymlink(input switch
+            {
+                "policy" => files.PolicyPath,
+                "baseline-manifest" => files.BaselineManifestPath,
+                "baseline-result" => files.BaselineResultPath,
+                "candidate-manifest" => files.CandidateManifestPath,
+                "candidate-result" => files.CandidateResultPath,
+                _ => throw new ArgumentOutOfRangeException(nameof(input), input, null)
+            }));
+
+        Assert.Equal(2, result.ExitCode);
+        Assert.Contains("symbolic link or reparse point", result.Error, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Gate_refuses_symlinked_result_path_component()
+    {
+        var result = RunGate(
+            CompletePolicy(),
+            CompleteEvidence(),
+            CompleteEvidence(),
+            arrange: files =>
+            {
+                var targetDirectory = Path.Combine(files.RootDirectory, "candidate-target");
+                Directory.CreateDirectory(targetDirectory);
+                var targetResult = Path.Combine(targetDirectory, "candidate.json");
+                File.Move(files.CandidateResultPath, targetResult);
+
+                var linkedDirectory = Path.Combine(files.RootDirectory, "candidate-link");
+                CreateDirectorySymbolicLinkOrSkip(linkedDirectory, targetDirectory);
+                files.CandidateResultPath = Path.Combine(linkedDirectory, "candidate.json");
+                var manifest = File.ReadAllText(files.CandidateManifestPath);
+                File.WriteAllText(
+                    files.CandidateManifestPath,
+                    ReplaceManifestValue(manifest, "benchmark_result", "candidate-link/candidate.json"));
+            });
+
+        Assert.Equal(2, result.ExitCode);
+        Assert.Contains("symbolic link or reparse point", result.Error, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Gate_refuses_symlinked_parent_directory()
+    {
+        var result = RunGate(
+            CompletePolicy(),
+            CompleteEvidence(),
+            CompleteEvidence(),
+            arrange: files =>
+            {
+                var targetDirectory = Path.Combine(files.RootDirectory, "policy-target");
+                Directory.CreateDirectory(targetDirectory);
+                File.Move(files.PolicyPath, Path.Combine(targetDirectory, "policy.json"));
+
+                var linkedDirectory = Path.Combine(files.RootDirectory, "policy-link");
+                CreateDirectorySymbolicLinkOrSkip(linkedDirectory, targetDirectory);
+                files.PolicyPath = Path.Combine(linkedDirectory, "policy.json");
+            });
+
+        Assert.Equal(2, result.ExitCode);
+        Assert.Contains("symbolic link or reparse point", result.Error, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static IReadOnlyList<string> AllMethods { get; } =
     [
         "PointRead_Groundwork",
@@ -379,41 +455,47 @@ public sealed class BenchmarkRegressionGateTests
         JsonObject baseline,
         JsonObject candidate,
         Func<string, string>? baselineManifestMutator = null,
-        Func<string, string>? candidateManifestMutator = null)
+        Func<string, string>? candidateManifestMutator = null,
+        Action<EvidencePaths>? arrange = null)
     {
-        var directory = Path.Combine(Path.GetTempPath(), "groundwork-performance-gate-" + Guid.NewGuid().ToString("N"));
+        var directory = Path.Combine(
+            AppContext.BaseDirectory,
+            "groundwork-performance-gate-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
         try
         {
-            var policyPath = Path.Combine(directory, "policy.json");
-            var baselineManifestPath = Path.Combine(directory, "baseline-manifest.txt");
-            var baselineResultPath = Path.Combine(directory, "baseline.json");
-            var candidateManifestPath = Path.Combine(directory, "candidate-manifest.txt");
-            var candidateResultPath = Path.Combine(directory, "candidate.json");
-            File.WriteAllText(baselineResultPath, baseline.ToJsonString());
-            File.WriteAllText(candidateResultPath, candidate.ToJsonString());
+            var files = new EvidencePaths(
+                directory,
+                Path.Combine(directory, "policy.json"),
+                Path.Combine(directory, "baseline-manifest.txt"),
+                Path.Combine(directory, "baseline.json"),
+                Path.Combine(directory, "candidate-manifest.txt"),
+                Path.Combine(directory, "candidate.json"));
+            File.WriteAllText(files.BaselineResultPath, baseline.ToJsonString());
+            File.WriteAllText(files.CandidateResultPath, candidate.ToJsonString());
             if (policy["baselineResultSha256"]!.GetValue<string>() == "<auto>")
-                policy["baselineResultSha256"] = Sha256(baselineResultPath);
-            File.WriteAllText(policyPath, policy.ToJsonString());
-            var baselineManifest = Manifest(BaselineSha, baselineResultPath);
-            var candidateManifest = Manifest(CandidateSha, candidateResultPath);
+                policy["baselineResultSha256"] = Sha256(files.BaselineResultPath);
+            File.WriteAllText(files.PolicyPath, policy.ToJsonString());
+            var baselineManifest = Manifest(BaselineSha, files.BaselineResultPath);
+            var candidateManifest = Manifest(CandidateSha, files.CandidateResultPath);
             File.WriteAllText(
-                baselineManifestPath,
+                files.BaselineManifestPath,
                 baselineManifestMutator?.Invoke(baselineManifest) ?? baselineManifest);
             File.WriteAllText(
-                candidateManifestPath,
+                files.CandidateManifestPath,
                 candidateManifestMutator?.Invoke(candidateManifest) ?? candidateManifest);
+            arrange?.Invoke(files);
 
             using var output = new StringWriter(CultureInfo.InvariantCulture);
             using var error = new StringWriter(CultureInfo.InvariantCulture);
             var exitCode = BenchmarkRegressionGate.Run(
                 [
-                    "--policy", policyPath,
-                    "--baseline-manifest", baselineManifestPath,
-                    "--baseline-result", baselineResultPath,
+                    "--policy", files.PolicyPath,
+                    "--baseline-manifest", files.BaselineManifestPath,
+                    "--baseline-result", files.BaselineResultPath,
                     "--candidate-sha", CandidateSha,
-                    "--candidate-manifest", candidateManifestPath,
-                    "--candidate-result", candidateResultPath
+                    "--candidate-manifest", files.CandidateManifestPath,
+                    "--candidate-result", files.CandidateResultPath
                 ],
                 output,
                 error);
@@ -422,6 +504,37 @@ public sealed class BenchmarkRegressionGateTests
         finally
         {
             Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static void ReplaceWithFileSymlink(string path)
+    {
+        var target = path + ".target";
+        File.Move(path, target);
+        CreateFileSymbolicLinkOrSkip(path, target);
+    }
+
+    private static void CreateFileSymbolicLinkOrSkip(string linkPath, string targetPath)
+    {
+        try
+        {
+            File.CreateSymbolicLink(linkPath, targetPath);
+        }
+        catch (PlatformNotSupportedException exception)
+        {
+            throw SkipException.ForSkip($"File symbolic links are not supported: {exception.Message}");
+        }
+    }
+
+    private static void CreateDirectorySymbolicLinkOrSkip(string linkPath, string targetPath)
+    {
+        try
+        {
+            Directory.CreateSymbolicLink(linkPath, targetPath);
+        }
+        catch (PlatformNotSupportedException exception)
+        {
+            throw SkipException.ForSkip($"Directory symbolic links are not supported: {exception.Message}");
         }
     }
 
@@ -515,4 +628,20 @@ public sealed class BenchmarkRegressionGateTests
     }
 
     private sealed record GateRun(int ExitCode, string Output, string Error);
+
+    private sealed class EvidencePaths(
+        string rootDirectory,
+        string policyPath,
+        string baselineManifestPath,
+        string baselineResultPath,
+        string candidateManifestPath,
+        string candidateResultPath)
+    {
+        public string RootDirectory { get; } = rootDirectory;
+        public string PolicyPath { get; set; } = policyPath;
+        public string BaselineManifestPath { get; } = baselineManifestPath;
+        public string BaselineResultPath { get; } = baselineResultPath;
+        public string CandidateManifestPath { get; } = candidateManifestPath;
+        public string CandidateResultPath { get; set; } = candidateResultPath;
+    }
 }

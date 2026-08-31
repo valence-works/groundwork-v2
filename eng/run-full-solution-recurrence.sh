@@ -10,6 +10,10 @@ attempt_id=$(date -u +%Y%m%dT%H%M%SZ)-$$
 output_root=${2:-artifacts/recurrence/full-solution/$requested_sha/$attempt_id}
 lock_path=/tmp/groundwork-tests.lock
 neighbor_pattern='[d]otnet[[:space:]]+test|[t]esthost|[v]stest'
+console_sink=/dev/stdout
+if [[ "${GROUNDWORK_SUPPRESS_RAW_OUTPUT:-}" == "true" ]]; then
+  console_sink=/dev/null
+fi
 
 if [[ "${GROUNDWORK_CONFIRM_IDLE_HOST:-}" != "true" ]]; then
   echo "Set GROUNDWORK_CONFIRM_IDLE_HOST=true only after reserving an otherwise idle host." >&2
@@ -135,7 +139,7 @@ done
 verify_exact_clean "after-idle-preflight"
 
 set +e
-dotnet restore Groundwork.slnx --nologo 2>&1 | tee "$output_root/restore.log"
+dotnet restore Groundwork.slnx --nologo 2>&1 | tee "$output_root/restore.log" > "$console_sink"
 restore_pipeline_status=("${PIPESTATUS[@]}")
 set -e
 restore_status=${restore_pipeline_status[0]}
@@ -166,7 +170,7 @@ for iteration in $(seq 1 5); do
     --logger trx \
     --results-directory "$run_directory" \
     --blame-hang --blame-hang-timeout 20m --blame-hang-dump-type full \
-    2>&1 | tee "$run_directory/console.log"
+    2>&1 | tee "$run_directory/console.log" > "$console_sink"
   test_pipeline_status=("${PIPESTATUS[@]}")
   set -e
   test_status=${test_pipeline_status[0]}

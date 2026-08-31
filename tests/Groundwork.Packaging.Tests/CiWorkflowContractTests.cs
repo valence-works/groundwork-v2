@@ -95,6 +95,9 @@ public sealed class CiWorkflowContractTests
         Assert.Contains("vars.GROUNDWORK_CI_PAUSED != 'true'", workflow, StringComparison.Ordinal);
         Assert.Contains("Evidence paths must be non-empty repository-relative paths", workflow, StringComparison.Ordinal);
         Assert.Contains("Checked-in evidence file not found", workflow, StringComparison.Ordinal);
+        Assert.Contains("git ls-files --error-unmatch", workflow, StringComparison.Ordinal);
+        Assert.Contains("realpath -e", workflow, StringComparison.Ordinal);
+        Assert.Contains("Evidence paths must not traverse symbolic links", workflow, StringComparison.Ordinal);
         Assert.Contains("REASON: ${{ inputs.reason }}", workflow, StringComparison.Ordinal);
         Assert.Contains("GITHUB_STEP_SUMMARY", workflow, StringComparison.Ordinal);
         Assert.Contains("--no-restore --configuration Release -- performance-gate", workflow, StringComparison.Ordinal);
@@ -163,6 +166,9 @@ public sealed class CiWorkflowContractTests
         Assert.Contains("/$attempt_id", script, StringComparison.Ordinal);
         Assert.Contains("seq 1 5", script, StringComparison.Ordinal);
         Assert.Contains("dotnet restore Groundwork.slnx", script, StringComparison.Ordinal);
+        Assert.Contains("GROUNDWORK_SUPPRESS_RAW_OUTPUT", script, StringComparison.Ordinal);
+        Assert.Contains("console_sink=/dev/null", script, StringComparison.Ordinal);
+        Assert.Contains("tee \"$output_root/restore.log\" > \"$console_sink\"", script, StringComparison.Ordinal);
         Assert.Contains("dotnet test Groundwork.slnx", script, StringComparison.Ordinal);
         Assert.Contains("--no-restore --configuration Release", script, StringComparison.Ordinal);
         Assert.Contains("--logger trx", script, StringComparison.Ordinal);
@@ -170,6 +176,7 @@ public sealed class CiWorkflowContractTests
         Assert.Contains("--blame-hang --blame-hang-timeout 20m --blame-hang-dump-type full", script, StringComparison.Ordinal);
         Assert.Contains("PIPESTATUS[@]", script, StringComparison.Ordinal);
         Assert.Contains("console_log_status", script, StringComparison.Ordinal);
+        Assert.Contains("tee \"$run_directory/console.log\" > \"$console_sink\"", script, StringComparison.Ordinal);
         Assert.Contains("run_${iteration}_trx_present", script, StringComparison.Ordinal);
         Assert.Contains("verify_exact_clean \"after-idle-preflight\"", script, StringComparison.Ordinal);
         Assert.Contains("verify_exact_clean \"before-run-$iteration\"", script, StringComparison.Ordinal);
@@ -177,6 +184,17 @@ public sealed class CiWorkflowContractTests
         Assert.Contains("verify_exact_clean \"final\"", script, StringComparison.Ordinal);
         Assert.DoesNotContain("--filter", script, StringComparison.Ordinal);
         Assert.DoesNotContain("-m:1", script, StringComparison.Ordinal);
+
+        var summaryScript = File.ReadAllText(Path.Combine(
+            RepositoryRoot.Find(),
+            "eng",
+            "prepare-recurrence-summary.sh"));
+        Assert.Contains("summary_kind=publication-safe-recurrence", summaryScript, StringComparison.Ordinal);
+        Assert.Contains("final_status=incomplete", summaryScript, StringComparison.Ordinal);
+        Assert.Contains("find \"$evidence_root\" -type f -name manifest.txt -print0", summaryScript, StringComparison.Ordinal);
+        Assert.DoesNotContain("host|", summaryScript, StringComparison.Ordinal);
+        Assert.DoesNotContain("console.log", summaryScript, StringComparison.Ordinal);
+        Assert.DoesNotContain(".dmp", summaryScript, StringComparison.Ordinal);
 
         var restore = script.IndexOf("dotnet restore Groundwork.slnx", StringComparison.Ordinal);
         var test = script.IndexOf("dotnet test Groundwork.slnx", StringComparison.Ordinal);
@@ -188,7 +206,7 @@ public sealed class CiWorkflowContractTests
     }
 
     [Fact]
-    public void Full_solution_recurrence_workflow_is_manual_exact_head_and_preserves_all_evidence()
+    public void Full_solution_recurrence_workflow_is_manual_exact_head_and_defaults_to_safe_summary_evidence()
     {
         var workflow = ReadWorkflow("concurrency.yml").ReplaceLineEndings("\n");
         var triggers = workflow[
@@ -199,6 +217,7 @@ public sealed class CiWorkflowContractTests
 
         Assert.Contains("workflow_dispatch:", triggers, StringComparison.Ordinal);
         Assert.Contains("full_solution_recurrence:", triggers, StringComparison.Ordinal);
+        Assert.Contains("upload_sensitive_recurrence_artifacts:", triggers, StringComparison.Ordinal);
         Assert.Contains("required: false", triggers, StringComparison.Ordinal);
         Assert.Contains("default: false", triggers, StringComparison.Ordinal);
         Assert.Contains("type: boolean", triggers, StringComparison.Ordinal);
@@ -212,11 +231,17 @@ public sealed class CiWorkflowContractTests
         Assert.Contains("EXPECTED_REF: ${{ inputs.ref }}", job, StringComparison.Ordinal);
         Assert.Contains("bash eng/verify-exact-head.sh \"$EXPECTED_REF\"", job, StringComparison.Ordinal);
         Assert.Contains("GROUNDWORK_CONFIRM_IDLE_HOST: \"true\"", job, StringComparison.Ordinal);
+        Assert.Contains("GROUNDWORK_SUPPRESS_RAW_OUTPUT: \"true\"", job, StringComparison.Ordinal);
         Assert.Contains("bash eng/run-full-solution-recurrence.sh \"$EXPECTED_REF\"", job, StringComparison.Ordinal);
+        Assert.Contains("bash eng/prepare-recurrence-summary.sh artifacts/recurrence/full-solution", job, StringComparison.Ordinal);
         Assert.Contains("if: always()", job, StringComparison.Ordinal);
-        Assert.Contains("path: artifacts/recurrence/full-solution/**", job, StringComparison.Ordinal);
+        Assert.Contains("path: artifacts/recurrence/full-solution/**/summary.txt", job, StringComparison.Ordinal);
         Assert.Contains("if-no-files-found: warn", job, StringComparison.Ordinal);
-        Assert.Contains("retention-days: 30", job, StringComparison.Ordinal);
+        Assert.Contains("retention-days: 7", job, StringComparison.Ordinal);
+        Assert.Contains("if: ${{ always() && inputs.upload_sensitive_recurrence_artifacts }}", job, StringComparison.Ordinal);
+        Assert.Contains("name: SENSITIVE-full-solution-recurrence-", job, StringComparison.Ordinal);
+        Assert.Contains("retention-days: 1", job, StringComparison.Ordinal);
+        Assert.DoesNotContain("retention-days: 30", job, StringComparison.Ordinal);
         Assert.DoesNotContain("services:", job, StringComparison.Ordinal);
         Assert.DoesNotContain("matrix:", job, StringComparison.Ordinal);
         Assert.DoesNotContain("--filter", job, StringComparison.Ordinal);
@@ -227,6 +252,8 @@ public sealed class CiWorkflowContractTests
         Assert.Contains("workflow_ref=", workflowDocs, StringComparison.Ordinal);
         Assert.Contains("gh workflow run concurrency.yml --ref \"$workflow_ref\"", workflowDocs, StringComparison.Ordinal);
         Assert.Contains("-f ref=\"$head\" -f full_solution_recurrence=true", workflowDocs, StringComparison.Ordinal);
+        Assert.Contains("-f upload_sensitive_recurrence_artifacts=true", workflowDocs, StringComparison.Ordinal);
+        Assert.Contains("publishes only a whitelisted `summary.txt` by default", workflowDocs, StringComparison.Ordinal);
         Assert.DoesNotContain(
             "gh workflow run concurrency.yml --ref codex/groundwork-2-delivery \\",
             workflowDocs,
