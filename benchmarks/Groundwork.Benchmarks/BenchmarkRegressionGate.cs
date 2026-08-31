@@ -477,14 +477,33 @@ internal static class BenchmarkRegressionGate
         ? "infinity"
         : value.ToString("F4", CultureInfo.InvariantCulture);
 
-    private static IReadOnlyList<string> ExpectedMethods { get; } = BenchmarkMethodology.Cases
-        .Select(item => $"{item.Workload}_{item.Stack}")
-        .ToArray();
+    private static IReadOnlyList<string> ExpectedMethods { get; } =
+    [
+        "PointRead_Groundwork",
+        "PointRead_EFCoreCompiledModel",
+        "PointRead_Dapper",
+        "CoveredQuery_Groundwork",
+        "CoveredQuery_EFCoreCompiledModel",
+        "CoveredQuery_Dapper",
+        "PagedQuery_Groundwork",
+        "PagedQuery_EFCoreCompiledModel",
+        "PagedQuery_Dapper",
+        "BatchedWrite_Groundwork",
+        "BatchedWrite_EFCoreCompiledModel",
+        "BatchedWrite_Dapper",
+        "UnitOfWorkCommit_Groundwork",
+        "UnitOfWorkCommit_EFCoreCompiledModel",
+        "UnitOfWorkCommit_Dapper"
+    ];
 
-    private static IReadOnlyList<string> ExpectedGroundworkMethods { get; } = BenchmarkMethodology.Cases
-        .Where(item => item.Stack == "Groundwork")
-        .Select(item => $"{item.Workload}_{item.Stack}")
-        .ToArray();
+    private static IReadOnlyList<string> ExpectedGroundworkMethods { get; } =
+    [
+        "PointRead_Groundwork",
+        "CoveredQuery_Groundwork",
+        "PagedQuery_Groundwork",
+        "BatchedWrite_Groundwork",
+        "UnitOfWorkCommit_Groundwork"
+    ];
 
     private sealed record GatePolicy
     {

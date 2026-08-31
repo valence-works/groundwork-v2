@@ -13,6 +13,21 @@ public sealed class BenchmarkRegressionGateTests
     private const string BenchmarkDotNetVersion = "0.15.8";
 
     [Fact]
+    public void Gate_catalog_is_independently_pinned_to_fifteen_cases_and_five_budgets()
+    {
+        Assert.Equal(15, AllMethods.Count);
+        Assert.Equal(5, GroundworkMethods.Count);
+        Assert.Equal(
+            AllMethods,
+            BenchmarkMethodology.Cases.Select(item => $"{item.Workload}_{item.Stack}"));
+        Assert.Equal(
+            GroundworkMethods,
+            BenchmarkMethodology.Cases
+                .Where(item => item.Stack == "Groundwork")
+                .Select(item => $"{item.Workload}_{item.Stack}"));
+    }
+
+    [Fact]
     public void Gate_passes_at_each_mean_and_allocation_budget_boundary()
     {
         var baseline = CompleteEvidence();
@@ -293,14 +308,33 @@ public sealed class BenchmarkRegressionGateTests
         Assert.Contains($"FAIL {GroundworkMethods[0]}", result.Output, StringComparison.Ordinal);
     }
 
-    private static IReadOnlyList<string> AllMethods { get; } = BenchmarkMethodology.Cases
-        .Select(item => $"{item.Workload}_{item.Stack}")
-        .ToArray();
+    private static IReadOnlyList<string> AllMethods { get; } =
+    [
+        "PointRead_Groundwork",
+        "PointRead_EFCoreCompiledModel",
+        "PointRead_Dapper",
+        "CoveredQuery_Groundwork",
+        "CoveredQuery_EFCoreCompiledModel",
+        "CoveredQuery_Dapper",
+        "PagedQuery_Groundwork",
+        "PagedQuery_EFCoreCompiledModel",
+        "PagedQuery_Dapper",
+        "BatchedWrite_Groundwork",
+        "BatchedWrite_EFCoreCompiledModel",
+        "BatchedWrite_Dapper",
+        "UnitOfWorkCommit_Groundwork",
+        "UnitOfWorkCommit_EFCoreCompiledModel",
+        "UnitOfWorkCommit_Dapper"
+    ];
 
-    private static IReadOnlyList<string> GroundworkMethods { get; } = BenchmarkMethodology.Cases
-        .Where(item => item.Stack == "Groundwork")
-        .Select(item => $"{item.Workload}_{item.Stack}")
-        .ToArray();
+    private static IReadOnlyList<string> GroundworkMethods { get; } =
+    [
+        "PointRead_Groundwork",
+        "CoveredQuery_Groundwork",
+        "PagedQuery_Groundwork",
+        "BatchedWrite_Groundwork",
+        "UnitOfWorkCommit_Groundwork"
+    ];
 
     private static GateRun RunGate(
         JsonObject policy,
