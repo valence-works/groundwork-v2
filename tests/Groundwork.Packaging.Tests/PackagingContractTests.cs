@@ -37,6 +37,27 @@ public sealed class PackagingContractTests
     ];
 
     [Fact]
+    public void Native_aot_sample_local_package_sources_exist_in_a_clean_checkout()
+    {
+        var sampleRoot = Path.Combine(RepositoryRoot.Find(), "samples", "Groundwork.Samples.NativeAotApi");
+        var config = XDocument.Load(Path.Combine(sampleRoot, "NuGet.Config"));
+        var localSources = config
+            .Descendants("packageSources")
+            .Elements("add")
+            .Select(source => source.Attribute("value")?.Value)
+            .OfType<string>()
+            .Where(source => !Uri.TryCreate(source, UriKind.Absolute, out _))
+            .ToArray();
+
+        Assert.NotEmpty(localSources);
+        Assert.All(
+            localSources,
+            source => Assert.True(
+                Directory.Exists(Path.GetFullPath(Path.Combine(sampleRoot, source))),
+                $"The local package source '{source}' must exist in a clean checkout."));
+    }
+
+    [Fact]
     public void Public_package_allowlist_is_explicit_and_excludes_non_release_projects()
     {
         var root = RepositoryRoot.Find();
