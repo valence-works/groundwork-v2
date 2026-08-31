@@ -104,6 +104,18 @@ The runtime reports an earlier-preview catalog as `GW-SCHEMA-006`, naming the af
 and the discard remedy. See the complete [0.4.0-preview.1 release notes](../v2/releases/0.4.0-preview.1.md)
 for the public API, provider behavior, schema authorization, hosting, and package-closure changes.
 
+### `0.4.0-preview.2` — MongoDB exact-batch atomicity fix
+
+This patch preview preserves the `0.4.0-preview.1` public API and persisted catalog contract. Existing
+`0.4.0-preview.1` catalogs remain compatible; no discard, migration, or schema re-application is
+required for this update.
+
+MongoDB exact batches executed inside an explicit unit of work now stop at the first modeled
+create-only or compare-and-swap conflict, abort the transaction, poison that unit of work, and throw
+the provider-neutral `BatchWriteException`. Wrapper-owned exact-batch transactions likewise never
+commit a losing operation or a trailing write. See the complete
+[0.4.0-preview.2 release notes](../v2/releases/0.4.0-preview.2.md).
+
 ---
 
 ## Provider support matrix

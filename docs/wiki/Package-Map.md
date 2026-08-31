@@ -114,30 +114,30 @@ literal framework of its own, and `Groundwork.Packaging.Tests` enforces that.
 
 **An ASP.NET Core service on SQLite:**
 ```xml
-<PackageReference Include="Groundwork.Sqlite" Version="0.4.0-preview.1" />
-<PackageReference Include="Groundwork.Records.Store" Version="0.4.0-preview.1" />
-<PackageReference Include="Groundwork.Extensions.DependencyInjection" Version="0.4.0-preview.1" />
+<PackageReference Include="Groundwork.Sqlite" Version="0.4.0-preview.2" />
+<PackageReference Include="Groundwork.Records.Store" Version="0.4.0-preview.2" />
+<PackageReference Include="Groundwork.Extensions.DependencyInjection" Version="0.4.0-preview.2" />
 ```
 See **[Hosting & Dependency Injection](Hosting-and-Dependency-Injection)**. The DI package references
 no provider: you hand it the factory from whichever provider package you chose.
 
 **Typed rows on PostgreSQL, with build-time coverage enforcement:**
 ```xml
-<PackageReference Include="Groundwork.PostgreSql" Version="0.4.0-preview.1" />
-<PackageReference Include="Groundwork.Records.Store" Version="0.4.0-preview.1" />
-<PackageReference Include="Groundwork.Analyzers" Version="0.4.0-preview.1" PrivateAssets="all" />
-<PackageReference Include="Groundwork.Schema.Generator" Version="0.4.0-preview.1" PrivateAssets="all" />
+<PackageReference Include="Groundwork.PostgreSql" Version="0.4.0-preview.2" />
+<PackageReference Include="Groundwork.Records.Store" Version="0.4.0-preview.2" />
+<PackageReference Include="Groundwork.Analyzers" Version="0.4.0-preview.2" PrivateAssets="all" />
+<PackageReference Include="Groundwork.Schema.Generator" Version="0.4.0-preview.2" PrivateAssets="all" />
 ```
 
 **A library that declares storage but does not pick a provider:**
 ```xml
-<PackageReference Include="Groundwork.Records" Version="0.4.0-preview.1" />
+<PackageReference Include="Groundwork.Records" Version="0.4.0-preview.2" />
 ```
 Consumers supply the provider and `Groundwork.Records.Store`. Your library stays provider-neutral.
 
 **Unit tests without a database:**
 ```xml
-<PackageReference Include="Groundwork.Testing" Version="0.4.0-preview.1" />
+<PackageReference Include="Groundwork.Testing" Version="0.4.0-preview.2" />
 ```
 See **[Testing](Testing)**.
 
