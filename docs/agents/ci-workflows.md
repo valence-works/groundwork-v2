@@ -67,11 +67,14 @@ passes mean only “not reproduced in this clean window”; they are not proof t
 is fixed.
 
 For the independent hosted observation, enable the recurrence option when manually dispatching the
-`Concurrency` workflow against the exact candidate SHA:
+`Concurrency` workflow from the candidate branch that contains this optional job. The workflow ref
+and the tested SHA must refer to the same candidate checkpoint:
 
 ```bash
-head=$(git rev-parse origin/codex/groundwork-2-delivery)
-gh workflow run concurrency.yml --ref codex/groundwork-2-delivery \
+workflow_ref=codex/210-recurrence-result
+# After the PR is merged, use the target integration branch instead.
+head=$(git rev-parse "$workflow_ref")
+gh workflow run concurrency.yml --ref "$workflow_ref" \
   -f ref="$head" -f full_solution_recurrence=true
 ```
 

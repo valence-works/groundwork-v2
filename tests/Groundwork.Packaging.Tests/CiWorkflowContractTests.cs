@@ -165,6 +165,17 @@ public sealed class CiWorkflowContractTests
         Assert.DoesNotContain("services:", job, StringComparison.Ordinal);
         Assert.DoesNotContain("matrix:", job, StringComparison.Ordinal);
         Assert.DoesNotContain("--filter", job, StringComparison.Ordinal);
+
+        var workflowDocs = File.ReadAllText(Path.Combine(
+            RepositoryRoot.Find(),
+            "docs/agents/ci-workflows.md"));
+        Assert.Contains("workflow_ref=", workflowDocs, StringComparison.Ordinal);
+        Assert.Contains("gh workflow run concurrency.yml --ref \"$workflow_ref\"", workflowDocs, StringComparison.Ordinal);
+        Assert.Contains("-f ref=\"$head\" -f full_solution_recurrence=true", workflowDocs, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "gh workflow run concurrency.yml --ref codex/groundwork-2-delivery \\",
+            workflowDocs,
+            StringComparison.Ordinal);
     }
 
     [Fact]
