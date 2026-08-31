@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "baselineSha": "6e064931fa6d5a623524d3cbef68802e1181a01d",
+  "baselineResultSha256": "ac794559d31f70c40ce7599ff7883b76de4808fc42bb840efbc795ba27e48f9f",
+  "schemaFingerprint": "edd039213448b3fc5e613d50138b4d980d138b89700ea9814a3870764e052cc7",
+  "benchmarkDotNetVersion": "0.15.8",
+  "budgets": [
+    {
+      "method": "PointRead_Groundwork",
+      "maxMeanRatio": 1.05,
+      "maxAllocatedRatio": 1.02
+    },
+    {
+      "method": "CoveredQuery_Groundwork",
+      "maxMeanRatio": 1.05,
+      "maxAllocatedRatio": 1.02
+    },
+    {
+      "method": "PagedQuery_Groundwork",
+      "maxMeanRatio": 1.08,
+      "maxAllocatedRatio": 1.02
+    },
+    {
+      "method": "BatchedWrite_Groundwork",
+      "maxMeanRatio": 1.08,
+      "maxAllocatedRatio": 1.02
+    },
+    {
+      "method": "UnitOfWorkCommit_Groundwork",
+      "maxMeanRatio": 1.10,
+      "maxAllocatedRatio": 1.02
+    }
+  ]
+}

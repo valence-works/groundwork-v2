@@ -58,9 +58,12 @@ two checked-in controlled-run bundles. It validates both manifests, their contro
 confirmations, their report SHA-256 bindings, the policy-pinned baseline digest, the exact 15-case
 catalog, BenchmarkDotNet version and measured environment (including hardware intrinsics) before
 applying explicit mean and allocation-ratio budgets to Groundwork's five cases. This command does not
-run a benchmark and is not an active gate
-until an approved controlled baseline, candidate result, and reviewed policy exist. The exact
-arguments and lifecycle are documented in [`evidence/methodology.md`](evidence/methodology.md).
+run a benchmark. The reviewed baseline is checked in under `evidence/runs/`, and
+`evidence/performance-policy.json` pins its exact report digest and variance-informed budgets. The
+exact arguments and lifecycle are documented in [`evidence/methodology.md`](evidence/methodology.md).
+The manual `Controlled performance comparison` workflow runs this comparator against
+repository-relative evidence paths. It starts no services and collects no timing on GitHub-hosted
+hardware.
 
 When the EF mapping changes, regenerate its compiled model with the repository's matching EF tool:
 

@@ -17,5 +17,14 @@
     <None Include="../../benchmarks/Groundwork.Benchmarks/evidence/schema-fingerprint.txt"
           Link="evidence/schema-fingerprint.txt"
           CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../benchmarks/Groundwork.Benchmarks/evidence/performance-policy.json"
+          Link="evidence/performance-policy.json"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../benchmarks/Groundwork.Benchmarks/evidence/runs/6e064931fa6d5a623524d3cbef68802e1181a01d/manifest.txt"
+          Link="evidence/runs/6e064931fa6d5a623524d3cbef68802e1181a01d/manifest.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../benchmarks/Groundwork.Benchmarks/evidence/runs/6e064931fa6d5a623524d3cbef68802e1181a01d/benchmarkdotnet/results/Groundwork.Benchmarks.StorageBenchmarks-report-full-compressed.json"
+          Link="evidence/runs/6e064931fa6d5a623524d3cbef68802e1181a01d/benchmarkdotnet/results/Groundwork.Benchmarks.StorageBenchmarks-report-full-compressed.json"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

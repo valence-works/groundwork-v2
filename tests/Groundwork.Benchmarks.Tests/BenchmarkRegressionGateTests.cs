@@ -11,6 +11,39 @@ public sealed class BenchmarkRegressionGateTests
     private const string BaselineSha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     private const string CandidateSha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     private const string BenchmarkDotNetVersion = "0.15.8";
+    private const string CheckedInBaselineSha = "6e064931fa6d5a623524d3cbef68802e1181a01d";
+
+    [Fact]
+    public void Checked_in_baseline_and_policy_are_self_consistent()
+    {
+        var evidence = Path.Combine(AppContext.BaseDirectory, "evidence");
+        var bundle = Path.Combine(evidence, "runs", CheckedInBaselineSha);
+        var manifest = Path.Combine(bundle, "manifest.txt");
+        var result = Path.Combine(
+            bundle,
+            "benchmarkdotnet",
+            "results",
+            "Groundwork.Benchmarks.StorageBenchmarks-report-full-compressed.json");
+        using var output = new StringWriter(CultureInfo.InvariantCulture);
+        using var error = new StringWriter(CultureInfo.InvariantCulture);
+
+        var exitCode = BenchmarkRegressionGate.Run(
+            [
+                "--policy", Path.Combine(evidence, "performance-policy.json"),
+                "--baseline-manifest", manifest,
+                "--baseline-result", result,
+                "--candidate-sha", CheckedInBaselineSha,
+                "--candidate-manifest", manifest,
+                "--candidate-result", result
+            ],
+            output,
+            error);
+
+        Assert.Equal(0, exitCode);
+        Assert.All(GroundworkMethods, method =>
+            Assert.Contains($"PASS {method}", output.ToString(), StringComparison.Ordinal));
+        Assert.Empty(error.ToString());
+    }
 
     [Fact]
     public void Gate_catalog_is_independently_pinned_to_fifteen_cases_and_five_budgets()
@@ -154,6 +187,7 @@ public sealed class BenchmarkRegressionGateTests
     [InlineData("benchmarkdotnet-version")]
     [InlineData("environment")]
     [InlineData("environment-type")]
+    [InlineData("chronometer-frequency")]
     [InlineData("hardware-intrinsics")]
     [InlineData("host")]
     [InlineData("idle-confirmation")]
@@ -197,6 +231,9 @@ public sealed class BenchmarkRegressionGateTests
                 break;
             case "environment-type":
                 candidate["HostEnvironmentInfo"]!["PhysicalCoreCount"] = "8";
+                break;
+            case "chronometer-frequency":
+                candidate["HostEnvironmentInfo"]!["ChronometerFrequency"] = 24_000_000;
                 break;
             case "hardware-intrinsics":
                 FindBenchmark(candidate, GroundworkMethods[0])["HardwareIntrinsics"] = "Different intrinsics";
@@ -245,6 +282,7 @@ public sealed class BenchmarkRegressionGateTests
         {
             "path-traversal" => "bundle",
             "hardware-intrinsics" => "HardwareIntrinsics",
+            "chronometer-frequency" => "ChronometerFrequency",
             "idle-confirmation" => "host_idle_confirmation",
             _ => mutation.Split('-')[0]
         };
@@ -436,7 +474,7 @@ public sealed class BenchmarkRegressionGateTests
         ["HasRyuJit"] = true,
         ["Configuration"] = "RELEASE",
         ["DotNetCliVersion"] = "10.0.300",
-        ["ChronometerFrequency"] = 24_000_000,
+        ["ChronometerFrequency"] = new JsonObject { ["Hertz"] = 24_000_000 },
         ["HardwareTimerKind"] = "MachAbsoluteTime"
     };
 

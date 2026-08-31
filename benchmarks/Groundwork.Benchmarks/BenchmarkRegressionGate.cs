@@ -367,8 +367,9 @@ internal static class BenchmarkRegressionGate
             var value = RequireProperty(environment, propertyName, label);
             var isValid = propertyName switch
             {
-                "PhysicalProcessorCount" or "PhysicalCoreCount" or "LogicalCoreCount" or "ChronometerFrequency" =>
+                "PhysicalProcessorCount" or "PhysicalCoreCount" or "LogicalCoreCount" =>
                     value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out var number) && number > 0,
+                "ChronometerFrequency" => HasPositiveChronometerFrequency(value),
                 "HasAttachedDebugger" or "HasRyuJit" =>
                     value.ValueKind is JsonValueKind.True or JsonValueKind.False,
                 _ => value.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(value.GetString())
@@ -378,6 +379,13 @@ internal static class BenchmarkRegressionGate
             values.Add(propertyName, value.GetRawText());
         }
         return values;
+
+        static bool HasPositiveChronometerFrequency(JsonElement value) =>
+            value.ValueKind == JsonValueKind.Object &&
+            value.TryGetProperty("Hertz", out var hertz) &&
+            hertz.ValueKind == JsonValueKind.Number &&
+            hertz.TryGetInt64(out var frequency) &&
+            frequency > 0;
     }
 
     private static void ValidateEnvironment(

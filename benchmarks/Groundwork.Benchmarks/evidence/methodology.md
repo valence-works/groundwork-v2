@@ -15,7 +15,7 @@ difference is documented below. The benchmark README documents the schema finger
 materialized shapes, and the meaning of each reported operation.
 
 `eng/collect-comparative-performance.sh` records the tested commit, schema fingerprint, UTC time,
-host, operating system, load snapshot, .NET environment, and resolved package graph. It exports
+stable publish-safe host identifier, operating system, load snapshot, .NET environment, and resolved package graph. It exports
 BenchmarkDotNet JSON, Markdown, and CSV reports, then binds the unique JSON report into the manifest
 by relative path and SHA-256. The checked-in catalog must match discovery before
 measurement starts. Results compare within-run ratios only; they are not cross-machine comparisons,
@@ -25,11 +25,18 @@ service-level objectives, or support promises.
 
 1. Reserve a named performance host and confirm no other workload is using it. Use the same host,
    power mode, and storage for future comparisons.
-2. Check out the exact 40-character commit with a clean worktree.
-3. Run `GROUNDWORK_CONFIRM_IDLE_HOST=true eng/collect-comparative-performance.sh <commit>`.
+2. Check out the exact 40-character commit with a clean worktree and choose a new output directory;
+   the collector refuses existing output trees so nested redirects or stale artifacts cannot be
+   inherited.
+3. Run
+   `GROUNDWORK_CONFIRM_IDLE_HOST=true GROUNDWORK_CONTROLLED_HOST_ID=<stable-publish-safe-id> eng/collect-comparative-performance.sh <commit>`.
 4. Review the manifest, package graph, BenchmarkDotNet environment metadata, outliers, and result
-   stability. If valid, copy the untouched output into `evidence/runs/<commit>/` in a follow-up
-   evidence commit and describe the host and run conditions in that directory's README.
+   stability. If valid, copy the publication-safe output into `evidence/runs/<commit>/` in a
+   follow-up evidence commit and describe the host and run conditions in that directory's README.
+   Keep the structured report bytes unchanged; do not publish raw execution logs, machine names,
+   usernames, or absolute checkout paths. The collector removes execution logs on success or
+   failure, rejects symlinked or out-of-workspace output roots, and refuses a completed output tree
+   if a private host/home/workspace marker remains.
 
 The unit-of-work category is an end-to-end public-call comparison. Groundwork opens an independent
 non-pooled connection, performs runtime schema admission, and begins its transaction as part of that
@@ -37,8 +44,9 @@ call; EF Core and Dapper begin their transactions on already-open benchmark conn
 reported Groundwork ratio therefore includes its public admission and connection lifecycle rather
 than hiding that work as setup.
 
-No controlled comparative result is checked in by this scaffolding change. Producing that result
-requires the bounded idle-host run above; discovery and Dry smoke output must never be substituted.
+The reviewed baseline bundle is checked in under `runs/6e064931fa6d5a623524d3cbef68802e1181a01d/`.
+Its README records the run conditions and budget rationale. Discovery and Dry smoke output must never
+be substituted for that controlled result or for a future candidate bundle.
 
 ## Regression-gate lifecycle
 
@@ -54,13 +62,17 @@ methods. Raw
 `Statistics.Mean` and `Memory.BytesAllocatedPerOperation` values are compared; rendered Markdown,
 CSV ratios, averages across runs, and hosted-runner timings are never treated as the baseline.
 
-The verifier intentionally ships before the first policy. Synthetic correctness tests exercise its
-parser and failure modes, but no placeholder result or threshold is checked in. After a valid
-controlled run is reviewed, its untouched bundle and a variance-informed policy that pins its exact
-result digest become the baseline. A separate manual, service-free performance workflow can then
-compare a later checked-in bundle and
-fail that performance lane without re-measuring on GitHub-hosted hardware. Changing the baseline or a
-budget is a review-visible evidence change, not an automatic response to a red gate.
+Synthetic correctness tests exercise the verifier's parser and failure modes, and the test suite also
+applies the checked-in policy to the real baseline bundle as an integrity check. The structured report
+and `performance-policy.json` are the active baseline. A separate manual, service-free performance
+workflow compares a later checked-in bundle and fails that performance lane without re-measuring on
+GitHub-hosted hardware. Changing the baseline or a budget is a review-visible evidence change, not an
+automatic response to a red gate.
+
+The manual `Controlled performance comparison` workflow is that service-free lane. It checks out an
+exact evidence commit, refuses missing, absolute, or parent-traversing paths, and passes the reviewed
+policy plus the two publication-safe bundles to `performance-gate`. Its hosted runner evaluates JSON and
+does not produce timing evidence.
 
 Ordinary correctness workflows validate the workflow shape, catalog, paths, and benchmark behavior.
 They do not compare elapsed time. The manual GitHub `Performance evidence` workflow preserves

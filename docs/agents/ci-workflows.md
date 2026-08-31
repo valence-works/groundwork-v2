@@ -136,17 +136,46 @@ with a clean worktree, and explicitly confirm that the host is idle:
 
 ```bash
 GROUNDWORK_CONFIRM_IDLE_HOST=true \
+  GROUNDWORK_CONTROLLED_HOST_ID=groundwork-controlled-m2 \
   eng/collect-comparative-performance.sh "$head"
 ```
 
-The collector records exact-head, schema, host, load, runtime, package, catalog, and raw
-BenchmarkDotNet evidence. Follow `benchmarks/Groundwork.Benchmarks/evidence/methodology.md` to review
-and check a valid result into the exact-SHA run directory. Dry output and busy-host results are not
-publishable. Within-run ratios are diagnostic evidence, not cross-machine comparisons or SLAs.
+The collector records exact-head, schema, stable publish-safe host identity, load, runtime, package,
+catalog, and structured BenchmarkDotNet evidence. It scrubs private host/home/workspace markers,
+recursively removes raw execution logs on success or failure, and refuses an output tree if either
+kind of private evidence remains. Every collection uses a new output tree whose root and
+BenchmarkDotNet child resolve beneath the physical workspace without traversing a symbolic link.
+Follow
+`benchmarks/Groundwork.Benchmarks/evidence/methodology.md` to review and check a valid result into the
+exact-SHA run directory. Dry output and busy-host results are not publishable. Within-run ratios are
+diagnostic evidence, not cross-machine comparisons or SLAs.
 
 Ordinary correctness gating executes the benchmark contract tests through `Groundwork.slnx`; it
 checks the matrix, compiled model, canonical schema, and every comparison path without using
 wall-clock thresholds. Performance evidence is never allowed to hide a correctness failure.
+
+After a controlled baseline, candidate bundle, and variance-informed policy have been reviewed and
+checked in, `.github/workflows/performance-comparison.yml` applies those budgets without running a
+benchmark or starting provider services. Dispatch it from the exact evidence commit and pass only
+repository-relative paths from that checkout:
+
+```bash
+evidence_ref=<40-character-evidence-commit>
+gh workflow run performance-comparison.yml --ref main \
+  -f ref="$evidence_ref" \
+  -f policy='benchmarks/Groundwork.Benchmarks/evidence/performance-policy.json' \
+  -f baseline_manifest='benchmarks/Groundwork.Benchmarks/evidence/runs/<baseline-sha>/manifest.txt' \
+  -f baseline_result='benchmarks/Groundwork.Benchmarks/evidence/runs/<baseline-sha>/benchmarkdotnet/results/<report>.json' \
+  -f candidate_sha='<measured-candidate-sha>' \
+  -f candidate_manifest='benchmarks/Groundwork.Benchmarks/evidence/runs/<candidate-sha>/manifest.txt' \
+  -f candidate_result='benchmarks/Groundwork.Benchmarks/evidence/runs/<candidate-sha>/benchmarkdotnet/results/<report>.json' \
+  -f reason='release performance checkpoint'
+```
+
+The policy pins the approved baseline SHA and report digest. The comparator also requires matching
+named host, BenchmarkDotNet environment, and hardware intrinsics, so changing input paths cannot
+silently replace the baseline or compare unlike machines. A red comparison is performance evidence;
+it remains separate from correctness and concurrency and never triggers an Actions measurement.
 
 ## Enforcement note
 

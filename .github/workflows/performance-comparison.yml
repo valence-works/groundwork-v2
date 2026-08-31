@@ -1,0 +1,103 @@
+name: Controlled performance comparison
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Exact 40-character commit containing the reviewed evidence bundles
+        required: true
+        type: string
+      policy:
+        description: Repository-relative reviewed performance policy path
+        required: true
+        type: string
+      baseline_manifest:
+        description: Repository-relative controlled baseline manifest path
+        required: true
+        type: string
+      baseline_result:
+        description: Repository-relative controlled baseline BenchmarkDotNet JSON path
+        required: true
+        type: string
+      candidate_sha:
+        description: Exact 40-character commit measured by the candidate bundle
+        required: true
+        type: string
+      candidate_manifest:
+        description: Repository-relative controlled candidate manifest path
+        required: true
+        type: string
+      candidate_result:
+        description: Repository-relative controlled candidate BenchmarkDotNet JSON path
+        required: true
+        type: string
+      reason:
+        description: Why this checked-in comparison is being reviewed
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.ref }}-${{ inputs.candidate_sha }}
+  cancel-in-progress: false
+
+jobs:
+  compare-controlled-evidence:
+    name: Compare checked-in controlled bundles
+    if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Verify the requested evidence commit
+        env:
+          EXPECTED_REF: ${{ inputs.ref }}
+        run: bash eng/verify-exact-head.sh "$EXPECTED_REF"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - name: Validate checked-in evidence paths
+        env:
+          POLICY: ${{ inputs.policy }}
+          BASELINE_MANIFEST: ${{ inputs.baseline_manifest }}
+          BASELINE_RESULT: ${{ inputs.baseline_result }}
+          CANDIDATE_MANIFEST: ${{ inputs.candidate_manifest }}
+          CANDIDATE_RESULT: ${{ inputs.candidate_result }}
+        run: |
+          for path in "$POLICY" "$BASELINE_MANIFEST" "$BASELINE_RESULT" "$CANDIDATE_MANIFEST" "$CANDIDATE_RESULT"; do
+            case "$path" in
+              ""|/*|*..*) echo "Evidence paths must be non-empty repository-relative paths: $path" >&2; exit 2 ;;
+            esac
+            test -f "$path" || { echo "Checked-in evidence file not found: $path" >&2; exit 2; }
+          done
+      - name: Record comparison intent
+        env:
+          REASON: ${{ inputs.reason }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          printf 'Reason: %s\nMeasured candidate: %s\n' "$REASON" "$CANDIDATE_SHA" >> "$GITHUB_STEP_SUMMARY"
+      - name: Restore the service-free comparator
+        run: dotnet restore benchmarks/Groundwork.Benchmarks/Groundwork.Benchmarks.csproj
+      - name: Apply the reviewed performance budgets
+        env:
+          POLICY: ${{ inputs.policy }}
+          BASELINE_MANIFEST: ${{ inputs.baseline_manifest }}
+          BASELINE_RESULT: ${{ inputs.baseline_result }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          CANDIDATE_MANIFEST: ${{ inputs.candidate_manifest }}
+          CANDIDATE_RESULT: ${{ inputs.candidate_result }}
+        run: >-
+          dotnet run --project benchmarks/Groundwork.Benchmarks/Groundwork.Benchmarks.csproj
+          --no-restore --configuration Release -- performance-gate
+          --policy "$POLICY"
+          --baseline-manifest "$BASELINE_MANIFEST"
+          --baseline-result "$BASELINE_RESULT"
+          --candidate-sha "$CANDIDATE_SHA"
+          --candidate-manifest "$CANDIDATE_MANIFEST"
+          --candidate-result "$CANDIDATE_RESULT"
