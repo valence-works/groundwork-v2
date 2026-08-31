@@ -113,7 +113,9 @@ record_idle_sample() {
     echo "idle_sample_${sample}_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "idle_sample_${sample}_load_1m=$load_one"
   } >> "$manifest"
-  if ! LC_ALL=C awk -v load="$load_one" 'BEGIN { exit !(load <= 1.0) }'; then
+  # GNU awk reserves "load" as a built-in function name; use a portable variable name so the
+  # hosted Linux observation and the local macOS harness evaluate the same threshold.
+  if ! LC_ALL=C awk -v current_load="$load_one" 'BEGIN { exit !(current_load <= 1.0) }'; then
     {
       echo "load_refusal=One-minute load $load_one exceeds the idle-host limit of 1.0."
       echo "final_status=invalid-load-sample-$sample"

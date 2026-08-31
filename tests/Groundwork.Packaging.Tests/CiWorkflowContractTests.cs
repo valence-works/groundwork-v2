@@ -99,7 +99,9 @@ public sealed class CiWorkflowContractTests
         Assert.Contains("[d]otnet[[:space:]]+test|[t]esthost|[v]stest", script, StringComparison.Ordinal);
         Assert.Contains("seq 1 11", script, StringComparison.Ordinal);
         Assert.Contains("sleep 30", script, StringComparison.Ordinal);
-        Assert.Contains("load <= 1.0", script, StringComparison.Ordinal);
+        Assert.Contains("current_load <= 1.0", script, StringComparison.Ordinal);
+        Assert.Contains("-v current_load=\"$load_one\"", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("-v load=\"$load_one\"", script, StringComparison.Ordinal);
         Assert.Contains("/proc/loadavg", script, StringComparison.Ordinal);
         Assert.Contains("LC_ALL=C sysctl -n vm.loadavg", script, StringComparison.Ordinal);
         Assert.Contains("LC_ALL=C uptime", script, StringComparison.Ordinal);
