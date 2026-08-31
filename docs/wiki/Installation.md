@@ -47,8 +47,8 @@ Pin an **exact** version. Preview numbers are immutable and a published package 
 so an exact pin is reproducible.
 
 ```bash
-dotnet add package Groundwork.Sqlite --version 0.4.0-preview.1
-dotnet add package Groundwork.Records.Store --version 0.4.0-preview.1
+dotnet add package Groundwork.Sqlite --version 0.4.0-preview.2
+dotnet add package Groundwork.Records.Store --version 0.4.0-preview.2
 ```
 
 A typical application references:
@@ -130,7 +130,7 @@ If this runs, your feed, versions, and target framework are correct.
 ## Installing the schema tool
 
 ```bash
-dotnet tool install --global Groundwork.Tool --version 0.4.0-preview.1 \
+dotnet tool install --global Groundwork.Tool --version 0.4.0-preview.2 \
   --add-source https://f.feedz.io/valence-works/groundwork/nuget/index.json
 ```
 
