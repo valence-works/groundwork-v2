@@ -1,0 +1,89 @@
+  Determining projects to restore...
+  All projects are up-to-date for restore.
+Project 'Groundwork.Benchmarks' has the following package references
+   [net10.0]:
+   Top-level Package                           Requested   Resolved
+   > BenchmarkDotNet                           0.15.8      0.15.8
+   > Dapper                                    2.1.79      2.1.79
+   > Microsoft.EntityFrameworkCore.Design      10.0.10     10.0.10
+   > Microsoft.EntityFrameworkCore.Sqlite      10.0.10     10.0.10
+   > Microsoft.SourceLink.GitHub               8.0.0       8.0.0
+
+   Transitive Package                                           Resolved
+   > BenchmarkDotNet.Annotations                                0.15.8
+   > CommandLineParser                                          2.9.1
+   > DnsClient                                                  1.6.1
+   > Gee.External.Capstone                                      2.3.0
+   > Humanizer.Core                                             2.14.1
+   > Iced                                                       1.21.0
+   > Microsoft.Bcl.Cryptography                                 9.0.13
+   > Microsoft.Build.Framework                                  18.0.2
+   > Microsoft.Build.Tasks.Git                                  8.0.0
+   > Microsoft.CodeAnalysis.Analyzers                           3.11.0
+   > Microsoft.CodeAnalysis.Common                              5.0.0
+   > Microsoft.CodeAnalysis.CSharp                              5.0.0
+   > Microsoft.CodeAnalysis.CSharp.Workspaces                   5.0.0
+   > Microsoft.CodeAnalysis.Workspaces.Common                   5.0.0
+   > Microsoft.CodeAnalysis.Workspaces.MSBuild                  5.0.0
+   > Microsoft.Data.SqlClient                                   7.0.2
+   > Microsoft.Data.SqlClient.Extensions.Abstractions           7.0.2
+   > Microsoft.Data.SqlClient.Internal.Logging                  7.0.2
+   > Microsoft.Data.SqlClient.SNI.runtime                       6.0.2
+   > Microsoft.Data.Sqlite                                      10.0.10
+   > Microsoft.Data.Sqlite.Core                                 10.0.10
+   > Microsoft.Diagnostics.NETCore.Client                       0.2.510501
+   > Microsoft.Diagnostics.Runtime                              3.1.512801
+   > Microsoft.Diagnostics.Tracing.TraceEvent                   3.1.21
+   > Microsoft.DotNet.PlatformAbstractions                      3.1.6
+   > Microsoft.EntityFrameworkCore                              10.0.10
+   > Microsoft.EntityFrameworkCore.Abstractions                 10.0.10
+   > Microsoft.EntityFrameworkCore.Analyzers                    10.0.10
+   > Microsoft.EntityFrameworkCore.Relational                   10.0.10
+   > Microsoft.EntityFrameworkCore.Sqlite.Core                  10.0.10
+   > Microsoft.Extensions.Caching.Abstractions                  10.0.10
+   > Microsoft.Extensions.Caching.Memory                        10.0.10
+   > Microsoft.Extensions.Configuration.Abstractions            10.0.10
+   > Microsoft.Extensions.DependencyInjection                   10.0.10
+   > Microsoft.Extensions.DependencyInjection.Abstractions      10.0.10
+   > Microsoft.Extensions.DependencyModel                       10.0.10
+   > Microsoft.Extensions.Logging                               10.0.10
+   > Microsoft.Extensions.Logging.Abstractions                  10.0.10
+   > Microsoft.Extensions.Options                               10.0.10
+   > Microsoft.Extensions.Primitives                            10.0.10
+   > Microsoft.IdentityModel.Abstractions                       8.16.0
+   > Microsoft.IdentityModel.JsonWebTokens                      8.16.0
+   > Microsoft.IdentityModel.Logging                            8.16.0
+   > Microsoft.IdentityModel.Protocols                          8.16.0
+   > Microsoft.IdentityModel.Protocols.OpenIdConnect            8.16.0
+   > Microsoft.IdentityModel.Tokens                             8.16.0
+   > Microsoft.SourceLink.Common                                8.0.0
+   > Microsoft.SqlServer.Server                                 1.0.0
+   > Microsoft.VisualStudio.SolutionPersistence                 1.0.52
+   > MongoDB.Bson                                               3.10.0
+   > MongoDB.Driver                                             3.10.0
+   > Mono.TextTemplating                                        3.0.0
+   > Newtonsoft.Json                                            13.0.3
+   > Npgsql                                                     9.0.4
+   > Perfolizer                                                 0.6.1
+   > Pragmastat                                                 3.2.4
+   > SharpCompress                                              0.48.1
+   > Snappier                                                   1.3.1
+   > SQLitePCLRaw.bundle_e_sqlite3                              2.1.12
+   > SQLitePCLRaw.core                                          2.1.12
+   > SQLitePCLRaw.lib.e_sqlite3                                 2.1.12
+   > SQLitePCLRaw.provider.e_sqlite3                            2.1.12
+   > System.CodeDom                                             9.0.5
+   > System.Composition                                         9.0.0
+   > System.Composition.AttributedModel                         9.0.0
+   > System.Composition.Convention                              9.0.0
+   > System.Composition.Hosting                                 9.0.0
+   > System.Composition.Runtime                                 9.0.0
+   > System.Composition.TypedParts                              9.0.0
+   > System.Configuration.ConfigurationManager                  9.0.13
+   > System.Diagnostics.EventLog                                9.0.13
+   > System.IdentityModel.Tokens.Jwt                            8.16.0
+   > System.Management                                          9.0.5
+   > System.Reflection.TypeExtensions                           4.7.0
+   > System.Security.Cryptography.Pkcs                          9.0.13
+   > System.Security.Cryptography.ProtectedData                 9.0.13
+   > ZstdSharp.Port                                             0.7.3

@@ -34,6 +34,14 @@ public sealed class CiWorkflowContractTests
             "eng",
             "collect-comparative-performance.sh"));
         Assert.Contains("GROUNDWORK_CONFIRM_IDLE_HOST", collector, StringComparison.Ordinal);
+        Assert.Contains("GROUNDWORK_CONTROLLED_HOST_ID", collector, StringComparison.Ordinal);
+        Assert.Contains("stable, publish-safe host identifier", collector, StringComparison.Ordinal);
+        Assert.Contains("non-parent-traversing relative directory", collector, StringComparison.Ordinal);
+        Assert.Contains("output must be a new directory", collector, StringComparison.Ordinal);
+        Assert.Contains("output must not traverse symbolic links", collector, StringComparison.Ordinal);
+        Assert.Contains("resolved outside the workspace", collector, StringComparison.Ordinal);
+        Assert.Contains("resolved_benchmark_output_root", collector, StringComparison.Ordinal);
+        Assert.Contains("pwd -P", collector, StringComparison.Ordinal);
         Assert.Contains("eng/verify-exact-head.sh", collector, StringComparison.Ordinal);
         Assert.Contains("benchmarks --list flat", collector, StringComparison.Ordinal);
         const string allWorkloads =
@@ -47,6 +55,15 @@ public sealed class CiWorkflowContractTests
         Assert.Contains("Neither sha256sum nor shasum is available", collector, StringComparison.Ordinal);
         Assert.Contains("benchmark_result=", collector, StringComparison.Ordinal);
         Assert.Contains("benchmark_result_sha256=", collector, StringComparison.Ordinal);
+        Assert.Contains("<workspace>", collector, StringComparison.Ordinal);
+        Assert.Contains("sanitize_private_paths", collector, StringComparison.Ordinal);
+        Assert.Contains("trap remove_private_logs EXIT", collector, StringComparison.Ordinal);
+        Assert.Contains("find \"$benchmark_output_root\" -type f -name '*.log' -delete", collector, StringComparison.Ordinal);
+        Assert.Contains("require_publication_safe_output", collector, StringComparison.Ordinal);
+        Assert.Contains("grep -R -I -F -q", collector, StringComparison.Ordinal);
+        Assert.Contains("sub(/[[:space:]]+$/, \"\")", collector, StringComparison.Ordinal);
+        Assert.Contains("for (line_number = 1; line_number <= count; line_number++)", collector, StringComparison.Ordinal);
+        Assert.DoesNotContain("uname -a", collector, StringComparison.Ordinal);
         Assert.DoesNotContain("threshold", collector, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("baseline.json", collector, StringComparison.OrdinalIgnoreCase);
     }
@@ -56,8 +73,7 @@ public sealed class CiWorkflowContractTests
     {
         var workflow = ReadWorkflow("performance-comparison.yml").ReplaceLineEndings("\n");
         var triggers = workflow[
-            workflow.IndexOf("\non:", StringComparison.Ordinal)..
-            workflow.IndexOf("\npermissions:", StringComparison.Ordinal)];
+            workflow.IndexOf("\non:", StringComparison.Ordinal)..workflow.IndexOf("\npermissions:", StringComparison.Ordinal)];
 
         Assert.Contains("workflow_dispatch:", triggers, StringComparison.Ordinal);
         Assert.DoesNotContain("pull_request:", triggers, StringComparison.Ordinal);
@@ -176,8 +192,7 @@ public sealed class CiWorkflowContractTests
     {
         var workflow = ReadWorkflow("concurrency.yml").ReplaceLineEndings("\n");
         var triggers = workflow[
-            workflow.IndexOf("\non:", StringComparison.Ordinal)..
-            workflow.IndexOf("\npermissions:", StringComparison.Ordinal)];
+            workflow.IndexOf("\non:", StringComparison.Ordinal)..workflow.IndexOf("\npermissions:", StringComparison.Ordinal)];
         var jobStart = workflow.IndexOf("  full-solution-recurrence:", StringComparison.Ordinal);
         Assert.True(jobStart >= 0);
         var job = workflow[jobStart..];

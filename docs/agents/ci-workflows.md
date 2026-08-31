@@ -136,13 +136,19 @@ with a clean worktree, and explicitly confirm that the host is idle:
 
 ```bash
 GROUNDWORK_CONFIRM_IDLE_HOST=true \
+  GROUNDWORK_CONTROLLED_HOST_ID=groundwork-controlled-m2 \
   eng/collect-comparative-performance.sh "$head"
 ```
 
-The collector records exact-head, schema, host, load, runtime, package, catalog, and raw
-BenchmarkDotNet evidence. Follow `benchmarks/Groundwork.Benchmarks/evidence/methodology.md` to review
-and check a valid result into the exact-SHA run directory. Dry output and busy-host results are not
-publishable. Within-run ratios are diagnostic evidence, not cross-machine comparisons or SLAs.
+The collector records exact-head, schema, stable publish-safe host identity, load, runtime, package,
+catalog, and structured BenchmarkDotNet evidence. It scrubs private host/home/workspace markers,
+recursively removes raw execution logs on success or failure, and refuses an output tree if either
+kind of private evidence remains. Every collection uses a new output tree whose root and
+BenchmarkDotNet child resolve beneath the physical workspace without traversing a symbolic link.
+Follow
+`benchmarks/Groundwork.Benchmarks/evidence/methodology.md` to review and check a valid result into the
+exact-SHA run directory. Dry output and busy-host results are not publishable. Within-run ratios are
+diagnostic evidence, not cross-machine comparisons or SLAs.
 
 Ordinary correctness gating executes the benchmark contract tests through `Groundwork.slnx`; it
 checks the matrix, compiled model, canonical schema, and every comparison path without using
