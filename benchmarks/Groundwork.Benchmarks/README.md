@@ -53,6 +53,15 @@ round-trip/reflection assertions. The controlled-host exact-SHA collection proce
 handoff are defined in [`evidence/methodology.md`](evidence/methodology.md). Ordinary correctness
 checks validate the benchmark matrix and evidence contract without elapsed-time pass/fail criteria.
 
+The non-packable benchmark executable also exposes a fail-closed `performance-gate` comparator for
+two checked-in controlled-run bundles. It validates both manifests, their controlled-host and idle
+confirmations, their report SHA-256 bindings, the policy-pinned baseline digest, the exact 15-case
+catalog, BenchmarkDotNet version and measured environment (including hardware intrinsics) before
+applying explicit mean and allocation-ratio budgets to Groundwork's five cases. This command does not
+run a benchmark and is not an active gate
+until an approved controlled baseline, candidate result, and reviewed policy exist. The exact
+arguments and lifecycle are documented in [`evidence/methodology.md`](evidence/methodology.md).
+
 When the EF mapping changes, regenerate its compiled model with the repository's matching EF tool:
 
 ```bash

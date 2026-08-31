@@ -14,6 +14,9 @@ using Groundwork.Store;
 using Groundwork.Testing;
 using KernelStorageUnit = Groundwork.Kernel.StorageUnit;
 
+if (args.Length > 0 && string.Equals(args[0], "performance-gate", StringComparison.OrdinalIgnoreCase))
+    return Groundwork.Benchmarks.BenchmarkRegressionGate.Run(args[1..], Console.Out, Console.Error);
+
 if (args.Length > 0 && string.Equals(args[0], "benchmarks", StringComparison.OrdinalIgnoreCase))
 {
     _ = BenchmarkSwitcher.FromAssembly(typeof(Groundwork.Benchmarks.StorageBenchmarks).Assembly)
@@ -23,7 +26,7 @@ if (args.Length > 0 && string.Equals(args[0], "benchmarks", StringComparison.Ord
 
 if (args.Length == 0 || (args[0] is not "roundtrips" and not "linq" and not "records"))
 {
-    Console.Error.WriteLine("Usage: benchmarks [BenchmarkDotNet options] | roundtrips --workload upsert|commit --n <count> [--provider sqlite|postgresql|sqlserver|mongodb] | linq --n <count> | records --n <count>");
+    Console.Error.WriteLine("Usage: benchmarks [BenchmarkDotNet options] | performance-gate --policy <path> --baseline-manifest <path> --baseline-result <path> --candidate-sha <sha> --candidate-manifest <path> --candidate-result <path> | roundtrips --workload upsert|commit --n <count> [--provider sqlite|postgresql|sqlserver|mongodb] | linq --n <count> | records --n <count>");
     return 2;
 }
 
