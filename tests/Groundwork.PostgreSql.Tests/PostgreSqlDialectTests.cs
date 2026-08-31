@@ -633,7 +633,8 @@ public sealed class PostgreSqlDialectTests
         // Index-only drift is observable and enforced at query admission, but a no-change schema
         // apply intentionally remains non-fatal so operators can inspect and repair it.
         var result = connection.Schema.Apply(unit);
-        Assert.False(result.Applied);
+        Assert.True(result.Applied);
+        Assert.True(result.IsNoOp);
         Assert.True(connection.Schema.Diff(unit).IsEmpty);
     }
 
