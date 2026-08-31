@@ -40,6 +40,7 @@ public sealed class VersionIntegrityTests
         var prefix = RequiredProperty(props, "VersionPrefix");
         var suffix = Property(props, "VersionSuffix");
         var development = suffix is null ? prefix : $"{prefix}-{suffix}";
+        var packageReleaseNotes = RequiredProperty(props, "PackageReleaseNotes");
 
         Assert.True(
             File.Exists(Path.Combine(root, "docs", "v2", "releases", current + ".md")),
@@ -47,6 +48,9 @@ public sealed class VersionIntegrityTests
         Assert.True(
             Compare(development, current) > 0,
             $"Development version '{development}' must be strictly ahead of the current release '{current}'.");
+        Assert.True(
+            packageReleaseNotes.Contains("docs/v2/releases/$(GroundworkCurrentRelease).md", StringComparison.Ordinal),
+            "PackageReleaseNotes must link the versioned current-release document through GroundworkCurrentRelease.");
 
         var consumer = Path.Combine(root, "tests", "Groundwork.PublicApi.Acceptance.Tests", "Consumer", "Groundwork.PublicApi.Consumer.csproj");
         Assert.True(
