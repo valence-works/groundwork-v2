@@ -91,6 +91,19 @@ Other changes in `0.2.0-preview.1`:
 - MongoDB transactional same-identity races return portable deterministic write outcomes;
   wrapper-owned transactions retry transient write-conflict bodies.
 
+### `0.4.0-preview.1` — all-provider catalog reset (required)
+
+This release changes the canonical schema document and subject fingerprints across the complete
+provider family. **Discard every catalog created by an earlier preview and create a fresh one from
+the current declarations.** Groundwork provides no in-place migration, compatibility alias,
+dual-write, or fallback path across this boundary. Re-run `groundwork schema emit`, rebuild any
+assembly carrying a generated `GroundworkSchema` attribute, and apply the current declaration to
+the fresh catalog before serving traffic.
+
+The runtime reports an earlier-preview catalog as `GW-SCHEMA-006`, naming the affected storage unit
+and the discard remedy. See the complete [0.4.0-preview.1 release notes](../v2/releases/0.4.0-preview.1.md)
+for the public API, provider behavior, schema authorization, hosting, and package-closure changes.
+
 ---
 
 ## Provider support matrix

@@ -4,8 +4,8 @@
 the connection lifetime, startup schema admission, and a health check.
 
 ```xml
-<PackageReference Include="Groundwork.Extensions.DependencyInjection" Version="0.2.0-preview.1" />
-<PackageReference Include="Groundwork.Sqlite" Version="0.2.0-preview.1" />
+<PackageReference Include="Groundwork.Extensions.DependencyInjection" Version="0.4.0-preview.1" />
+<PackageReference Include="Groundwork.Sqlite" Version="0.4.0-preview.1" />
 ```
 
 ```csharp

@@ -51,7 +51,7 @@ MongoDB does the same inspect-only split at `OpenSession` via its public `Inspec
 ## The `groundwork` CLI
 
 ```bash
-dotnet tool install --global Groundwork.Tool --version 0.2.0-preview.1 \
+dotnet tool install --global Groundwork.Tool --version 0.4.0-preview.1 \
   --add-source https://f.feedz.io/valence-works/groundwork/nuget/index.json
 ```
 
@@ -365,7 +365,7 @@ therefore **identical to the assembly metadata fingerprint** for the same schema
 ## MSBuild verification
 
 ```xml
-<PackageReference Include="Groundwork.SchemaTool.MSBuild" Version="0.2.0-preview.1" PrivateAssets="all" />
+<PackageReference Include="Groundwork.SchemaTool.MSBuild" Version="0.4.0-preview.1" PrivateAssets="all" />
 
 <PropertyGroup>
   <GroundworkSchemaFile>$(MSBuildProjectDirectory)/groundwork.schema.json</GroundworkSchemaFile>
@@ -528,7 +528,7 @@ Historical preview boundaries remain clean breaks. When a preview release note m
 > There is no in-place migration, compatibility alias, dual-write, or fallback path between preview
 > catalogs.
 
-`0.2.0-preview.1` marks such a boundary for SQLite, and `0.2.0-preview.2` marks one for every
+`0.2.0-preview.1` marks such a boundary for SQLite, and `0.4.0-preview.1` marks one for every
 provider: subject fingerprints changed, so an earlier catalog is refused with `GW-SCHEMA-006`
 naming the storage unit and this remedy. See **[Versioning & Support](Versioning-and-Support)**.
 
