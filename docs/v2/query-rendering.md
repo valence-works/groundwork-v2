@@ -1,7 +1,7 @@
 # Native query rendering (v2)
 
 `QueryRequest` is normalized and validated before it reaches a provider renderer. Each provider
-has one renderer over the public substrate contract: SQLite, PostgreSQL, and SQL Server emit a
+has one renderer over the public substrate contract: SQLite, PostgreSQL, SQL Server, and MySQL emit a
 `RelationalQueryCommand`; MongoDB emits a `MongoQueryCommand` containing native BSON filter and
 sort documents, and an aggregation pipeline when explicit null ranks or a count are required. The
 renderers are synchronous and do not change the query model.
@@ -10,6 +10,16 @@ Relational aggregation source predicates use the same ordinary renderer fragment
 provider hooks, portable ordering (including SQL Server GUID ordering), substring semantics, and
 adapted bound parameters therefore cannot drift between a normal query and pre-reduction input.
 The aggregate command and its budget probe bind the same fragment parameters before execution.
+
+`Predicate.ElementSubstring` remains a native server predicate: SQLite expands JSON1 arrays with
+`json_each`, PostgreSQL expands JSONB arrays with `jsonb_array_elements`, SQL Server uses
+`OPENJSON`, MySQL/MariaDB uses `JSON_TABLE`, and MongoDB uses an array `$elemMatch` or aggregation
+expression. Each
+provider admits only the declared string element type and evaluates one element at a time; no
+serialized-array substring or client post-filter is used. The coverage checker reports this shape
+as bounded-scan-only unless a provider declares a compatible element search-key index. Raw arrays
+admit only `Ordinal` and the exact ASCII A-Z fold; `UnicodeOrdinalIgnoreCase` is refused because
+the existing versioned Unicode fold requires a persisted per-element search key.
 
 `Paging.Keyset(limit)` is the first keyset page. `Paging.Continuation` carries a typed tuple made
 with `QueryContinuationToken.Encode`; the tuple contains every requested order term followed by

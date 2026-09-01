@@ -73,6 +73,13 @@ The query-shape diagnostics are versioned separately from the predicate corpus:
 Closed terms are read from constants and closure fields without compiling an expression per query
 call. Unsupported expression nodes are rejected rather than evaluated on the client.
 
+Declared string sets also support `Any(value => value.Contains(needle, comparison))` and
+`Any(value => value.EndsWith(needle, comparison))`, lowering to `Predicate.ElementSubstring`.
+Use an explicit `StringComparison.Ordinal` or `StringComparison.OrdinalIgnoreCase`; the latter
+lowers to the Unicode policy and is refused for a raw array unless a persisted per-element search
+key is introduced. `All` and culture-sensitive overloads remain refused. Construct the AST with
+`QueryStringComparisonPolicy.AsciiIgnoreCase` when ASCII-only folding is the intended contract.
+
 Prefix matching is index-coverable when its comparison policy matches the declared column:
 ordinal prefixes use an exact range on the base column, while ASCII and Unicode folded prefixes
 use the schema-owned versioned search-key column. Culture/ICU policies and forged policy metadata

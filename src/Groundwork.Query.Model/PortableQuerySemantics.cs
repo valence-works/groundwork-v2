@@ -164,6 +164,9 @@ public static class PortableQuerySemantics
             case Predicate.ElementOf elementOf:
                 ValidateElementSet(elementOf, refusals, path);
                 return;
+            case Predicate.ElementSubstring elementSubstring:
+                ValidateElementSubstring(elementSubstring, refusals, path);
+                return;
             case Predicate.ColumnCompare compare:
                 ValidateColumn(compare.Left, refusals, path + ".left");
                 ValidateColumn(compare.Right, refusals, path + ".right");
@@ -174,7 +177,7 @@ public static class PortableQuerySemantics
                 return;
             case Predicate.Not not:
                 ValidatePredicate(not.Inner, refusals, path + ".inner");
-                if ((not.Inner is Predicate.In negatedMembership && negatedMembership.Values.Length != 0) || not.Inner is Predicate.Range or Predicate.StartsWith or Predicate.Substring)
+                if ((not.Inner is Predicate.In negatedMembership && negatedMembership.Values.Length != 0) || not.Inner is Predicate.Range or Predicate.StartsWith or Predicate.Substring or Predicate.ElementSubstring)
                     Refuse(refusals, "GW-SEM-NOT-001", "This negation is not portable; use the supported total Equal/ColumnCompare complement or a portable positive predicate instead.", path);
                 return;
             case Predicate.And and:
@@ -221,6 +224,33 @@ public static class PortableQuerySemantics
             }
         }
     }
+
+    private static void ValidateElementSubstring(
+        Predicate.ElementSubstring elementSubstring,
+        ICollection<PortableSemanticRefusal> refusals,
+        string path)
+    {
+        if (elementSubstring.Set.Type is not QueryType type)
+        {
+            Refuse(refusals, "GW-SEM-TYPE-007", "An element set must declare its exact element type; bind a typed string set before provider planning.", path + ".set");
+            return;
+        }
+        if (type != QueryType.String)
+            Refuse(refusals, "GW-SEM-TYPE-005", "Element substring matching requires a string element set; bind the declared string set instead.", path + ".set");
+        if (elementSubstring.Anchor is not (Anchor.Contains or Anchor.EndsWith))
+            Refuse(refusals, "GW-SEM-TEXT-003", "The requested element substring anchor is not portable; use Contains or EndsWith.", path);
+        if (!IsElementSubstringPolicy(elementSubstring.StringComparison))
+            Refuse(refusals, "GW-SEM-TEXT-001", "Element substring matching requires an explicit Ordinal or AsciiIgnoreCase policy; UnicodeOrdinalIgnoreCase requires a persisted per-element search key and is not admitted for a raw array.", path + ".stringComparison");
+    }
+
+    private static bool IsElementSubstringPolicy(QueryStringComparisonPolicy policy) => policy is
+        QueryStringComparisonPolicy.Ordinal or
+        QueryStringComparisonPolicy.AsciiIgnoreCase;
+
+    private static bool IsElementSubstringEvaluationPolicy(QueryStringComparisonPolicy policy) => policy is
+        QueryStringComparisonPolicy.Ordinal or
+        QueryStringComparisonPolicy.AsciiIgnoreCase or
+        QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase;
 
     private static void ValidateConstant(ColumnRef column, QueryConstant constant, ICollection<PortableSemanticRefusal> refusals, string path)
     {
@@ -307,6 +337,18 @@ public static class PortableQuerySemantics
                     ? elements.Any(element => elementOf.Values.Any(value => CompareUntyped(element, value)))
                     : elementOf.Values.All(value => elements.Any(element => CompareUntyped(element, value)));
             }
+            case Predicate.ElementSubstring elementSubstring:
+            {
+                if (elementSubstring.Set.Type != QueryType.String ||
+                    !IsElementSubstringEvaluationPolicy(elementSubstring.StringComparison) ||
+                    !TryGetElementSubstringElements(elementSubstring.Set, row, out var elements))
+                    return false;
+                return elements
+                    .OfType<string>()
+                    .Any(element => elementSubstring.Anchor == Anchor.Contains
+                        ? ElementIndexOf(element, elementSubstring.Needle, elementSubstring.StringComparison) >= 0
+                        : ElementEndsWith(element, elementSubstring.Needle, elementSubstring.StringComparison));
+            }
             case Predicate.ColumnCompare compare:
             {
                 var left = GetValue(compare.Left, row);
@@ -371,6 +413,18 @@ public static class PortableQuerySemantics
             return false;
 
         elements = candidate;
+        return true;
+    }
+
+    private static bool TryGetElementSubstringElements(ElementSetRef set, IReadOnlyDictionary<string, object?> row, out IReadOnlyList<object?> elements)
+    {
+        elements = Array.Empty<object?>();
+        if (set.Type != QueryType.String || !row.TryGetValue(set.Name, out var value) || value is null || value is string or byte[] || value is not IEnumerable enumerable)
+            return false;
+
+        // A malformed member does not invalidate its siblings: substring matching is defined
+        // per string element, so null and non-string members are simply non-matches.
+        elements = enumerable.Cast<object?>().ToArray();
         return true;
     }
 
@@ -449,6 +503,51 @@ public static class PortableQuerySemantics
 
     private static bool EndsWith(string value, string needle, QueryStringComparisonPolicy policy) =>
         policy == QueryStringComparisonPolicy.Ordinal && value.EndsWith(needle, StringComparison.Ordinal);
+
+    private static int ElementIndexOf(string value, string needle, QueryStringComparisonPolicy policy) => policy switch
+    {
+        QueryStringComparisonPolicy.Ordinal => value.IndexOf(needle, StringComparison.Ordinal),
+        // The oracle keeps the complete .NET behavior for shapes that are explicitly refused by
+        // planning. Admitted raw-array providers are limited to Ordinal and the exact ASCII fold.
+        QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase => value.IndexOf(needle, StringComparison.OrdinalIgnoreCase),
+        QueryStringComparisonPolicy.AsciiIgnoreCase => AsciiIndexOf(value, needle),
+        _ => -1
+    };
+
+    private static bool ElementEndsWith(string value, string needle, QueryStringComparisonPolicy policy) => policy switch
+    {
+        QueryStringComparisonPolicy.Ordinal => value.EndsWith(needle, StringComparison.Ordinal),
+        QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase => value.EndsWith(needle, StringComparison.OrdinalIgnoreCase),
+        QueryStringComparisonPolicy.AsciiIgnoreCase => needle.Length == 0 || AsciiIndexOf(value, needle) == value.Length - needle.Length,
+        _ => false
+    };
+
+    private static int AsciiIndexOf(string value, string needle)
+    {
+        if (needle.Length == 0)
+            return 0;
+        if (needle.Length > value.Length)
+            return -1;
+        for (var start = 0; start <= value.Length - needle.Length; start++)
+        {
+            var match = true;
+            for (var offset = 0; offset < needle.Length; offset++)
+            {
+                if (FoldAscii(value[start + offset]) != FoldAscii(needle[offset]))
+                {
+                    match = false;
+                    break;
+                }
+            }
+            if (match)
+                return start;
+        }
+        return -1;
+    }
+
+    private static char FoldAscii(char value) => value is >= 'A' and <= 'Z'
+        ? (char)(value + ('a' - 'A'))
+        : value;
 }
 
 internal static class PortableValueComparison

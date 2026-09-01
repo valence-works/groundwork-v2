@@ -1274,6 +1274,8 @@ public abstract class RelationalQueryRenderer
             }
             case Predicate.ElementOf elementOf:
                 return RenderElementOf(elementOf, parameters, ref parameterIndex);
+            case Predicate.ElementSubstring elementSubstring:
+                return RenderElementSubstring(elementSubstring, parameters, ref parameterIndex);
             case Predicate.Not not:
             {
                 var inner = RenderPredicate(not.Inner, parameters, ref parameterIndex, inValueLimit, table);
@@ -1439,6 +1441,20 @@ public abstract class RelationalQueryRenderer
         if (elementOf.Values.Length == 0)
             return elementOf.Quantifier == SetQuantifier.Any ? "1 = 0" : "1 = 1";
         throw new QueryRenderException("GW-QUERY-030", $"ElementOf on '{elementOf.Set.Name}' requires a provider array representation; values were typed but no native array operation is available.");
+    }
+
+    protected virtual string RenderElementSubstring(
+        Predicate.ElementSubstring elementSubstring,
+        ICollection<QueryRenderParameter> parameters,
+        ref int parameterIndex)
+    {
+        if (elementSubstring.Set.Type != QueryType.String)
+            throw new QueryRenderException("GW-SEM-TYPE-005", "Element substring matching requires a typed string element set.");
+        if (elementSubstring.StringComparison is not (
+                QueryStringComparisonPolicy.Ordinal or
+                QueryStringComparisonPolicy.AsciiIgnoreCase))
+            throw new QueryRenderException("GW-SEM-TEXT-001", "Element substring matching requires an explicit Ordinal or AsciiIgnoreCase policy; UnicodeOrdinalIgnoreCase requires a persisted per-element search key.");
+        throw new QueryRenderException("GW-QUERY-030", $"ElementSubstring on '{elementSubstring.Set.Name}' requires a provider array representation; no native array operation is available.");
     }
 
     protected string AddParameter(ColumnRef column, QueryConstant value, ICollection<QueryRenderParameter> parameters, ref int parameterIndex)

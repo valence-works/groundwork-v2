@@ -83,6 +83,9 @@ public static class RuntimeValueFence
                         $"ElementOf contains {elementOf.Values.Length} values, exceeding the configured limit of {options.MaximumInValues}.");
                 parameters += elementOf.Values.Length;
                 return;
+            case Predicate.ElementSubstring:
+                parameters++;
+                return;
             case Predicate.ColumnCompare:
             case Predicate.AlwaysTrue:
             case Predicate.AlwaysFalse:

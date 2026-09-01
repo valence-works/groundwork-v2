@@ -11,6 +11,7 @@ using Groundwork.Testing;
 using Groundwork.Store;
 using Groundwork.Diagnostics;
 using System.Collections.Immutable;
+using System.Text.Json;
 using Xunit;
 
 namespace Groundwork.Differential.Tests;
@@ -27,6 +28,7 @@ public sealed class CorpusDifferentialTests
     private static readonly string ExplainTableName = "g2_explain_" + Guid.NewGuid().ToString("N");
     private static readonly string DeclaredKeyExplainTableName = "g2_key_explain_" + Guid.NewGuid().ToString("N");
     private static readonly string PrefixTableName = "g2_prefix_" + Guid.NewGuid().ToString("N");
+    private static readonly string ArraySubstringTableName = "g2_array_substring_" + Guid.NewGuid().ToString("N");
 
     [Fact]
     public void Differential_corpus_marks_only_coverage_proven_queries_for_explain_assertion()
@@ -46,6 +48,63 @@ public sealed class CorpusDifferentialTests
         Assert.Equal("ix_number", Options(covered).FindPinnedIndex()?.Name);
         Assert.Null(Options(uncovered).FindPinnedIndex());
         Assert.Null(Options(orderOnly).FindPinnedIndex());
+    }
+
+    [SkippableFact]
+    public void String_array_substring_matches_the_inmemory_oracle_on_all_live_providers()
+    {
+        var postgres = Required("GROUNDWORK_POSTGRES_CONNECTION");
+        var sqlServer = LiveSqlServer.Required();
+        var mongo = LiveMongo.Required();
+        var providerRows = ArraySubstringRows.Select(row =>
+        {
+            var converted = new Dictionary<string, object?>(row, StringComparer.Ordinal);
+            if (row.TryGetValue("workflowIds", out var workflowIds))
+                converted["workflowIds"] = workflowIds is null ? null : JsonSerializer.Serialize(workflowIds);
+            return converted;
+        }).ToArray();
+        using var sqlite = OpenSqlite(ArraySubstringUnit, providerRows);
+        using var pg = OpenPostgreSql(postgres, ArraySubstringUnit, providerRows);
+        using var sql = OpenSqlServer(sqlServer, ArraySubstringUnit, providerRows);
+        using var mongoSession = OpenMongo(mongo, ArraySubstringUnit, providerRows);
+        var providers = new[] { sqlite, pg, sql, mongoSession };
+        var table = new TableId(ArraySubstringTableName);
+        var id = new ColumnRef(table, "id", QueryType.Int64, isNullable: false);
+        var set = new ElementSetRef("workflowIds", QueryType.String);
+        var cases = new[]
+        {
+            new Predicate.ElementSubstring(set, "flow-id", Anchor.Contains),
+            new Predicate.ElementSubstring(set, "workflow", Anchor.Contains, QueryStringComparisonPolicy.AsciiIgnoreCase),
+            new Predicate.ElementSubstring(set, string.Empty, Anchor.EndsWith),
+            new Predicate.ElementSubstring(set, new string('x', 10_000), Anchor.Contains)
+        };
+
+        foreach (var predicate in cases)
+        {
+            var request = new QueryRequest(
+                table,
+                predicate,
+                [new OrderTerm(id, OrderDirection.Ascending, NullOrder.First)],
+                Projection.ColumnsOnly(id),
+                Paging.None,
+                ResultShape.Rows.Instance,
+                acceptedScan: ScanAcceptance.Allow(
+                    "GW-SCAN-371",
+                    "String-array substring is a bounded native expansion over a declared JSON column.",
+                    "groundwork",
+                    new DateTimeOffset(2099, 1, 1, 0, 0, 0, TimeSpan.Zero)));
+            var expected = ArraySubstringRows
+                .Where(row => PortableQuerySemantics.Evaluate(predicate, row))
+                .Select(row => (long)row["id"]!)
+                .ToArray();
+            foreach (var provider in providers)
+            {
+                var actual = provider.Query(request, QueryRenderOptions.Default).Rows
+                    .Select(row => (long)row["id"]!)
+                    .ToArray();
+                Assert.Equal(expected, actual);
+            }
+        }
     }
 
     [Fact]
@@ -909,6 +968,18 @@ public sealed class CorpusDifferentialTests
         ]
     };
 
+    private static StorageUnit ArraySubstringUnit => new()
+    {
+        Id = new StorageUnitId(ArraySubstringTableName),
+        Name = ArraySubstringTableName,
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.Int64, IsNullable = false },
+            new() { Name = "workflowIds", Type = PortableType.Json, IsNullable = true }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] }
+    };
+
     private static StorageUnit SemanticEdgeUnit => new()
     {
         Id = new StorageUnitId(SemanticEdgeTableName),
@@ -1086,6 +1157,11 @@ public sealed class CorpusDifferentialTests
                 ? QueryConstant.Of(new ColumnRef(elementOf.Set.Name, type), value.Value)
                 : QueryConstant.Of(value.Value)),
             elementOf.Quantifier),
+        Predicate.ElementSubstring elementSubstring => new Predicate.ElementSubstring(
+            elementSubstring.Set,
+            elementSubstring.Needle,
+            elementSubstring.Anchor,
+            elementSubstring.StringComparison),
         Predicate.ColumnCompare compare => new Predicate.ColumnCompare(Retarget(compare.Left, table), compare.Op, Retarget(compare.Right, table)),
         Predicate.Not not => new Predicate.Not(Retarget(not.Inner, table)),
         Predicate.And and => new Predicate.And(and.Terms.Select(term => Retarget(term, table))),
@@ -1126,6 +1202,22 @@ public sealed class CorpusDifferentialTests
         new Dictionary<string, object?> { ["id"] = 9L, ["folded"] = "𐐀", ["ascii"] = "TURKISH", ["ordinal"] = "\uDBFF\uDFFFsuffix" },
         new Dictionary<string, object?> { ["id"] = 10L, ["folded"] = "𐐨", ["ascii"] = "value", ["ordinal"] = "max" },
         new Dictionary<string, object?> { ["id"] = 11L, ["folded"] = "\U0010FFFF", ["ascii"] = "~", ["ordinal"] = "z" }
+    ];
+
+    private static IReadOnlyList<IReadOnlyDictionary<string, object?>> ArraySubstringRows =>
+    [
+        new Dictionary<string, object?> { ["id"] = 1L, ["workflowIds"] = new object?[] { "ab", "cd" } },
+        new Dictionary<string, object?> { ["id"] = 2L, ["workflowIds"] = new object?[] { "flow-id" } },
+        new Dictionary<string, object?> { ["id"] = 3L, ["workflowIds"] = new object?[] { "flow-", "id" } },
+        new Dictionary<string, object?> { ["id"] = 4L, ["workflowIds"] = new Dictionary<string, object?> { ["value"] = "flow-id" } },
+        new Dictionary<string, object?> { ["id"] = 5L, ["workflowIds"] = null },
+        new Dictionary<string, object?> { ["id"] = 6L, ["workflowIds"] = Array.Empty<object?>() },
+        new Dictionary<string, object?> { ["id"] = 7L, ["workflowIds"] = new object?[] { "flow-id", "flow-id" } },
+        new Dictionary<string, object?> { ["id"] = 8L, ["workflowIds"] = new object?[] { "WÖRKFLOW" } },
+        new Dictionary<string, object?> { ["id"] = 9L, ["workflowIds"] = new object?[] { "WORKFLOW" } },
+        new Dictionary<string, object?> { ["id"] = 10L, ["workflowIds"] = new object?[] { null, 42, string.Empty } },
+        new Dictionary<string, object?> { ["id"] = 11L, ["workflowIds"] = new object?[] { new string('x', 128) } },
+        new Dictionary<string, object?> { ["id"] = 12L }
     ];
 
     private static CorpusSession OpenSqlite() => OpenSqlite(Unit, Rows);

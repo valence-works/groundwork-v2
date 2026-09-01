@@ -179,6 +179,35 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
         return "CASE WHEN jsonb_typeof(" + expression + ") = 'array' THEN (" + exists + ") ELSE FALSE END";
     }
 
+    protected override string RenderElementSubstring(
+        Predicate.ElementSubstring elementSubstring,
+        ICollection<QueryRenderParameter> parameters,
+        ref int parameterIndex)
+    {
+        if (elementSubstring.Set.Type != QueryType.String)
+            throw new QueryRenderException("GW-SEM-TYPE-005", "Element substring matching requires a typed string element set.");
+        if (elementSubstring.Anchor is not (Anchor.Contains or Anchor.EndsWith))
+            throw new QueryRenderException("GW-SEM-TEXT-003", "The requested element substring anchor is not portable; use Contains or EndsWith.");
+        var expression = Dialect.QuoteIdentifier(elementSubstring.Set.Name);
+        var parameter = AddElementParameter(QueryType.String, elementSubstring.Needle, parameters, ref parameterIndex);
+        var elementText = "element.value #>> '{}'";
+        var element = ApplyElementComparison(elementText, elementSubstring.StringComparison);
+        var needle = ApplyElementComparison("@" + parameter, elementSubstring.StringComparison);
+        var operation = elementSubstring.Anchor == Anchor.Contains
+            ? "POSITION(" + needle + " IN " + element + ") > 0"
+            : "RIGHT(" + element + ", length(" + needle + ")) = " + needle;
+        var emptyNeedle = "length(@" + parameter + ") = 0";
+        var exists = "EXISTS (SELECT 1 FROM jsonb_array_elements(" + expression + ") AS element(value) WHERE jsonb_typeof(element.value) = 'string' AND (" + emptyNeedle + " OR " + operation + "))";
+        return "CASE WHEN jsonb_typeof(" + expression + ") = 'array' THEN (" + exists + ") ELSE FALSE END";
+    }
+
+    private static string ApplyElementComparison(string expression, QueryStringComparisonPolicy policy) => policy switch
+    {
+        QueryStringComparisonPolicy.Ordinal => "(" + expression + " COLLATE \"C\")",
+        QueryStringComparisonPolicy.AsciiIgnoreCase => "(translate(" + expression + " COLLATE \"C\", 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') COLLATE \"C\")",
+        _ => throw new QueryRenderException("GW-SEM-TEXT-001", "Element substring matching requires an explicit portable comparison policy.")
+    };
+
     internal static string RenderOrdinalKey(string expression) =>
         "COALESCE((SELECT string_agg(CASE WHEN ascii(chars.ch) <= 65535 THEN lpad(to_hex(ascii(chars.ch)), 4, '0') ELSE " +
         "lpad(to_hex(55296 + ((ascii(chars.ch) - 65536) >> 10)), 4, '0') || " +

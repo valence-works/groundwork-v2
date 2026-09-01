@@ -43,6 +43,7 @@ public sealed class LinqFrontEndTests
         public int OtherTenant { get; set; }
         public int Marker { get; set; }
         public IReadOnlyList<int> TagIds { get; set; } = Array.Empty<int>();
+        public IReadOnlyList<string> WorkflowIds { get; set; } = Array.Empty<string>();
         public long LongValue { get; set; }
         public DateTimeOffset? OptionalAt { get; set; }
     }
@@ -58,7 +59,11 @@ public sealed class LinqFrontEndTests
         new GwColumn<Ticket>(nameof(Ticket.Marker), nameof(Ticket.Marker), QueryType.Int32, false),
         new GwColumn<Ticket>(nameof(Ticket.LongValue), nameof(Ticket.LongValue), QueryType.Int64, false),
         new GwColumn<Ticket>(nameof(Ticket.OptionalAt), nameof(Ticket.OptionalAt), QueryType.DateTimeOffset, true)
-    }, new[] { new GwElementSet<Ticket>(nameof(Ticket.TagIds), "tag_ids", QueryType.Int32) });
+    }, new[]
+    {
+        new GwElementSet<Ticket>(nameof(Ticket.TagIds), "tag_ids", QueryType.Int32),
+        new GwElementSet<Ticket>(nameof(Ticket.WorkflowIds), "workflow_ids", QueryType.String)
+    });
 
     private static class Fragments
     {
@@ -479,6 +484,28 @@ public sealed class LinqFrontEndTests
         Assert.Equal("GW-LINQ-106", Assert.Single(constantEquality).Code);
         Assert.Equal("GW-LINQ-106", Assert.Single(nestedElementExpression).Code);
         Assert.Equal("GW-LINQ-106", Assert.Single(outerRowCapture).Code);
+    }
+
+    [Fact]
+    public void String_array_substring_methods_lower_to_explicit_any_element_predicates()
+    {
+        var contains = ExpressionLowerer.Lower<Ticket>(
+            ticket => ticket.WorkflowIds.Any(value => value.Contains("flow", StringComparison.Ordinal)), Tickets);
+        var endsWith = ExpressionLowerer.Lower<Ticket>(
+            ticket => ticket.WorkflowIds.Any(value => value.EndsWith("ID", StringComparison.OrdinalIgnoreCase)), Tickets);
+
+        var containsNode = Assert.IsType<Predicate.ElementSubstring>(contains);
+        Assert.Equal(Anchor.Contains, containsNode.Anchor);
+        Assert.Equal(QueryStringComparisonPolicy.Ordinal, containsNode.StringComparison);
+        Assert.Equal("flow", containsNode.Needle);
+        var endsWithNode = Assert.IsType<Predicate.ElementSubstring>(endsWith);
+        Assert.Equal(Anchor.EndsWith, endsWithNode.Anchor);
+        Assert.Equal(QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase, endsWithNode.StringComparison);
+        Assert.Equal("ID", endsWithNode.Needle);
+
+        var allDiagnostics = ExpressionLowerer.Diagnose<Ticket>(
+            ticket => ticket.WorkflowIds.All(value => value.Contains("flow", StringComparison.Ordinal)), Tickets);
+        Assert.Equal("GW-LINQ-106", Assert.Single(allDiagnostics).Code);
     }
 
     [Fact]

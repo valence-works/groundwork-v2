@@ -727,6 +727,43 @@ public sealed class MongoQueryRenderer
                         new BsonDocument("$eq", new BsonArray { new BsonDocument("$type", "$" + elementOf.Set.Name), "array" }),
                         new BsonDocument("$setIsSubset", new BsonArray { values, "$" + elementOf.Set.Name })
                     }));
+            case Predicate.ElementSubstring elementSubstring:
+            {
+                if (elementSubstring.Set.Type != QueryType.String)
+                    throw new QueryRenderException("GW-SEM-TYPE-005", "Element substring matching requires a typed string element set.");
+                if (elementSubstring.Anchor is not (Anchor.Contains or Anchor.EndsWith))
+                    throw new QueryRenderException("GW-SEM-TEXT-003", "The requested element substring anchor is not portable; use Contains or EndsWith.");
+                if (elementSubstring.StringComparison is not (QueryStringComparisonPolicy.Ordinal or QueryStringComparisonPolicy.AsciiIgnoreCase))
+                    throw new QueryRenderException("GW-SEM-TEXT-001", "Element substring matching requires an explicit Ordinal or AsciiIgnoreCase policy; UnicodeOrdinalIgnoreCase requires a persisted per-element search key.");
+
+                var needle = new BsonDocument("$literal", elementSubstring.Needle);
+                var foldedNeedle = elementSubstring.StringComparison == QueryStringComparisonPolicy.AsciiIgnoreCase
+                    ? FoldAscii(needle)
+                    : needle;
+                var foldedElement = elementSubstring.StringComparison == QueryStringComparisonPolicy.AsciiIgnoreCase
+                    ? FoldAscii(new BsonString("$$element"))
+                    : new BsonString("$$element");
+                var map = new BsonDocument("$map", new BsonDocument
+                {
+                    { "input", "$" + elementSubstring.Set.Name },
+                    { "as", "element" },
+                    { "in", new BsonDocument("$cond", new BsonArray
+                        {
+                            new BsonDocument("$eq", new BsonArray { new BsonDocument("$type", "$$element"), "string" }),
+                            ElementMatch(elementSubstring.Anchor, foldedElement, foldedNeedle),
+                            false
+                        }) }
+                });
+                return new BsonDocument("$expr", new BsonDocument("$cond", new BsonArray
+                {
+                    new BsonDocument("$eq", new BsonArray
+                    {
+                        new BsonDocument("$type", "$" + elementSubstring.Set.Name), "array"
+                    }),
+                    new BsonDocument("$anyElementTrue", map),
+                    false
+                }));
+            }
             case Predicate.Substring substring when substring.Anchor is Anchor.Contains or Anchor.EndsWith:
                 return new BsonDocument(fieldPath(substring.Column),
                     new BsonRegularExpression(
@@ -1145,6 +1182,50 @@ public sealed class MongoQueryRenderer
             { "args", new BsonArray { value } },
             { "lang", "js" }
         });
+
+    private static BsonValue FoldAscii(BsonValue input)
+    {
+        var expression = input;
+        foreach (var character in "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+        {
+            expression = new BsonDocument("$replaceAll", new BsonDocument
+            {
+                { "input", expression },
+                { "find", character.ToString() },
+                { "replacement", char.ToLowerInvariant(character).ToString() }
+            });
+        }
+        return expression;
+    }
+
+    private static BsonValue ElementMatch(Anchor anchor, BsonValue foldedElement, BsonValue foldedNeedle)
+    {
+        var needleLength = new BsonDocument("$strLenCP", foldedNeedle);
+        var elementLength = new BsonDocument("$strLenCP", foldedElement);
+        if (anchor == Anchor.Contains)
+            return new BsonDocument("$gte", new BsonArray
+            {
+                new BsonDocument("$indexOfCP", new BsonArray { foldedElement, foldedNeedle }), 0
+            });
+
+        var suffix = new BsonDocument("$substrCP", new BsonArray
+        {
+            foldedElement,
+            new BsonDocument("$subtract", new BsonArray { elementLength, needleLength }),
+            needleLength
+        });
+        return new BsonDocument("$cond", new BsonArray
+        {
+            new BsonDocument("$eq", new BsonArray { needleLength, 0 }),
+            true,
+            new BsonDocument("$cond", new BsonArray
+            {
+                new BsonDocument("$gte", new BsonArray { elementLength, needleLength }),
+                new BsonDocument("$eq", new BsonArray { suffix, foldedNeedle }),
+                false
+            })
+        });
+    }
 
     private static BsonDocument And(BsonDocument left, BsonDocument right) =>
         new("$and", new BsonArray { left, right });

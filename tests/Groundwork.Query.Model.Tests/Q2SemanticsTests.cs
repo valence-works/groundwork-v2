@@ -112,6 +112,50 @@ public sealed class Q2SemanticsTests
     }
 
     [Fact]
+    public void Element_substring_matches_each_string_element_without_joining_neighbors()
+    {
+        var set = new ElementSetRef("tags", QueryType.String);
+        var contains = new Predicate.ElementSubstring(set, "bc", Anchor.Contains);
+        var endsWith = new Predicate.ElementSubstring(set, "BC", Anchor.EndsWith, QueryStringComparisonPolicy.AsciiIgnoreCase);
+
+        Assert.False(PortableQuerySemantics.Evaluate(contains, new Dictionary<string, object?> { ["tags"] = new[] { "ab", "cd" } }));
+        Assert.True(PortableQuerySemantics.Evaluate(contains, new Dictionary<string, object?> { ["tags"] = new[] { "ab", "abcd" } }));
+        Assert.False(PortableQuerySemantics.Evaluate(contains, new Dictionary<string, object?> { ["tags"] = new object?[] { null, 42 } }));
+        Assert.True(PortableQuerySemantics.Evaluate(contains, new Dictionary<string, object?> { ["tags"] = new object?[] { null, 42, "abc" } }));
+        Assert.False(PortableQuerySemantics.Evaluate(contains, new Dictionary<string, object?> { ["tags"] = "abcd" }));
+        Assert.False(PortableQuerySemantics.Evaluate(contains, new Dictionary<string, object?> { ["tags"] = "not-json" }));
+        Assert.False(PortableQuerySemantics.Evaluate(contains, new Dictionary<string, object?> { ["tags"] = Array.Empty<string>() }));
+        Assert.True(PortableQuerySemantics.Evaluate(endsWith, new Dictionary<string, object?> { ["tags"] = new[] { "abc", "abc" } }));
+        Assert.False(PortableQuerySemantics.Evaluate(endsWith, new Dictionary<string, object?> { ["tags"] = new string?[] { null, "" } }));
+
+        var emptyNeedle = new Predicate.ElementSubstring(set, string.Empty, Anchor.EndsWith);
+        Assert.True(PortableQuerySemantics.Evaluate(emptyNeedle, new Dictionary<string, object?> { ["tags"] = new string?[] { null, "" } }));
+        Assert.False(PortableQuerySemantics.Evaluate(emptyNeedle, new Dictionary<string, object?>()));
+
+        var longNeedle = new Predicate.ElementSubstring(set, new string('x', 10_000), Anchor.Contains);
+        Assert.False(PortableQuerySemantics.Evaluate(longNeedle, new Dictionary<string, object?> { ["tags"] = new[] { "x", "y" } }));
+    }
+
+    [Fact]
+    public void Element_substring_comparison_policies_are_explicit_and_culture_independent()
+    {
+        var set = new ElementSetRef("tags", QueryType.String);
+        var ascii = new Predicate.ElementSubstring(set, "workflow", Anchor.Contains, QueryStringComparisonPolicy.AsciiIgnoreCase);
+        var unicode = new Predicate.ElementSubstring(set, "wörkflow", Anchor.Contains, QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase);
+        var culture = new Predicate.ElementSubstring(set, "workflow", Anchor.Contains, QueryStringComparisonPolicy.CurrentCulture);
+
+        Assert.True(PortableQuerySemantics.Validate(ascii).IsPortable);
+        Assert.False(PortableQuerySemantics.Validate(unicode).IsPortable);
+        Assert.Contains(PortableQuerySemantics.Validate(unicode).Refusals, refusal => refusal.Code == "GW-SEM-TEXT-001");
+        Assert.False(PortableQuerySemantics.Evaluate(ascii, new Dictionary<string, object?> { ["tags"] = new[] { "WÖRKFLOW" } }));
+        Assert.True(PortableQuerySemantics.Evaluate(ascii, new Dictionary<string, object?> { ["tags"] = new[] { "WORKFLOW" } }));
+        Assert.True(PortableQuerySemantics.Evaluate(unicode, new Dictionary<string, object?> { ["tags"] = new[] { "WÖRKFLOW" } }));
+        Assert.False(PortableQuerySemantics.Validate(culture).IsPortable);
+        Assert.Contains(PortableQuerySemantics.Validate(culture).Refusals, refusal => refusal.Code == "GW-SEM-TEXT-001");
+        Assert.NotEqual(ascii.CanonicalForm, unicode.CanonicalForm);
+    }
+
+    [Fact]
     public void Search_leaves_are_total_and_ordinal_prefix_is_portable()
     {
         var starts = new Predicate.StartsWith(Text, "pre");

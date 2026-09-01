@@ -27,6 +27,7 @@ public sealed class CoverageCorpusTests
         yield return Case("range", Request(new Predicate.Range(Amount, Bound.Inclusive(QueryConstant.Of(Amount, 0m)), null)), Index(Amount), true);
         yield return Case("starts-with-range", Request(new Predicate.StartsWith(Text, "op")), Index(Text), true);
         yield return Case("substring-refused", Request(new Predicate.Substring(Text, "pen", Anchor.Contains)), Index(Text), false);
+        yield return Case("element-substring-refused", Request(new Predicate.ElementSubstring(new ElementSetRef("text_values", QueryType.String), "pen", Anchor.Contains)), Index(Text), false);
         yield return Case("negated-equality-refused", Request(new Predicate.Not(new Predicate.Equal(Text, QueryConstant.Of(Text, "open")))), Index(Text), false);
         yield return Case("same-column-or", Request(new Predicate.Or([
             new Predicate.Equal(Text, QueryConstant.Of(Text, "open")),
@@ -140,6 +141,33 @@ public sealed class CoverageCorpusTests
                 Assert.Contains(result.Refusal.SuggestedDeclaration, result.Refusal.Message, StringComparison.Ordinal);
             }
         }
+    }
+
+    [Fact]
+    public void Element_substring_is_bounded_scan_only_until_explicitly_accepted()
+    {
+        var predicate = new Predicate.ElementSubstring(new ElementSetRef("text_values", QueryType.String), "pen", Anchor.Contains);
+        var refused = QueryCoverageChecker.Check(Request(predicate), [Index(Text)]);
+
+        Assert.False(refused.IsCovered);
+        Assert.Contains(refused.Refusals, refusal => refusal.Code == "GW-COVER-016");
+
+        var accepted = new QueryRequest(
+            Table,
+            predicate,
+            [],
+            Projection.All,
+            Paging.None,
+            acceptedScan: ScanAcceptance.Allow(
+                "GW-SCAN-371",
+                "Native JSON expansion is bounded and explicitly accepted for this query.",
+                "groundwork",
+                new DateTimeOffset(2099, 1, 1, 0, 0, 0, TimeSpan.Zero))
+        );
+        var result = QueryCoverageChecker.Check(accepted, [Index(Text)]);
+        Assert.False(result.IsCovered);
+        Assert.Contains(result.Refusals, refusal => refusal.Code == "GW-COVER-016");
+        QueryCoverageEnforcer.EnsureCovered(accepted, [Index(Text)], new DateTimeOffset(2028, 1, 1, 0, 0, 0, TimeSpan.Zero));
     }
 
     private static object[] Case(string name, QueryRequest request, CoverageIndex index, bool expectedCovered) =>
