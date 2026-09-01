@@ -10,21 +10,34 @@ namespace Groundwork.Extensions.DependencyInjection;
 /// host started on.
 /// </summary>
 /// <remarks>
-/// Admission asks each connection for the kernel's runtime admission result. It does not write, and
-/// it does not apply physical schema unless a connection explicitly opted into development
-/// auto-apply; the provider seam delegates that choice to the kernel's plan-protection rule.
+/// Admission asks each connection for the kernel's runtime admission result. The public constructor
+/// is inspect-only because it has no trusted host-environment context. The dependency-injection
+/// registration enables a connection's development auto-apply only when the registered
+/// <c>IHostEnvironment</c> reports Development; the provider seam then delegates plan safety to the
+/// kernel's plan-protection rule.
 /// </remarks>
 public sealed class GroundworkAdmissionRunner
 {
     private readonly IGroundworkConnections connections;
     private readonly IOptionsMonitor<GroundworkConnectionOptions> options;
+    private readonly bool autoApplyAllowed;
 
+    /// <summary>Creates an inspect-only runner; use explicit schema application for mutations.</summary>
     public GroundworkAdmissionRunner(
         IGroundworkConnections connections,
         IOptionsMonitor<GroundworkConnectionOptions> options)
+        : this(connections, options, autoApplyAllowed: false)
+    {
+    }
+
+    internal GroundworkAdmissionRunner(
+        IGroundworkConnections connections,
+        IOptionsMonitor<GroundworkConnectionOptions> options,
+        bool autoApplyAllowed)
     {
         this.connections = connections ?? throw new ArgumentNullException(nameof(connections));
         this.options = options ?? throw new ArgumentNullException(nameof(options));
+        this.autoApplyAllowed = autoApplyAllowed;
     }
 
     /// <summary>The verdict from the last pass, or null before the host has started.</summary>
@@ -65,7 +78,7 @@ public sealed class GroundworkAdmissionRunner
         try
         {
             var units = configured.Units
-                .Select(unit => Admit(connection, unit, configured.AutoApplyOnStartup))
+                .Select(unit => Admit(connection, unit, autoApplyAllowed && configured.AutoApplyOnStartup))
                 .ToArray();
             var status = new[]
                 {

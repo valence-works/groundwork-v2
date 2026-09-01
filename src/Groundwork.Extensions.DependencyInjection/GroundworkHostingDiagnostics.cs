@@ -23,6 +23,9 @@ public static class GroundworkHostingDiagnostics
 
     /// <summary>The deployed database does not advertise a capability the application requires.</summary>
     public const string CapabilityNotAdvertised = "GW-HOST-006";
+
+    /// <summary>Auto-apply was enabled outside the Development host environment.</summary>
+    public const string AutoApplyOnStartupNotAllowed = "GW-HOST-007";
 }
 
 /// <summary>A hosting refusal carrying a stable <c>GW-HOST-*</c> code and a named corrective action.</summary>

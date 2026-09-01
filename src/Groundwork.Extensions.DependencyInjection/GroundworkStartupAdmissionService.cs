@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace Groundwork.Extensions.DependencyInjection;
 
@@ -10,23 +11,43 @@ namespace Groundwork.Extensions.DependencyInjection;
 /// <remarks>
 /// A blocked verdict refuses startup with <c>GW-HOST-005</c> rather than letting the first request
 /// discover it. A degraded verdict is logged and the host starts — physical index drift makes
-/// dependent query shapes refuse, not the whole application.
+/// dependent query shapes refuse, not the whole application. Auto-apply is admitted only for a
+/// Development host; a non-Development host refuses it with <c>GW-HOST-007</c> before admission can
+/// ask a provider to apply anything.
 /// </remarks>
 internal sealed class GroundworkStartupAdmissionService : IHostedService
 {
     private readonly GroundworkAdmissionRunner runner;
     private readonly ILogger<GroundworkStartupAdmissionService> logger;
+    private readonly IGroundworkConnections connections;
+    private readonly IOptionsMonitor<GroundworkConnectionOptions> options;
+    private readonly bool isDevelopment;
+    private readonly string environmentName;
 
     public GroundworkStartupAdmissionService(
         GroundworkAdmissionRunner runner,
-        ILogger<GroundworkStartupAdmissionService> logger)
+        ILogger<GroundworkStartupAdmissionService> logger,
+        IGroundworkConnections connections,
+        IOptionsMonitor<GroundworkConnectionOptions> options,
+        bool isDevelopment,
+        string environmentName)
     {
         this.runner = runner ?? throw new ArgumentNullException(nameof(runner));
         this.logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        this.connections = connections ?? throw new ArgumentNullException(nameof(connections));
+        this.options = options ?? throw new ArgumentNullException(nameof(options));
+        this.isDevelopment = isDevelopment;
+        this.environmentName = environmentName ?? throw new ArgumentNullException(nameof(environmentName));
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
+        var autoApplyConnections = connections.Names
+            .Where(name => options.Get(name).AutoApplyOnStartup)
+            .ToArray();
+        if (autoApplyConnections.Length != 0 && !isDevelopment)
+            throw RefuseAutoApply(autoApplyConnections, environmentName);
+
         var report = runner.Run();
         foreach (var connection in report.Connections)
         {
@@ -59,6 +80,17 @@ internal sealed class GroundworkStartupAdmissionService : IHostedService
     }
 
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    private static GroundworkHostingException RefuseAutoApply(
+        IReadOnlyList<string> connectionNames,
+        string environmentName) =>
+        new(
+            GroundworkHostingDiagnostics.AutoApplyOnStartupNotAllowed,
+            $"Groundwork connection(s) {string.Join(", ", connectionNames.Select(name => $"'{name}'"))} " +
+            $"enable AutoApplyOnStartup in the non-Development host environment '{environmentName}'. " +
+            "Runtime schema auto-apply is allowed only when the host environment is Development. " +
+            "Use `groundwork plan` to review the deployment plan, then `groundwork apply --safe` " +
+            "as the authorized deployment path.");
 
     private static GroundworkHostingException Refuse(GroundworkConnectionAdmission connection)
     {

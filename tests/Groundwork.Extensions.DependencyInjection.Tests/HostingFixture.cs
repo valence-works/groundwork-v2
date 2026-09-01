@@ -3,6 +3,7 @@ using Groundwork.Kernel;
 using Groundwork.Store;
 using Groundwork.Testing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Hosting;
 
 namespace Groundwork.Extensions.DependencyInjection.Tests;
@@ -63,10 +64,13 @@ internal sealed class HostingFixture
         connection.Schema.Apply(unit);
     }
 
-    internal ServiceCollection Services()
+    internal ServiceCollection Services(string? environmentName = null, bool includeEnvironment = true)
     {
         var services = new ServiceCollection();
         services.AddLogging();
+        if (includeEnvironment)
+            services.AddSingleton<IHostEnvironment>(new TestHostEnvironment(
+                environmentName ?? Environments.Development));
         return services;
     }
 
@@ -79,5 +83,16 @@ internal sealed class HostingFixture
     {
         foreach (var service in provider.GetServices<IHostedService>())
             await service.StartAsync(CancellationToken.None);
+    }
+
+    private sealed class TestHostEnvironment(string environmentName) : IHostEnvironment
+    {
+        public string EnvironmentName { get; set; } = environmentName;
+
+        public string ApplicationName { get; set; } = typeof(HostingFixture).Assembly.GetName().Name!;
+
+        public string ContentRootPath { get; set; } = AppContext.BaseDirectory;
+
+        public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
     }
 }
