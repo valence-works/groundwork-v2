@@ -10,9 +10,11 @@ namespace Groundwork.Extensions.DependencyInjection;
 /// host started on.
 /// </summary>
 /// <remarks>
-/// Admission asks each connection for the kernel's runtime admission result. It does not write, and
-/// it does not apply physical schema unless a connection explicitly opted into development
-/// auto-apply; the provider seam delegates that choice to the kernel's plan-protection rule.
+/// Admission asks each connection for the kernel's runtime admission result. The public constructor
+/// is inspect-only because it has no trusted host-environment context. The dependency-injection
+/// registration enables a connection's development auto-apply only when the registered
+/// <c>IHostEnvironment</c> reports Development; the provider seam then delegates plan safety to the
+/// kernel's plan-protection rule.
 /// </remarks>
 public sealed class GroundworkAdmissionRunner
 {
@@ -20,6 +22,7 @@ public sealed class GroundworkAdmissionRunner
     private readonly IOptionsMonitor<GroundworkConnectionOptions> options;
     private readonly bool autoApplyAllowed;
 
+    /// <summary>Creates an inspect-only runner; use explicit schema application for mutations.</summary>
     public GroundworkAdmissionRunner(
         IGroundworkConnections connections,
         IOptionsMonitor<GroundworkConnectionOptions> options)

@@ -88,7 +88,7 @@ internal sealed class GroundworkStartupAdmissionService : IHostedService
             GroundworkHostingDiagnostics.AutoApplyOnStartupNotAllowed,
             $"Groundwork connection(s) {string.Join(", ", connectionNames.Select(name => $"'{name}'"))} " +
             $"enable AutoApplyOnStartup in the non-Development host environment '{environmentName}'. " +
-            "Runtime schema auto-apply is allowed only in Development and test hosts. " +
+            "Runtime schema auto-apply is allowed only when the host environment is Development. " +
             "Use `groundwork plan` to review the deployment plan, then `groundwork apply --safe` " +
             "as the authorized deployment path.");
 

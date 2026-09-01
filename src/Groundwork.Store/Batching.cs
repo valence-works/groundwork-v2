@@ -28,6 +28,8 @@ public static class BatchWriteCapabilities
 
     public static CapabilityId ExactRetention { get; } = new("groundwork.storage.exact-retention");
 
+    public static CapabilityId ExactRetentionAffectedKeys { get; } = new("groundwork.storage.exact-retention-affected-keys");
+
     public static CapabilityId CompareAndDelete { get; } = new("groundwork.storage.compare-and-delete");
 
     public static CapabilityId SetMutation { get; } = new("groundwork.storage.set-mutation");
@@ -67,6 +69,11 @@ public static class BatchWriteCapabilities
         "Replay-stable exact retention",
         "Records a caller operation identity and immutable retention result so acknowledgement-loss retries replay without deleting again.");
 
+    public static CapabilityDescriptor ExactRetentionAffectedKeysDescriptor { get; } = new(
+        ExactRetentionAffectedKeys,
+        "Bounded affected retention keys",
+        "Atomically returns complete, distinct, deterministic values of one retained-row projection key with a finite caller-declared bound; the values replay with exact retention.");
+
     public static CapabilityDescriptor CompareAndDeleteDescriptor { get; } = new(
         CompareAndDelete,
         "Atomic compare-and-delete",
@@ -84,7 +91,7 @@ public static class BatchWriteCapabilities
         EvidenceGatedByDefault: true);
 
     public static IReadOnlyList<CapabilityDescriptor> All { get; } =
-        Array.AsReadOnly(new[] { StagedUnitOfWorkDescriptor, PerRowOutcomesDescriptor, ProviderSequenceDescriptor, AppendIdempotencyDescriptor, ExactAppendOutcomesDescriptor, DurableHighWaterInspectionDescriptor, ExactRetentionDescriptor, CompareAndDeleteDescriptor, SetMutationDescriptor });
+        Array.AsReadOnly(new[] { StagedUnitOfWorkDescriptor, PerRowOutcomesDescriptor, ProviderSequenceDescriptor, AppendIdempotencyDescriptor, ExactAppendOutcomesDescriptor, DurableHighWaterInspectionDescriptor, ExactRetentionDescriptor, ExactRetentionAffectedKeysDescriptor, CompareAndDeleteDescriptor, SetMutationDescriptor });
 
     public static IReadOnlyList<CapabilityDescriptor> ForProvider(
         string provider,
@@ -115,7 +122,8 @@ public static class BatchWriteCapabilities
         bool exactRetention,
         bool atomicCommit = false,
         bool compareAndDelete = false,
-        string? setMutation = null)
+        string? setMutation = null,
+        bool exactRetentionAffectedKeys = false)
     {
         var descriptors = new List<CapabilityDescriptor>
         {
@@ -150,6 +158,11 @@ public static class BatchWriteCapabilities
             descriptors.Add(ExactRetentionDescriptor with
             {
                 Description = $"Replays operation-identified retention results on {provider}; the operation ledger and cleanup are durable."
+            });
+        if (exactRetentionAffectedKeys)
+            descriptors.Add(ExactRetentionAffectedKeysDescriptor with
+            {
+                Description = $"Returns complete, distinct, deterministically ordered affected projection values on {provider}; the finite bound is checked before row mutation and the values are persisted for replay."
             });
         if (atomicCommit)
             descriptors.Add(AtomicCommitDescriptor with
@@ -811,11 +824,16 @@ internal class BatchStorageSession : IStorageSession, IProviderBoundStorageSessi
     {
         var compareAndDelete = inner is ICompareAndDeleteStorageSession;
         var setMutation = inner is ISetMutationStorageSession;
-        return (compareAndDelete, setMutation) switch
+        var affectedKeys = inner is IExactRetentionAffectedKeysStorageSession;
+        return (affectedKeys, compareAndDelete, setMutation) switch
         {
-            (true, true) => new BatchCompareAndDeleteSetMutationStorageSession(inner, context),
-            (true, false) => new BatchCompareAndDeleteStorageSession(inner, context),
-            (false, true) => new BatchSetMutationStorageSession(inner, context),
+            (true, true, true) => new BatchAffectedCompareAndDeleteSetMutationStorageSession(inner, context),
+            (true, true, false) => new BatchAffectedCompareAndDeleteStorageSession(inner, context),
+            (true, false, true) => new BatchAffectedSetMutationStorageSession(inner, context),
+            (true, false, false) => new BatchAffectedStorageSession(inner, context),
+            (false, true, true) => new BatchCompareAndDeleteSetMutationStorageSession(inner, context),
+            (false, true, false) => new BatchCompareAndDeleteStorageSession(inner, context),
+            (false, false, true) => new BatchSetMutationStorageSession(inner, context),
             _ => new BatchStorageSession(inner, context)
         };
     }
@@ -981,6 +999,10 @@ internal class BatchStorageSession : IStorageSession, IProviderBoundStorageSessi
 
     public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null)
     {
+        if (options?.AffectedKeyProjection is not null)
+            throw new InvalidOperationException(
+                "GW-RETENTION-006: affected-key projection requires operation-identified exact retention; " +
+                "use ApplyRetention(OperationId, options).");
         context.FlushAll();
         return inner is IRetentionStorageSession native
             ? native.ApplyRetention(options)
@@ -989,6 +1011,10 @@ internal class BatchStorageSession : IStorageSession, IProviderBoundStorageSessi
 
     public async ValueTask<RetentionResult> ApplyRetentionAsync(RetentionExecutionOptions? options = null)
     {
+        if (options?.AffectedKeyProjection is not null)
+            throw new InvalidOperationException(
+                "GW-RETENTION-006: affected-key projection requires operation-identified exact retention; " +
+                "use ApplyRetention(OperationId, options).");
         var cancellationToken = options?.CancellationToken ?? CancellationToken.None;
         await context.FlushAllAsync(cancellationToken).ConfigureAwait(false);
         return inner is IRetentionStorageSession native
@@ -1016,6 +1042,8 @@ internal class BatchStorageSession : IStorageSession, IProviderBoundStorageSessi
 
     public RetentionOperationResult ApplyRetention(OperationId operationId, RetentionExecutionOptions? options = null)
     {
+        if (options?.AffectedKeyProjection is not null && inner is not IExactRetentionAffectedKeysStorageSession)
+            throw new NotSupportedException("GW-RETENTION-007: the provider does not advertise bounded affected retention keys.");
         context.FlushAll();
         return inner is IExactRetentionStorageSession exact
             ? exact.ApplyRetention(operationId, options)
@@ -1026,6 +1054,8 @@ internal class BatchStorageSession : IStorageSession, IProviderBoundStorageSessi
         OperationId operationId,
         RetentionExecutionOptions? options = null)
     {
+        if (options?.AffectedKeyProjection is not null && inner is not IExactRetentionAffectedKeysStorageSession)
+            throw new NotSupportedException("GW-RETENTION-007: the provider does not advertise bounded affected retention keys.");
         await context.FlushAllAsync(options?.CancellationToken ?? CancellationToken.None).ConfigureAwait(false);
         return inner is IExactRetentionStorageSession exact
             ? await exact.ApplyRetentionAsync(operationId, options).ConfigureAwait(false)
@@ -1168,7 +1198,7 @@ internal class BatchCompareAndDeleteStorageSession : BatchStorageSession, ICompa
     }
 }
 
-internal sealed class BatchSetMutationStorageSession : BatchStorageSession, ISetMutationStorageSession
+internal class BatchSetMutationStorageSession : BatchStorageSession, ISetMutationStorageSession
 {
     internal BatchSetMutationStorageSession(IStorageSession inner, BatchContext context)
         : base(inner, context)
@@ -1192,7 +1222,7 @@ internal sealed class BatchSetMutationStorageSession : BatchStorageSession, ISet
         DeleteWhereWithBarrierAsync(where, cancellationToken);
 }
 
-internal sealed class BatchCompareAndDeleteSetMutationStorageSession : BatchCompareAndDeleteStorageSession, ISetMutationStorageSession
+internal class BatchCompareAndDeleteSetMutationStorageSession : BatchCompareAndDeleteStorageSession, ISetMutationStorageSession
 {
     internal BatchCompareAndDeleteSetMutationStorageSession(IStorageSession inner, BatchContext context)
         : base(inner, context)
@@ -1214,4 +1244,39 @@ internal sealed class BatchCompareAndDeleteSetMutationStorageSession : BatchComp
         Predicate where,
         CancellationToken cancellationToken = default) =>
         DeleteWhereWithBarrierAsync(where, cancellationToken);
+}
+
+// Keep the optional projection capability structural: a batch wrapper advertises it only when
+// the wrapped provider does. This also keeps standalone Mongo (which intentionally has no
+// transaction capability) from appearing to support affected-key retention through a UOW.
+internal sealed class BatchAffectedStorageSession : BatchStorageSession, IExactRetentionAffectedKeysStorageSession
+{
+    internal BatchAffectedStorageSession(IStorageSession inner, BatchContext context)
+        : base(inner, context)
+    {
+    }
+}
+
+internal sealed class BatchAffectedCompareAndDeleteStorageSession : BatchCompareAndDeleteStorageSession, IExactRetentionAffectedKeysStorageSession
+{
+    internal BatchAffectedCompareAndDeleteStorageSession(IStorageSession inner, BatchContext context)
+        : base(inner, context)
+    {
+    }
+}
+
+internal sealed class BatchAffectedSetMutationStorageSession : BatchSetMutationStorageSession, IExactRetentionAffectedKeysStorageSession
+{
+    internal BatchAffectedSetMutationStorageSession(IStorageSession inner, BatchContext context)
+        : base(inner, context)
+    {
+    }
+}
+
+internal sealed class BatchAffectedCompareAndDeleteSetMutationStorageSession : BatchCompareAndDeleteSetMutationStorageSession, IExactRetentionAffectedKeysStorageSession
+{
+    internal BatchAffectedCompareAndDeleteSetMutationStorageSession(IStorageSession inner, BatchContext context)
+        : base(inner, context)
+    {
+    }
 }

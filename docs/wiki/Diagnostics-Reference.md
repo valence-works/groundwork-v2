@@ -227,6 +227,9 @@ a set-based update bumps the token itself.
 | `GW-RETENTION-002` | Malformed/legacy exact retention result — use a new nonce |
 | `GW-RETENTION-003` | Provider does not advertise exact retention |
 | `GW-RETENTION-004` | `RetentionIdempotency` declared without `Retention` |
+| `GW-RETENTION-005` | Bounded affected-key projection exceeded its finite maximum; no rows changed |
+| `GW-RETENTION-006` | Status-only retention received an affected-key projection |
+| `GW-RETENTION-007` | Provider does not advertise bounded affected-key retention |
 | `GW-INSPECT-001` | Provider does not advertise durable inspection |
 | `GW-INSPECT-002` | Unit has no `ProviderSequence` column |
 

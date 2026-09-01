@@ -52,6 +52,7 @@ internal sealed class MongoStoreConnection : IStorageProviderConnection, IQueryA
                 exactAppendOutcomes: true,
                 durableHighWaterInspection: true,
                 exactRetention: true,
+                exactRetentionAffectedKeys: true,
                 atomicCommit: inner.ProviderSequenceFit is ProviderFit.Supported,
                 compareAndDelete: inner.ProviderSequenceFit is ProviderFit.Supported,
                 setMutation: "Updates or deletes every document matching an index-covered portable predicate on MongoDB with one updateMany/deleteMany, and reports matchedCount/deletedCount. Unlike the relational providers, a multi-document updateMany/deleteMany is atomic only when it runs inside a transaction: open a unit of work on a transaction-capable deployment when the whole set must apply or none of it.");
@@ -63,6 +64,8 @@ internal sealed class MongoStoreConnection : IStorageProviderConnection, IQueryA
                 .Where(descriptor => descriptor.Id != BatchWriteCapabilities.DurableHighWaterInspection ||
                                      inner.ProviderSequenceFit is ProviderFit.Supported)
                 .Where(descriptor => descriptor.Id != BatchWriteCapabilities.ExactRetention ||
+                                     inner.ProviderSequenceFit is ProviderFit.Supported)
+                .Where(descriptor => descriptor.Id != BatchWriteCapabilities.ExactRetentionAffectedKeys ||
                                      inner.ProviderSequenceFit is ProviderFit.Supported)
                 .Where(descriptor => descriptor.Id != BatchWriteCapabilities.ProviderSequence ||
                                      inner.ProviderSequenceFit is ProviderFit.Supported)
@@ -574,7 +577,7 @@ internal class MongoStoreSession(
     }
 }
 
-internal class MongoExactStoreSession : MongoStoreSession, IExactAppendStorageSession, ICompareAndDeleteStorageSession, IStorageInspectionSession, IExactRetentionStorageSession
+internal class MongoExactStoreSession : MongoStoreSession, IExactAppendStorageSession, ICompareAndDeleteStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IExactRetentionAffectedKeysStorageSession
 {
     private readonly IMongoStorageSession exactInner;
 

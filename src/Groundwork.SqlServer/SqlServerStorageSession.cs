@@ -13,7 +13,7 @@ using Groundwork.Diagnostics;
 
 namespace Groundwork.SqlServer;
 
-internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
+internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IExactRetentionAffectedKeysStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
 {
     private readonly SqlServerProviderConnection owner;
     private readonly SqlConnection connection;
@@ -1590,6 +1590,62 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
     private sealed class SqlServerRetentionAdapter(
         SqlServerStorageSession session) : IRelationalRetentionAdapter
     {
+        public async ValueTask<IReadOnlyList<object?>> ReadAffectedKeys(
+            RelationalExactRetentionOperation operation,
+            RelationalExecution execution)
+        {
+            var projection = operation.Retention.Options.AffectedKeyProjection ??
+                throw new InvalidOperationException("An affected-key projection is required.");
+            var declaration = operation.Retention.Declaration;
+            var partition = declaration.PartitionColumns.Count == 0
+                ? string.Empty
+                : $"PARTITION BY {string.Join(", ", declaration.PartitionColumns.Select(Quote))} ";
+            var scoped = operation.Unit.Columns.Any(column => column.Name == SqlServerSchemaCoordinator.ScopeColumn);
+            var scope = scoped
+                ? $" WHERE {Quote(SqlServerSchemaCoordinator.ScopeColumn)}=@__groundwork_scope"
+                : string.Empty;
+            var ordering = string.Join(", ", [
+                $"{Quote(declaration.OrderColumn)} DESC",
+                .. operation.Unit.Key.Columns
+                    .Where(column => !string.Equals(column, declaration.OrderColumn, StringComparison.Ordinal))
+                    .Select(column => $"{Quote(column)} ASC")]);
+            var projectionColumn = Quote(projection.Column);
+            if (session.Column(projection.Column).Type == PortableType.String)
+                projectionColumn += " COLLATE Latin1_General_100_BIN2";
+            var affectedKey = Quote("__groundwork_affected_key");
+            using var command = session.Command(
+                $"WITH ranked AS (" +
+                $"SELECT {projectionColumn} AS {affectedKey}, ROW_NUMBER() OVER ({partition}ORDER BY {ordering}) AS __groundwork_retention_rank " +
+                $"FROM {Quote(operation.Unit.Name)}{scope}) " +
+                $"SELECT DISTINCT TOP (@affected_limit) {affectedKey} FROM ranked " +
+                $"WHERE __groundwork_retention_rank > @keep ORDER BY {affectedKey};");
+            SqlServerProviderConnection.AddParameter(command, "@keep", operation.Retention.KeepNewest,
+                new ColumnDefinition { Name = "keep", Type = PortableType.Int32, IsNullable = false });
+            SqlServerProviderConnection.AddParameter(command, "@affected_limit", checked(projection.MaxDistinctValues + 1),
+                new ColumnDefinition { Name = "affected_limit", Type = PortableType.Int32, IsNullable = false });
+            if (scoped)
+                SqlServerProviderConnection.AddParameter(command, "@__groundwork_scope", operation.Scope,
+                    new ColumnDefinition
+                    {
+                        Name = SqlServerSchemaCoordinator.ScopeColumn,
+                        Type = PortableType.String,
+                        MaxLength = 128,
+                        IsNullable = false
+                    });
+            await using var readerScope = await execution.ExecuteReader(command).ConfigureAwait(false);
+            var reader = readerScope.Reader;
+            var values = new List<object?>(Math.Min(projection.MaxDistinctValues + 1, 4096));
+            var column = session.Column(projection.Column);
+            while (await execution.Read(reader).ConfigureAwait(false))
+                values.Add(reader.IsDBNull(0) ? null : FromSqlServer(reader.GetValue(0), column));
+            session.commandObserver?.Observe(new ProviderCommandEvent(
+                "sqlserver.retention-affected-keys",
+                command.CommandText,
+                ProviderCommandKind.Read,
+                IsProbe: false));
+            return values;
+        }
+
         public async ValueTask<int> DeleteBatch(
             RelationalRetentionOperation operation,
             RelationalExecution execution)
@@ -1605,7 +1661,9 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
             var keys = string.Join(", ", keyColumns.Select(Quote));
             var ordering = string.Join(", ", [
                 $"{Quote(declaration.OrderColumn)} DESC",
-                .. keyColumns.Select(column => $"{Quote(column)} ASC")]);
+                .. keyColumns
+                    .Where(column => !string.Equals(column, declaration.OrderColumn, StringComparison.Ordinal))
+                    .Select(column => $"{Quote(column)} ASC")]);
             var equality = string.Join(" AND ", keyColumns.Select(column =>
                 $"target.{Quote(column)}=victim.{Quote(column)}"));
             using var command = session.Command($"WITH ranked AS (" +

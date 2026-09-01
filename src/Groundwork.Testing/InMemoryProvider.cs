@@ -54,6 +54,7 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
             exactAppendOutcomes: true,
             durableHighWaterInspection: true,
             exactRetention: true,
+            exactRetentionAffectedKeys: true,
             atomicCommit: true,
             compareAndDelete: true);
         Catalog = new InMemoryProviderCatalog(database);
@@ -567,7 +568,7 @@ internal static class StorageDeclaration
     };
 }
 
-internal class InMemoryStorageSession : IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
+internal class InMemoryStorageSession : IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IExactRetentionAffectedKeysStorageSession, IPrivilegedCrossScopeQuerySession
 {
     private readonly InMemoryDatabase database;
     private InMemoryUnitState state;
@@ -1202,6 +1203,7 @@ internal class InMemoryStorageSession : IStorageSession, IProviderBoundStorageSe
             $"Storage unit '{Unit.Name}' does not declare retention idempotency; declare RetentionIdempotency before using operation-identified retention.");
         options ??= new RetentionExecutionOptions();
         RetentionSessionExtensions.ValidateExecutionOptions(options);
+        RetentionAffectedKeys.Validate(Unit, options);
         if (string.IsNullOrWhiteSpace(operationId.Nonce))
             throw new ArgumentException("An operation id requires a non-empty nonce.", nameof(operationId));
         if (operationId.Nonce.Length > 256)
@@ -1217,7 +1219,10 @@ internal class InMemoryStorageSession : IStorageSession, IProviderBoundStorageSe
             var now = DateTimeOffset.UtcNow;
             ReclaimRetentionLedger(workingLedger, Unit.Id, now, declaration.Window);
             var key = new RetentionLedgerKey(Unit.Id, partition, operationId.Nonce);
-            var fingerprint = RetentionOperationCodec.Fingerprint(Unit, options);
+            // Keep the canonical fingerprint's global scope token provider-neutral; the
+            // dictionary partition uses "<global>" only as an internal storage key.
+            var scope = Access.Scope?.Value ?? string.Empty;
+            var fingerprint = RetentionOperationCodec.Fingerprint(Unit, operationId, scope, options);
             if (workingLedger.TryGetValue(key, out var existing) &&
                 IdempotencyRules.IsWithinWindow(existing.CommittedAt, now, declaration.Window))
             {
@@ -1230,6 +1235,7 @@ internal class InMemoryStorageSession : IStorageSession, IProviderBoundStorageSe
             // private snapshot and publish rows plus the ledger only after every batch has
             // completed. Cancellation therefore cannot leave a partially retained stream.
             var candidate = CurrentState().Clone();
+            var affectedKeys = AffectedKeys(candidate, options);
             var retention = ApplyRetentionCore(options, candidate);
             if (liveState)
                 database.Units[Unit.Id] = candidate;
@@ -1242,13 +1248,33 @@ internal class InMemoryStorageSession : IStorageSession, IProviderBoundStorageSe
                 RetentionOperationStatus.Executed,
                 retention.DeletedRows,
                 retention.Batches,
-                retention.Completed);
+                retention.Completed)
+            {
+                AffectedKeys = affectedKeys
+            };
             workingLedger[key] = new RetentionLedgerEntry(now, fingerprint, result);
             ledger.Clear();
             foreach (var pair in workingLedger)
                 ledger[pair.Key] = pair.Value;
             return result;
         }
+    }
+
+    private IReadOnlyList<object?> AffectedKeys(
+        InMemoryUnitState candidate,
+        RetentionExecutionOptions options)
+    {
+        var projection = options.AffectedKeyProjection;
+        if (projection is null || !candidate.Partitions.TryGetValue(partition, out var entries))
+            return Array.AsReadOnly(Array.Empty<object?>());
+        var declaration = Unit.Retention ?? throw new InvalidOperationException(
+            $"Storage unit '{Unit.Name}' does not declare retention.");
+        var victims = RetentionRows.OrderVictims(
+            Unit,
+            declaration,
+            RetentionSessionExtensions.EffectiveKeepNewest(Unit, options),
+            entries.Values.Select(entry => entry.Values));
+        return RetentionAffectedKeys.DistinctAndOrder(victims, projection, projection.MaxDistinctValues);
     }
 
     public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null)

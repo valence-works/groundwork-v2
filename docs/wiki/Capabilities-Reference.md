@@ -53,6 +53,7 @@ The public extension methods check first and refuse **before** provider work:
 | Exact append | `IExactAppendStorageSession` | `session.AppendWithOutcomes(...)` | `GW-APPEND-003` |
 | High-water inspection | `IStorageInspectionSession` | `session.Inspect()` | `GW-INSPECT-001` / `-002` |
 | Exact retention | `IExactRetentionStorageSession` | `session.ApplyRetention(operationId, …)` | `GW-RETENTION-003` |
+| Bounded affected retention keys | `IExactRetentionAffectedKeysStorageSession` | `session.ApplyRetention(operationId, options with { AffectedKeyProjection = … })` | `GW-RETENTION-005` / `-007` |
 | Compare-and-delete | `ICompareAndDeleteStorageSession` | `session.CompareAndDelete(...)` | capability absent |
 | Set-based mutation | `ISetMutationStorageSession` | `session.UpdateWhere(...)` / `session.DeleteWhere(...)` (aggregate default; `SetMutationOptions.Exact` for keyed outcomes) | `GW-SET-001` |
 | Cross-scope query | `IPrivilegedCrossScopeQuerySession` | `session.QueryAcrossScopes(...)` | `GW-ACCESS-001` / `-002` |

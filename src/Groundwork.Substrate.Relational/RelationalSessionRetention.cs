@@ -53,13 +53,15 @@ internal sealed class RelationalSessionRetention
         declaration.Validate(unit);
         var retention = Prepare(options);
         RetentionOperationCodec.ValidateOperation(operationId);
+        RetentionAffectedKeys.Validate(unit, retention.Options);
+        var scope = access.Scope?.Value ?? string.Empty;
         return new RelationalExactRetentionOperation(
             unit,
             declaration,
             retention,
             operationId,
-            access.Scope?.Value ?? string.Empty,
-            RetentionOperationCodec.Fingerprint(unit, retention.Options));
+            scope,
+            RetentionOperationCodec.Fingerprint(unit, operationId, scope, retention.Options));
     }
 
     internal async ValueTask<RetentionResult> Apply(
@@ -117,12 +119,18 @@ internal sealed class RelationalSessionRetention
             return Replay(operation, winner?.Fingerprint, winner?.SerializedResult);
         }
 
+        var affectedKeys = operation.Retention.Options.AffectedKeyProjection is { } projection
+            ? await ReadAffectedKeysAtomically(operation, projection, execution).ConfigureAwait(false)
+            : Array.Empty<object?>();
         var retention = await Apply(operation.Retention, execution).ConfigureAwait(false);
         var result = new RetentionOperationResult(
             RetentionOperationStatus.Executed,
             retention.DeletedRows,
             retention.Batches,
-            retention.Completed);
+            retention.Completed)
+        {
+            AffectedKeys = Array.AsReadOnly(affectedKeys.ToArray())
+        };
         if (!await adapter.CompleteLedger(
             operation,
             RetentionOperationCodec.SerializeResult(result),
@@ -132,6 +140,32 @@ internal sealed class RelationalSessionRetention
                 "The exact retention ledger could not be completed; its row deletes and ledger claim were rolled back.");
         }
         return result;
+    }
+
+    private async ValueTask<IReadOnlyList<object?>> ReadAffectedKeys(
+        RelationalExactRetentionOperation operation,
+        RetentionAffectedKeyProjection projection,
+        RelationalExecution execution)
+    {
+        var values = await adapter.ReadAffectedKeys(operation, execution).ConfigureAwait(false);
+        return RetentionAffectedKeys.DistinctAndOrderValues(
+            values,
+            projection,
+            projection.MaxDistinctValues);
+    }
+
+    private async ValueTask<IReadOnlyList<object?>> ReadAffectedKeysAtomically(
+        RelationalExactRetentionOperation operation,
+        RetentionAffectedKeyProjection projection,
+        RelationalExecution execution)
+    {
+        // PostgreSQL intentionally retains ReadCommitted for ordinary writes. Its affected-key
+        // adapter acquires a table write-intent lock immediately before capture instead, freezing
+        // the victim set for the subsequent bounded delete statements without changing isolation
+        // for unrelated transactions.
+        if (adapter is IRelationalAffectedRetentionSnapshotAdapter snapshot)
+            await snapshot.AcquireAffectedRetentionSnapshot(operation, execution).ConfigureAwait(false);
+        return await ReadAffectedKeys(operation, projection, execution).ConfigureAwait(false);
     }
 
     private static RetentionOperationResult Replay(
@@ -187,6 +221,10 @@ internal interface IRelationalRetentionAdapter
         RelationalRetentionOperation operation,
         RelationalExecution execution);
 
+    ValueTask<IReadOnlyList<object?>> ReadAffectedKeys(
+        RelationalExactRetentionOperation operation,
+        RelationalExecution execution);
+
     ValueTask<DateTimeOffset> PrepareLedger(
         RelationalExactRetentionOperation operation,
         RelationalExecution execution);
@@ -217,5 +255,12 @@ internal interface IRelationalRetentionAdapter
     ValueTask<bool> CompleteLedger(
         RelationalExactRetentionOperation operation,
         string serializedResult,
+        RelationalExecution execution);
+}
+
+internal interface IRelationalAffectedRetentionSnapshotAdapter
+{
+    ValueTask AcquireAffectedRetentionSnapshot(
+        RelationalExactRetentionOperation operation,
         RelationalExecution execution);
 }
