@@ -2340,6 +2340,57 @@ public sealed class SqliteProviderTests
     }
 
     [Fact]
+    public void Selected_non_nullable_order_index_is_used_without_a_temporary_sort()
+    {
+        using var connection = new SqliteConnection("Data Source=:memory:");
+        connection.Open();
+        using (var schema = connection.CreateCommand())
+        {
+            schema.CommandText = """
+                CREATE TABLE recent_events (last_seen INTEGER NOT NULL, id INTEGER NOT NULL);
+                CREATE INDEX ix_recent_events ON recent_events (last_seen DESC, id ASC);
+                INSERT INTO recent_events VALUES (3, 3), (2, 2), (1, 1);
+                """;
+            schema.ExecuteNonQuery();
+        }
+
+        var table = new TableId("recent_events");
+        var lastSeen = new ColumnRef(table, "last_seen", QueryType.Int64, isNullable: false);
+        var id = new ColumnRef(table, "id", QueryType.Int64, isNullable: false);
+        var request = new QueryRequest(
+            table,
+            Predicate.AlwaysTrue.Instance,
+            [
+                new OrderTerm(lastSeen, OrderDirection.Descending, NullOrder.First),
+                new OrderTerm(id, OrderDirection.Ascending, NullOrder.First)
+            ],
+            Projection.ColumnsOnly(lastSeen, id),
+            Paging.None);
+        var options = new QueryRenderOptions(
+            [new QueryIndexDeclaration(
+                "ix_recent_events",
+                [
+                    new QueryIndexColumn("last_seen", isNullable: false, QueryType.Int64),
+                    new QueryIndexColumn("id", isNullable: false, QueryType.Int64)
+                ])],
+            selectedIndex: "ix_recent_events");
+        var rendered = new SqliteQueryRenderer().Render(request, options);
+
+        using var explain = connection.CreateCommand();
+        explain.CommandText = "EXPLAIN QUERY PLAN " + rendered.CommandText.TrimEnd().TrimEnd(';');
+        RelationalQueryResultReader.AddParameters(explain, rendered);
+        using var reader = explain.ExecuteReader();
+        var details = new List<string>();
+        while (reader.Read())
+            details.Add(string.Join('\t', Enumerable.Range(0, reader.FieldCount).Select(index => reader.GetValue(index))));
+        var plan = string.Join(Environment.NewLine, details);
+
+        Assert.DoesNotContain(" IS NULL THEN", rendered.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.True(SqliteExplainPlanInspector.ChoseIndex(plan, "ix_recent_events"), plan);
+        Assert.DoesNotContain("TEMP B-TREE FOR ORDER BY", plan, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Store_lock_is_held_for_connection_lifetime()
     {
         using var store = TemporaryStore.Create();

@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using Groundwork.Kernel;
+using Groundwork.MySql;
 using Groundwork.MongoDb;
 using Groundwork.PostgreSql;
 using Groundwork.Query.Model;
@@ -1596,6 +1597,107 @@ public sealed class QueryRendererTests
         var mongo = new MongoQueryRenderer().Render(columnNotEqual);
         Assert.Contains("$and", mongo.Filter.ToString(), StringComparison.Ordinal);
         Assert.Contains("$ne", mongo.Filter.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Selected_non_nullable_index_omits_null_rank_but_preserves_provider_order_keys()
+    {
+        var nonNullName = new ColumnRef(Table, "nonNullName", QueryType.String, isNullable: false, maxLength: 100);
+        var nonNullGuid = new ColumnRef(Table, "nonNullGuid", QueryType.Guid, isNullable: false);
+        var request = Request(
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(nonNullName, OrderDirection.Ascending, NullOrder.Last),
+             new OrderTerm(Id, OrderDirection.Descending, NullOrder.First),
+             new OrderTerm(nonNullGuid, OrderDirection.Ascending, NullOrder.Last)],
+            Paging.None,
+            ResultShape.Rows.Instance,
+            Projection.ColumnsOnly(nonNullName, Id, nonNullGuid));
+        var options = new QueryRenderOptions(
+            [new QueryIndexDeclaration(
+                "ix_non_null_order",
+                [
+                    new QueryIndexColumn("nonNullName", isNullable: false, QueryType.String),
+                    new QueryIndexColumn("id", isNullable: false, QueryType.Int64),
+                    new QueryIndexColumn("nonNullGuid", isNullable: false, QueryType.Guid)
+                ],
+                QueryIndexPinning.ProviderDefault)],
+            selectedIndex: "ix_non_null_order");
+
+        var sqlite = new SqliteQueryRenderer().Render(request, options);
+        var postgres = new PostgreSqlQueryRenderer().Render(request, options);
+        var sqlServer = new SqlServerQueryRenderer().Render(request, options);
+        var mySql = new MySqlQueryRenderer().Render(request, options);
+
+        Assert.DoesNotContain(" IS NULL THEN", sqlite.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(" IS NULL THEN", postgres.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(" IS NULL THEN", sqlServer.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(" IS NULL THEN", mySql.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("string_agg", postgres.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("::text COLLATE \"C\"", postgres.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("DATALENGTH", sqlServer.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("CONVERT(char(36)", sqlServer.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("HEX(CONVERT", mySql.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("ORDER BY", sqlite.CommandText, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Relational_order_keeps_null_rank_when_selected_index_does_not_prove_non_null()
+    {
+        var request = Request(
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(Name, OrderDirection.Ascending, NullOrder.Last)],
+            Paging.None,
+            ResultShape.Rows.Instance,
+            Projection.ColumnsOnly(Name));
+        var options = new QueryRenderOptions(
+            [new QueryIndexDeclaration(
+                "ix_nullable_name",
+                [new QueryIndexColumn("name", isNullable: true, QueryType.String)],
+                QueryIndexPinning.ProviderDefault)],
+            selectedIndex: "ix_nullable_name");
+
+        foreach (var command in new[]
+        {
+            new SqliteQueryRenderer().Render(request, options),
+            new PostgreSqlQueryRenderer().Render(request, options),
+            new SqlServerQueryRenderer().Render(request, options),
+            new MySqlQueryRenderer().Render(request, options)
+        })
+            Assert.Contains(" IS NULL THEN", command.CommandText, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Non_nullable_selected_order_keeps_keyset_continuation_aligned_without_null_rank()
+    {
+        var nonNullName = new ColumnRef(Table, "nonNullName", QueryType.String, isNullable: false, maxLength: 100);
+        var options = new QueryRenderOptions(
+            [new QueryIndexDeclaration(
+                "ix_non_null_name",
+                [new QueryIndexColumn("nonNullName", isNullable: false, QueryType.String)],
+                QueryIndexPinning.ProviderDefault)],
+            selectedIndex: "ix_non_null_name");
+        var firstPage = Request(
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(nonNullName, OrderDirection.Ascending, NullOrder.Last)],
+            Paging.Keyset(1),
+            ResultShape.Rows.Instance,
+            Projection.ColumnsOnly(nonNullName));
+        var token = QueryContinuationToken.Encode(
+            firstPage,
+            options,
+            [QueryConstant.Of(nonNullName, "alpha")]);
+        var nextPage = Request(
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(nonNullName, OrderDirection.Ascending, NullOrder.Last)],
+            Paging.Continuation(token, 1),
+            ResultShape.Rows.Instance,
+            Projection.ColumnsOnly(nonNullName));
+
+        var command = new SqliteQueryRenderer().Render(nextPage, options);
+
+        Assert.DoesNotContain(" IS NULL THEN", command.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("nonNullName", command.CommandText, StringComparison.Ordinal);
+        Assert.Contains(" > @", command.CommandText, StringComparison.Ordinal);
     }
 
     private static object Render(object renderer, QueryRequest request) => renderer switch

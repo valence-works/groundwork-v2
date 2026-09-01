@@ -76,6 +76,18 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
         return rendered + ", DATALENGTH(" + RenderColumn(term.Column) + ") " + direction;
     }
 
+    protected override string RenderNonNullOrderTerm(OrderTerm term)
+    {
+        var direction = term.Direction == OrderDirection.Ascending ? "ASC" : "DESC";
+        if (term.Column.Type == QueryType.Guid)
+            return RenderGuidOrderKey(RenderColumn(term.Column)) + " " + direction;
+        var expression = RenderColumn(term.Column);
+        var rendered = expression + " " + direction;
+        return term.Column.Type == QueryType.String
+            ? rendered + ", DATALENGTH(" + expression + ") " + direction
+            : rendered;
+    }
+
     protected override string RenderDistinctPartition(ColumnRef column)
     {
         var expression = RenderColumn(column);

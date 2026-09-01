@@ -108,6 +108,14 @@ public sealed class MySqlQueryRenderer : RelationalQueryRenderer
         return $"CASE WHEN {expression} IS NULL THEN {nullRank} ELSE {nonNullRank} END ASC, {RenderOrdinalKey(expression)} {direction}";
     }
 
+    protected override string RenderNonNullOrderTerm(OrderTerm term)
+    {
+        var direction = term.Direction == OrderDirection.Ascending ? "ASC" : "DESC";
+        return term.Column.Type == QueryType.String
+            ? RenderOrdinalKey(RenderColumn(term.Column)) + " " + direction
+            : base.RenderNonNullOrderTerm(term);
+    }
+
     protected override string RenderCursorEquality(ColumnRef column, QueryConstant value, ICollection<QueryRenderParameter> parameters, ref int parameterIndex)
     {
         if (column.Type != QueryType.String)

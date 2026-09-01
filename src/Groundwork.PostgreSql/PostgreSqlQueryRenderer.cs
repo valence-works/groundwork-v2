@@ -67,6 +67,19 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
         return "CASE WHEN " + expression + " IS NULL THEN " + nullRank + " ELSE " + nonNullRank + " END ASC, " + key + " " + direction;
     }
 
+    protected override string RenderNonNullOrderTerm(OrderTerm term)
+    {
+        var direction = term.Direction == OrderDirection.Ascending ? "ASC" : "DESC";
+        if (term.Column.Type == QueryType.Guid)
+        {
+            var expression = RenderColumn(term.Column);
+            return "(" + expression + "::text COLLATE \"C\") " + direction;
+        }
+        if (term.Column.Type == QueryType.String)
+            return RenderOrdinalKey(RenderColumn(term.Column)) + " " + direction;
+        return base.RenderNonNullOrderTerm(term);
+    }
+
     protected override string RenderRange(
         Predicate.Range range,
         ICollection<QueryRenderParameter> parameters,
