@@ -1224,7 +1224,17 @@ public abstract class RelationalQueryRenderer
             selectedIndex.Columns.Any(column => string.Equals(column, term.Column.Name, StringComparison.Ordinal)) &&
             !selectedIndex.NullableColumns.Contains(term.Column.Name) &&
             (joinedColumnScope.Value is not { } scope || term.Column.Table == scope.Join.SourceTable);
-        return RenderOrderTerm(term, provesNonNull);
+        var column = term.Column;
+        var carrier = new ColumnRef(
+            column.Table,
+            column.Name,
+            column.Type,
+            isNullable: !provesNonNull,
+            maxLength: column.MaxLength,
+            decimalPrecision: column.DecimalPrecision,
+            decimalScale: column.DecimalScale,
+            stringComparison: column.StringComparison);
+        return RenderOrderTerm(new OrderTerm(carrier, term.Direction, term.NullOrder));
     }
 
     protected string RenderPredicate(
@@ -1406,25 +1416,11 @@ public abstract class RelationalQueryRenderer
     {
         var expression = RenderColumn(term.Column);
         var direction = term.Direction == OrderDirection.Ascending ? "ASC" : "DESC";
+        if (!term.Column.IsNullable)
+            return expression + " " + direction;
         var nullRank = term.NullOrder == NullOrder.First ? "0" : "1";
         var nonNullRank = term.NullOrder == NullOrder.First ? "1" : "0";
         return "CASE WHEN " + expression + " IS NULL THEN " + nullRank + " ELSE " + nonNullRank + " END ASC, " + expression + " " + direction;
-    }
-
-    /// <summary>
-    /// Renders one ordered column whose selected index declaration has proven that null values
-    /// cannot occur. Providers override <see cref="RenderNonNullOrderTerm"/> when their portable
-    /// ordering contract needs a provider-specific key (for example ordinal strings or GUIDs).
-    /// </summary>
-    protected virtual string RenderOrderTerm(OrderTerm term, bool orderedColumnIsNonNullable) =>
-        orderedColumnIsNonNullable ? RenderNonNullOrderTerm(term) : RenderOrderTerm(term);
-
-    /// <summary>Renders an order term without a null-rank expression.</summary>
-    protected virtual string RenderNonNullOrderTerm(OrderTerm term)
-    {
-        var expression = RenderColumn(term.Column);
-        var direction = term.Direction == OrderDirection.Ascending ? "ASC" : "DESC";
-        return expression + " " + direction;
     }
 
     protected virtual string RenderContains(string expression, string parameter) =>

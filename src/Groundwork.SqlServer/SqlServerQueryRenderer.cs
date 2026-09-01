@@ -65,6 +65,8 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
         {
             var guidExpression = RenderGuidOrderKey(RenderColumn(term.Column));
             var guidDirection = term.Direction == OrderDirection.Ascending ? "ASC" : "DESC";
+            if (!term.Column.IsNullable)
+                return guidExpression + " " + guidDirection;
             var guidNullRank = term.NullOrder == NullOrder.First ? "0" : "1";
             var guidNonNullRank = term.NullOrder == NullOrder.First ? "1" : "0";
             return "CASE WHEN " + RenderColumn(term.Column) + " IS NULL THEN " + guidNullRank + " ELSE " + guidNonNullRank + " END ASC, " + guidExpression + " " + guidDirection;
@@ -74,18 +76,6 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
             return rendered;
         var direction = term.Direction == OrderDirection.Ascending ? "ASC" : "DESC";
         return rendered + ", DATALENGTH(" + RenderColumn(term.Column) + ") " + direction;
-    }
-
-    protected override string RenderNonNullOrderTerm(OrderTerm term)
-    {
-        var direction = term.Direction == OrderDirection.Ascending ? "ASC" : "DESC";
-        if (term.Column.Type == QueryType.Guid)
-            return RenderGuidOrderKey(RenderColumn(term.Column)) + " " + direction;
-        var expression = RenderColumn(term.Column);
-        var rendered = expression + " " + direction;
-        return term.Column.Type == QueryType.String
-            ? rendered + ", DATALENGTH(" + expression + ") " + direction
-            : rendered;
     }
 
     protected override string RenderDistinctPartition(ColumnRef column)

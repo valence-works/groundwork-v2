@@ -1643,12 +1643,15 @@ public sealed class QueryRendererTests
     [Fact]
     public void Relational_order_keeps_null_rank_when_selected_index_does_not_prove_non_null()
     {
+        // The request metadata may be optimistic; only the selected index declaration can
+        // prove that an order column is non-null for index-compatible rendering.
+        var requestName = new ColumnRef(Table, "name", QueryType.String, isNullable: false, maxLength: 100);
         var request = Request(
             Predicate.AlwaysTrue.Instance,
-            [new OrderTerm(Name, OrderDirection.Ascending, NullOrder.Last)],
+            [new OrderTerm(requestName, OrderDirection.Ascending, NullOrder.Last)],
             Paging.None,
             ResultShape.Rows.Instance,
-            Projection.ColumnsOnly(Name));
+            Projection.ColumnsOnly(requestName));
         var options = new QueryRenderOptions(
             [new QueryIndexDeclaration(
                 "ix_nullable_name",

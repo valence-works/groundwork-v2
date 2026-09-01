@@ -52,6 +52,8 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
             var guidExpression = RenderColumn(term.Column);
             var guidKey = "(" + guidExpression + "::text COLLATE \"C\")";
             var guidDirection = term.Direction == OrderDirection.Ascending ? "ASC" : "DESC";
+            if (!term.Column.IsNullable)
+                return guidKey + " " + guidDirection;
             var guidNullRank = term.NullOrder == NullOrder.First ? "0" : "1";
             var guidNonNullRank = term.NullOrder == NullOrder.First ? "1" : "0";
             return "CASE WHEN " + guidExpression + " IS NULL THEN " + guidNullRank + " ELSE " + guidNonNullRank + " END ASC, " + guidKey + " " + guidDirection;
@@ -62,22 +64,11 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
         var expression = RenderColumn(term.Column);
         var key = RenderOrdinalKey(expression);
         var direction = term.Direction == OrderDirection.Ascending ? "ASC" : "DESC";
+        if (!term.Column.IsNullable)
+            return key + " " + direction;
         var nullRank = term.NullOrder == NullOrder.First ? "0" : "1";
         var nonNullRank = term.NullOrder == NullOrder.First ? "1" : "0";
         return "CASE WHEN " + expression + " IS NULL THEN " + nullRank + " ELSE " + nonNullRank + " END ASC, " + key + " " + direction;
-    }
-
-    protected override string RenderNonNullOrderTerm(OrderTerm term)
-    {
-        var direction = term.Direction == OrderDirection.Ascending ? "ASC" : "DESC";
-        if (term.Column.Type == QueryType.Guid)
-        {
-            var expression = RenderColumn(term.Column);
-            return "(" + expression + "::text COLLATE \"C\") " + direction;
-        }
-        if (term.Column.Type == QueryType.String)
-            return RenderOrdinalKey(RenderColumn(term.Column)) + " " + direction;
-        return base.RenderNonNullOrderTerm(term);
     }
 
     protected override string RenderRange(
