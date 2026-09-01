@@ -970,7 +970,11 @@ public sealed class LifecycleCapabilityProofTests
             var affectedRead = Assert.Single(observer.Events.Where(item =>
                 item.Operation.Contains("affected-keys", StringComparison.OrdinalIgnoreCase)));
             Assert.Equal(ProviderCommandKind.Read, affectedRead.Kind);
-            Assert.Contains("affected_limit", affectedRead.CommandText ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+            var boundedCommand = affectedRead.CommandText ?? string.Empty;
+            if (string.Equals(provider, "mongodb", StringComparison.Ordinal))
+                Assert.Contains("limit:", boundedCommand, StringComparison.OrdinalIgnoreCase);
+            else
+                Assert.Contains("affected_limit", boundedCommand, StringComparison.OrdinalIgnoreCase);
         }
         var replayed = session.ApplyRetention(operation, options);
         Assert.Equal(RetentionOperationStatus.Replayed, replayed.Status);

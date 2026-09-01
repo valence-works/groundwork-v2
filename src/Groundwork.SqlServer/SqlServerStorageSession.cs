@@ -1612,12 +1612,13 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
             var projectionColumn = Quote(projection.Column);
             if (session.Column(projection.Column).Type == PortableType.String)
                 projectionColumn += " COLLATE Latin1_General_100_BIN2";
+            var affectedKey = Quote("__groundwork_affected_key");
             using var command = session.Command(
                 $"WITH ranked AS (" +
-                $"SELECT {projectionColumn}, ROW_NUMBER() OVER ({partition}ORDER BY {ordering}) AS __groundwork_retention_rank " +
+                $"SELECT {projectionColumn} AS {affectedKey}, ROW_NUMBER() OVER ({partition}ORDER BY {ordering}) AS __groundwork_retention_rank " +
                 $"FROM {Quote(operation.Unit.Name)}{scope}) " +
-                $"SELECT DISTINCT TOP (@affected_limit) {projectionColumn} FROM ranked " +
-                $"WHERE __groundwork_retention_rank > @keep ORDER BY {projectionColumn};");
+                $"SELECT DISTINCT TOP (@affected_limit) {affectedKey} FROM ranked " +
+                $"WHERE __groundwork_retention_rank > @keep ORDER BY {affectedKey};");
             SqlServerProviderConnection.AddParameter(command, "@keep", operation.Retention.KeepNewest,
                 new ColumnDefinition { Name = "keep", Type = PortableType.Int32, IsNullable = false });
             SqlServerProviderConnection.AddParameter(command, "@affected_limit", checked(projection.MaxDistinctValues + 1),
