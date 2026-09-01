@@ -278,10 +278,28 @@ durable high-water, exact retention, compare-and-delete, and atomic commit all r
 transaction-capable replica set or sharded deployment.
 
 ```bash
-docker run -d --name gw-mongo -p 27017:27017 mongo:7.0.24 --replSet rs0 --bind_ip_all
+docker run -d --name gw-mongo --ulimit nofile=64000:64000 -p 27017:27017 \
+  mongo:7.0.24 --replSet rs0 --bind_ip_all
 docker exec gw-mongo mongosh --quiet --eval \
   'rs.initiate({_id:"rs0",members:[{_id:0,host:"localhost:27017"}]})'
 ```
+
+### MongoDB: server-selection failures after `Too many open files`
+
+If every MongoDB suite suddenly reports connection refusal or a 30-second server-selection timeout,
+check the container before diagnosing the provider:
+
+```bash
+docker ps -a --filter name=gw-mongo --format '{{.Names}}\t{{.Status}}'
+docker logs gw-mongo 2>&1 | grep -iE 'fatal|too many open files|got signal' | tail
+docker inspect gw-mongo --format '{{json .HostConfig.Ulimits}}'
+```
+
+An empty `Ulimits` array, or a soft `Max open files` value of `1024`, means the fixture was created
+without the required descriptor budget. Restarting that same container preserves the bad limit.
+Recreate the disposable local fixture with `--ulimit nofile=64000:64000` as shown above, then
+re-initialize `rs0`. This failure is environmental: WiredTiger holds descriptors for collection and
+index files, and MongoDB terminates when it cannot open another one.
 
 ### MongoDB: exact batch commits are slow
 

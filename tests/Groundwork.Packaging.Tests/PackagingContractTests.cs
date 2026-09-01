@@ -123,6 +123,21 @@ public sealed class PackagingContractTests
     }
 
     [Fact]
+    public void Documented_mongodb_fixture_has_a_safe_descriptor_budget_and_recovery_guidance()
+    {
+        var root = RepositoryRoot.Find();
+        var testing = File.ReadAllText(Path.Combine(root, "docs", "wiki", "Testing.md"));
+        var troubleshooting = File.ReadAllText(Path.Combine(root, "docs", "wiki", "Troubleshooting.md"));
+        const string limit = "--ulimit nofile=64000:64000";
+
+        Assert.Contains(limit, testing, StringComparison.Ordinal);
+        Assert.Contains(limit, troubleshooting, StringComparison.Ordinal);
+        Assert.Contains("docker restart", testing, StringComparison.Ordinal);
+        Assert.Contains("Too many open files", troubleshooting, StringComparison.Ordinal);
+        Assert.Contains("Restarting that same container preserves the bad limit", troubleshooting, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Wiki_support_guidance_defers_to_the_canonical_policy_instead_of_repeating_topology_promises()
     {
         var root = RepositoryRoot.Find();
