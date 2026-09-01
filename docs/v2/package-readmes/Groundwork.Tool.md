@@ -41,6 +41,19 @@ groundwork --version
 The assembly and namespace remain `Groundwork.SchemaTool`; the package and command are
 `Groundwork.Tool` and `groundwork`.
 
+The tool embeds the first-party schema provider plug-ins, so an isolated installation includes the
+`sqlite`, `postgresql`, `sqlserver`, `mongodb`, and `mysql` aliases. No application build or custom
+host is required for deployment-time schema work. For example, a CI or deployment image can apply
+an SQLite declaration directly:
+
+```bash
+groundwork apply --schema groundwork.schema.json \
+  --provider sqlite --database ./app.db --safe
+```
+
+Third-party providers can still be supplied with one or more `--provider-assembly <file>` options;
+the built-in aliases do not require that option.
+
 ## Every Groundwork package
 
 Previews are published to the public

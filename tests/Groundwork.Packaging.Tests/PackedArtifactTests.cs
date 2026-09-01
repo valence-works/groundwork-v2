@@ -54,6 +54,48 @@ public sealed class PackedArtifactTests(PublicPackageSet packages) : IClassFixtu
         Assert.Equal(readmes.Length, readmes.Distinct(StringComparer.Ordinal).Count());
     }
 
+    [Fact]
+    public void Groundwork_tool_embeds_first_party_schema_provider_plugins()
+    {
+        using var package = ZipFile.OpenRead(packages.PackagePath("Groundwork.Tool"));
+        var providerDependencies = new[]
+        {
+            "Microsoft.Data.Sqlite.dll",
+            "SQLitePCLRaw.batteries_v2.dll",
+            "SQLitePCLRaw.core.dll",
+            "SQLitePCLRaw.provider.e_sqlite3.dll",
+            "Npgsql.dll",
+            "Microsoft.Data.SqlClient.dll",
+            "MongoDB.Bson.dll",
+            "MongoDB.Driver.dll",
+            "MySqlConnector.dll"
+        };
+        var nativeDependencies = new[]
+        {
+            "runtimes/linux-x64/native/libe_sqlite3.so",
+            "runtimes/osx-arm64/native/libe_sqlite3.dylib",
+            "runtimes/win-x64/native/e_sqlite3.dll",
+            "runtimes/win-x64/native/Microsoft.Data.SqlClient.SNI.dll"
+        };
+
+        foreach (var provider in new[] { "MongoDb", "MySql", "PostgreSql", "SqlServer", "Sqlite" })
+        {
+            foreach (var framework in new[] { "net8.0", "net10.0" })
+                Assert.Contains(package.Entries,
+                    entry => entry.FullName == $"tools/{framework}/any/Groundwork.{provider}.dll");
+        }
+
+        foreach (var framework in new[] { "net8.0", "net10.0" })
+        {
+            foreach (var dependency in providerDependencies)
+                Assert.Contains(package.Entries,
+                    entry => entry.FullName == $"tools/{framework}/any/{dependency}");
+            foreach (var dependency in nativeDependencies)
+                Assert.Contains(package.Entries,
+                    entry => entry.FullName == $"tools/{framework}/any/{dependency}");
+        }
+    }
+
     [Theory]
     [MemberData(nameof(PublicPackageIds))]
     public void Every_public_package_ships_symbols_with_source_link_and_deterministic_paths(string packageId)

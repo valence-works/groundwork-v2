@@ -6,7 +6,12 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
+using Groundwork.MongoDb;
+using Groundwork.MySql;
+using Groundwork.PostgreSql;
 using Groundwork.Schema;
+using Groundwork.Sqlite;
+using Groundwork.SqlServer;
 
 namespace Groundwork.SchemaTool;
 
@@ -106,6 +111,11 @@ public static class GroundworkSchemaCli
                 .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?
                 .InformationalVersion.Split('+', 2)[0] ?? "unknown";
             await output.WriteLineAsync($"Groundwork.Tool {version}");
+            return SchemaToolExitCodes.Success;
+        }
+        if (TryGetSubcommandHelp(arguments, out var subcommandHelp))
+        {
+            await output.WriteAsync(subcommandHelp);
             return SchemaToolExitCodes.Success;
         }
 
@@ -429,11 +439,31 @@ public static class GroundworkSchemaCli
             await WriteErrorAsync(output, error, json, "GW-CLI-010", $"Schema tool execution failed: {exception.Message}", redactionSecret);
             return SchemaToolExitCodes.ExecutionFailed;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
-            await WriteErrorAsync(output, error, json, "GW-CLI-010", "Schema tool execution failed.", redactionSecret);
+            await WriteErrorAsync(
+                output,
+                error,
+                json,
+                "GW-CLI-010",
+                ExecutionFailureMessage(exception),
+                redactionSecret);
             return SchemaToolExitCodes.ExecutionFailed;
         }
+    }
+
+    private static string ExecutionFailureMessage(Exception exception)
+    {
+        var detail = exception.Message;
+        for (var inner = exception.InnerException; inner is not null; inner = inner.InnerException)
+        {
+            if (!string.IsNullOrWhiteSpace(inner.Message))
+                detail = inner.Message;
+        }
+
+        return string.IsNullOrWhiteSpace(detail)
+            ? "Schema tool execution failed."
+            : $"Schema tool execution failed: {detail}";
     }
 
     private static async Task<int> EmitAsync(
@@ -981,6 +1011,11 @@ public static class GroundworkSchemaCli
         Func<string?> connection)
     {
         var assemblies = AppDomain.CurrentDomain.GetAssemblies().ToList();
+        foreach (var builtIn in BuiltInProviderAssemblies)
+        {
+            if (!assemblies.Contains(builtIn))
+                assemblies.Add(builtIn);
+        }
         foreach (var path in Values(arguments, "--provider-assembly"))
         {
             var fullPath = Path.GetFullPath(path);
@@ -1002,6 +1037,53 @@ public static class GroundworkSchemaCli
             cancellationToken));
     }
 
+    private static bool TryGetSubcommandHelp(
+        IReadOnlyList<string> arguments,
+        out string help)
+    {
+        help = string.Empty;
+        if (arguments.Count == 2 && (arguments[1] is "--help" or "-h"))
+        {
+            help = arguments[0] switch
+            {
+                "plan" or "status" =>
+                    $"Usage: groundwork {arguments[0]} --schema <file> --provider <name> " +
+                    "[--connection <value> | --connection-env <name> | --connection-file <file> | --connection-stdin] " +
+                    "[--deployment-id <id>] [--database <name>] [--provider-assembly <file>] " +
+                    "[--coverage <file>] [--output json|human] [--phase expand|contract]" + Environment.NewLine,
+                "validate" =>
+                    "Usage: groundwork validate --schema <file> --provider <name> [--offline] " +
+                    "[--connection <value> | --connection-env <name> | --connection-file <file> | --connection-stdin] " +
+                    "[--deployment-id <id>] [--database <name>] [--provider-assembly <file>] [--coverage <file>] " +
+                    "[--phase expand|contract] " +
+                    "[--output json|human]" + Environment.NewLine,
+                "apply" =>
+                    "Usage: groundwork apply --schema <file> --provider <name> --safe " +
+                    "[--connection <value> | --connection-env <name> | --connection-file <file> | --connection-stdin] " +
+                    "[--deployment-id <id>] [--database <name>] [--provider-assembly <file>] " +
+                    "[--coverage <file>] [--phase expand|contract] [--expected-plan <fingerprint>] " +
+                    "[--allow-destructive <identity>] [--allow-semantic <identity>] [--output json|human]" + Environment.NewLine,
+                "adopt" =>
+                    "Usage: groundwork adopt --schema <file> --provider <name> --safe " +
+                    "[--connection <value> | --connection-env <name> | --connection-file <file> | --connection-stdin] " +
+                    "[--deployment-id <id>] [--database <name>] [--provider-assembly <file>] " +
+                    "[--coverage <file>] [--phase expand|contract] [--expected-plan <fingerprint>] " +
+                    "[--allow-destructive <identity>] [--allow-semantic <identity>] [--output json|human]" + Environment.NewLine,
+                _ => string.Empty
+            };
+            return help.Length != 0;
+        }
+
+        if (arguments.Count == 3 && arguments[0] == "schema" && arguments[1] == "emit" &&
+            (arguments[2] is "--help" or "-h"))
+        {
+            help = "Usage: groundwork schema emit --input <file> --file <file> [--output json|human]" + Environment.NewLine;
+            return true;
+        }
+
+        return false;
+    }
+
     private static IEnumerable<Type> LoadableTypes(Assembly assembly)
     {
         try
@@ -1013,6 +1095,15 @@ public static class GroundworkSchemaCli
             return exception.Types.OfType<Type>();
         }
     }
+
+    private static readonly Assembly[] BuiltInProviderAssemblies =
+    [
+        typeof(SqliteSchemaToolProviderSessionFactory).Assembly,
+        typeof(PostgreSqlSchemaToolProviderSessionFactory).Assembly,
+        typeof(SqlServerSchemaToolProviderSessionFactory).Assembly,
+        typeof(MongoSchemaToolProviderSessionFactory).Assembly,
+        typeof(MySqlSchemaToolProviderSessionFactory).Assembly
+    ];
 
     private const string HelpText = """
         Usage: groundwork <plan|validate|status|apply|adopt> --schema <file> --provider <name>

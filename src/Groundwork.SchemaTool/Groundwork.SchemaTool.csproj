@@ -15,5 +15,10 @@
     <ProjectReference Include="../Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
     <ProjectReference Include="../Groundwork.Query.Planning/Groundwork.Query.Planning.csproj" />
     <ProjectReference Include="../Groundwork.Schema/Groundwork.Schema.csproj" />
+    <ProjectReference Include="../Groundwork.MongoDb/Groundwork.MongoDb.csproj" />
+    <ProjectReference Include="../Groundwork.MySql/Groundwork.MySql.csproj" />
+    <ProjectReference Include="../Groundwork.PostgreSql/Groundwork.PostgreSql.csproj" />
+    <ProjectReference Include="../Groundwork.SqlServer/Groundwork.SqlServer.csproj" />
+    <ProjectReference Include="../Groundwork.Sqlite/Groundwork.Sqlite.csproj" />
   </ItemGroup>
 </Project>

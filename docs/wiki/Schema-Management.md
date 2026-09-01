@@ -66,12 +66,22 @@ groundwork schema emit --input schema.json --file groundwork.schema.json
 
 Add `--output json` for the stable machine-readable report.
 
-The aliases are `sqlite`, `mysql`, `postgresql`, `sqlserver` and `mongodb`, each discovered from its
-provider package. All five speak one plan and report format: operation kinds, operation identities,
-authorization addresses, refusal codes and exit codes mean the same thing whether the target is a
-table or a collection. The MongoDB plug-in requires a replica set or a sharded cluster, because
-publishing the applied schema ledger needs a transaction; a standalone deployment is refused when
-the session opens rather than part-way through an apply.
+`Groundwork.Tool` embeds the first-party provider plug-ins, so an isolated installation includes the
+`sqlite`, `mysql`, `postgresql`, `sqlserver` and `mongodb` aliases. All five speak one plan and
+report format: operation kinds, operation identities, authorization addresses, refusal codes and
+exit codes mean the same thing whether the target is a table or a collection. Third-party providers
+remain supported through `--provider-assembly <file>`. The MongoDB plug-in requires a replica set or
+a sharded cluster, because publishing the applied schema ledger needs a transaction; a standalone
+deployment is refused when the session opens rather than part-way through an apply.
+
+An isolated CI image can deploy without building the application that owns the schema:
+
+```bash
+dotnet tool install --global Groundwork.Tool --prerelease \
+  --add-source https://f.feedz.io/valence-works/groundwork/nuget/index.json
+groundwork apply --schema groundwork.schema.json \
+  --provider sqlite --database ./app.db --safe
+```
 
 > The package is `Groundwork.Tool`; its assembly and namespace remain `Groundwork.SchemaTool` for
 > source compatibility.

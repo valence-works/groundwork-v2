@@ -30,6 +30,56 @@ public sealed class SchemaToolContractTests
         Assert.Equal("GW-CLI-001", report.RootElement.GetProperty("diagnostics")[0].GetProperty("code").GetString());
     }
 
+    [Theory]
+    [InlineData("plan")]
+    [InlineData("validate")]
+    [InlineData("status")]
+    [InlineData("apply")]
+    [InlineData("adopt")]
+    public async Task Subcommand_help_is_available_without_command_options(string command)
+    {
+        Assert.Equal(SchemaToolExitCodes.Success, await RunAsync([command, "--help"]));
+
+        Assert.Contains($"Usage: groundwork {command}", output.ToString(), StringComparison.Ordinal);
+        Assert.Contains("--provider-assembly", output.ToString(), StringComparison.Ordinal);
+        if (command == "validate")
+        {
+            Assert.Contains("--deployment-id", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains("--phase", output.ToString(), StringComparison.Ordinal);
+        }
+        Assert.Empty(error.ToString());
+    }
+
+    [Fact]
+    public async Task Schema_emit_help_is_available_without_input_files()
+    {
+        Assert.Equal(SchemaToolExitCodes.Success,
+            await RunAsync(["schema", "emit", "--help"]));
+
+        Assert.Contains("Usage: groundwork schema emit", output.ToString(), StringComparison.Ordinal);
+        Assert.Empty(error.ToString());
+    }
+
+    [Fact]
+    public async Task Built_in_provider_aliases_are_loaded_without_an_explicit_assembly()
+    {
+        var schema = Temp("built-in-provider-aliases.json", ValidSchema);
+        foreach (var provider in new[] { "sqlite", "postgresql", "sqlserver", "mongodb", "mysql" })
+        {
+            output.GetStringBuilder().Clear();
+            error.GetStringBuilder().Clear();
+
+            var exit = await GroundworkSchemaCli.RunAsync([
+                "plan", "--schema", schema, "--provider", provider, "--output", "json"
+            ], output, error);
+
+            Assert.Equal(SchemaToolExitCodes.InvalidInvocation, exit);
+            Assert.Contains("GW-CLI-001", output.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("GW-CLI-006", output.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("GW-CLI-006", error.ToString(), StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public async Task Verify_refuses_a_folded_index_that_exceeds_the_budget_once_its_search_key_is_expanded()
     {
@@ -550,6 +600,26 @@ public sealed class SchemaToolContractTests
                 "authentication failed for fragment-secret; canonical Password=fragment-secret")));
         Assert.DoesNotContain("fragment-secret", output.ToString(), StringComparison.Ordinal);
         Assert.Contains("redacted", output.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Generic_provider_failures_surface_inner_detail_without_a_stack_trace()
+    {
+        var schema = Temp("inner-failure-schema.json", ValidSchema);
+        const string secret = "inner-secret";
+        const string connection = "Host=private.example;Password=" + secret;
+
+        Assert.Equal(SchemaToolExitCodes.ExecutionFailed,
+            await RunAsync([
+                "plan", "--schema", schema, "--provider", "fake", "--connection", connection, "--output", "json"
+            ], _ => throw new InvalidOperationException(
+                "provider activation failed",
+                new InvalidOperationException(
+                    "provider driver could not load its native dependency; Password=" + secret))));
+
+        Assert.Contains("provider driver could not load its native dependency", output.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(secret, output.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("at Groundwork.", output.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]

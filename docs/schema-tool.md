@@ -83,9 +83,26 @@ declared table; the interop view is inspected as its own provider-owned definiti
 Inspection checks both its declared output columns and the canonical-definition marker embedded in
 the live view text, so a same-shaped replacement is still reported as drift.
 
-Provider packages implement `ISchemaToolProviderSessionFactory`. The tool discovers loaded factories and can load a provider plug-in explicitly with `--provider-assembly`; the resolved connection and `--database` are passed to the factory without being echoed in reports. Hosts can instead inject an `ISchemaToolProviderSession` resolver directly.
-The shipped aliases are `sqlite`, `mysql`, `postgresql`, `sqlserver`, and `mongodb`; each uses the
-same canonical document, authorization vocabulary, plan fingerprint, and report format.
+Provider packages implement `ISchemaToolProviderSessionFactory`. `Groundwork.Tool` embeds the
+first-party plug-ins and loads the `sqlite`, `mysql`, `postgresql`, `sqlserver`, and `mongodb`
+aliases in an isolated tool installation. The resolved connection and `--database` are passed to
+the factory without being echoed in reports. Third-party providers can still be loaded explicitly
+with one or more `--provider-assembly` options. Hosts can instead inject an
+`ISchemaToolProviderSession` resolver directly.
+
+An isolated CI or deployment image needs no application build to apply a schema. After installing
+the tool, run the deployment step directly; this example creates the file-backed SQLite database
+on its first apply and is a no-op on subsequent applies:
+
+```bash
+dotnet tool install --global Groundwork.Tool --prerelease \
+  --add-source https://f.feedz.io/valence-works/groundwork/nuget/index.json
+groundwork apply --schema groundwork.schema.json \
+  --provider sqlite --database ./app.db --safe
+```
+
+Each alias uses the same canonical document, authorization vocabulary, plan fingerprint, and report
+format.
 
 `schema emit` parses and rewrites the source-generator contract in canonical order. Its reported fingerprint is therefore identical to the assembly metadata fingerprint for the same schema.
 

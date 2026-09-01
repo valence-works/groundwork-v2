@@ -255,6 +255,11 @@ public sealed class PackagingContractTests
 
         var cleanRoomVerifier = File.ReadAllText(Path.Combine(root, "tests", "Groundwork.PublicApi.Acceptance.Tests", "verify-clean-room.sh"));
         Assert.Contains("Groundwork.Tool $version", cleanRoomVerifier, StringComparison.Ordinal);
+        Assert.Contains("groundwork\" apply --schema", cleanRoomVerifier, StringComparison.Ordinal);
+        Assert.Contains("--provider sqlite", cleanRoomVerifier, StringComparison.Ordinal);
+        Assert.Contains("apply-second.json", cleanRoomVerifier, StringComparison.Ordinal);
+        Assert.Contains("groundwork\" plan --schema", cleanRoomVerifier, StringComparison.Ordinal);
+        Assert.Contains("Usage: groundwork apply", cleanRoomVerifier, StringComparison.Ordinal);
     }
 
     [Fact]
