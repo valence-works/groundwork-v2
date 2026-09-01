@@ -191,7 +191,10 @@ Off by default. When on, the provider delegates to the kernel's `PhysicalSchemaP
 plans the kernel considers safe are applied at startup. Destructive or semantic work is refused with
 its authorization details and belongs to the `groundwork` CLI. This exists so `dotnet run` and
 integration tests can stand a database up. **Production physical schema belongs to the `groundwork`
-CLI**, which requires explicit authorization for destructive and semantic work.
+CLI**, which requires explicit authorization for destructive and semantic work. If
+`AutoApplyOnStartup` is enabled in any non-Development environment, startup refuses with
+`GW-HOST-007` before provider admission or schema I/O; run `groundwork plan` and then
+`groundwork apply --safe` during deployment instead.
 
 ---
 
@@ -227,6 +230,7 @@ matches the declaration this build was compiled against.
 | `GW-HOST-004` | A registered connection has no provider factory or no connection string |
 | `GW-HOST-005` | Startup admission found pending physical schema work, or could not run |
 | `GW-HOST-006` | The deployed database does not advertise a required capability |
+| `GW-HOST-007` | `AutoApplyOnStartup` is enabled outside the Development environment |
 
 See **[Diagnostics Reference](Diagnostics-Reference)**.
 

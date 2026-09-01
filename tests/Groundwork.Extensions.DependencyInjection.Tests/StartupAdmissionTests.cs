@@ -5,6 +5,7 @@ using Groundwork.Store;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
+using Microsoft.Extensions.Hosting;
 using Xunit;
 
 namespace Groundwork.Extensions.DependencyInjection.Tests;
@@ -212,6 +213,47 @@ public sealed class StartupAdmissionTests
         Assert.Equal(
             [SchemaChangeKind.CreateStorageUnit, SchemaChangeKind.AddColumn, SchemaChangeKind.CreateIndex],
             unit.PendingChanges.Select(change => change.Kind).Distinct());
+    }
+
+    [Fact]
+    public async Task Auto_apply_is_refused_outside_development_before_schema_mutation()
+    {
+        var services = fixture.Services(Environments.Production);
+        services.AddGroundwork().AddConnection(options =>
+        {
+            fixture.Connect(HostingFixture.Orders)(options);
+            options.AutoApplyOnStartup = true;
+        });
+        using var provider = services.BuildServiceProvider(validateScopes: true);
+
+        var refusal = await Assert.ThrowsAsync<GroundworkHostingException>(
+            () => HostingFixture.StartAsync(provider));
+
+        Assert.Equal(GroundworkHostingDiagnostics.AutoApplyOnStartupNotAllowed, refusal.Code);
+        Assert.Contains("groundwork plan", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("groundwork apply --safe", refusal.Message, StringComparison.Ordinal);
+        Assert.False(provider.GetRequiredService<IStorageProviderConnection>()
+            .Schema.Diff(HostingFixture.Orders).IsEmpty);
+        Assert.Null(provider.GetRequiredService<GroundworkAdmissionRunner>().Latest);
+    }
+
+    [Fact]
+    public async Task Auto_apply_is_refused_in_any_non_development_environment()
+    {
+        var services = fixture.Services("Staging");
+        services.AddGroundwork().AddConnection(options =>
+        {
+            fixture.Connect(HostingFixture.Orders)(options);
+            options.AutoApplyOnStartup = true;
+        });
+        using var provider = services.BuildServiceProvider(validateScopes: true);
+
+        var refusal = await Assert.ThrowsAsync<GroundworkHostingException>(
+            () => HostingFixture.StartAsync(provider));
+
+        Assert.Equal(GroundworkHostingDiagnostics.AutoApplyOnStartupNotAllowed, refusal.Code);
+        Assert.False(provider.GetRequiredService<IStorageProviderConnection>()
+            .Schema.Diff(HostingFixture.Orders).IsEmpty);
     }
 
     // A changed profile is a semantic migration. The kernel requires explicit authorization, so the

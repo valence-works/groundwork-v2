@@ -245,6 +245,7 @@ Raised by `Groundwork.Extensions.DependencyInjection`, carried on
 | `GW-HOST-004` | A registered connection has no provider factory or no connection string | Call `options.UseProvider(factory, connectionString)` |
 | `GW-HOST-005` | Startup admission found pending physical schema work, or could not run | Apply the declaration from the deployment step with `groundwork apply --safe`; runtime is inspect-only |
 | `GW-HOST-006` | The deployed database does not advertise a required capability | Deploy a topology that provides it, or drop the requirement and degrade gracefully |
+| `GW-HOST-007` | `AutoApplyOnStartup` is enabled outside the Development environment | Review with `groundwork plan`, then apply the safe deployment plan with `groundwork apply --safe` |
 
 ---
 
