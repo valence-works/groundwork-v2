@@ -314,9 +314,12 @@ public sealed class MongoSchemaExecutor
             }
 
             var expectedType = MongoValueCodec.GetBsonTypeName(column);
-            var accepted = new BsonArray { new BsonDocument(column.Name, new BsonDocument("$type", expectedType)) };
-            if (column.IsNullable)
-                accepted.Add(new BsonDocument(column.Name, BsonNull.Value));
+            var accepted = new BsonArray
+            {
+                new BsonDocument(column.Name, new BsonDocument(
+                    "$type",
+                    new BsonArray(MongoValueCodec.GetAcceptedBsonTypeNames(column))))
+            };
             var wrongType = collection.Find(new BsonDocument("$and", new BsonArray
             {
                 new BsonDocument(column.Name, new BsonDocument("$exists", true)),
@@ -324,12 +327,15 @@ public sealed class MongoSchemaExecutor
             })).Limit(1).Any();
             if (wrongType)
             {
+                var acceptedTypeDescription = MongoValueCodec.GetAcceptedBsonTypeDescription(column);
                 drift.Add(new SchemaRefusal(
                     "GW-RUNTIME-001",
-                    column.IsNullable
-                        ? $"MongoDB column '{collectionName}.{column.Name}' contains a value whose BSON type is not '{expectedType}'."
-                        : $"MongoDB column '{collectionName}.{column.Name}' is declared required and contains a null or a " +
-                          $"value whose BSON type is not '{expectedType}'.",
+                    column.Type == PortableType.Json
+                        ? $"MongoDB column '{collectionName}.{column.Name}' contains a value whose BSON type is not {acceptedTypeDescription}."
+                        : column.IsNullable
+                            ? $"MongoDB column '{collectionName}.{column.Name}' contains a value whose BSON type is not '{expectedType}'."
+                            : $"MongoDB column '{collectionName}.{column.Name}' is declared required and contains a null or a " +
+                              $"value whose BSON type is not '{expectedType}'.",
                     $"columns.{column.Name}.type"));
             }
         }
