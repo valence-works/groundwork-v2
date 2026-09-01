@@ -21,20 +21,23 @@ internal sealed class GroundworkStartupAdmissionService : IHostedService
     private readonly ILogger<GroundworkStartupAdmissionService> logger;
     private readonly IGroundworkConnections connections;
     private readonly IOptionsMonitor<GroundworkConnectionOptions> options;
-    private readonly IHostEnvironment hostEnvironment;
+    private readonly bool isDevelopment;
+    private readonly string environmentName;
 
     public GroundworkStartupAdmissionService(
         GroundworkAdmissionRunner runner,
         ILogger<GroundworkStartupAdmissionService> logger,
         IGroundworkConnections connections,
         IOptionsMonitor<GroundworkConnectionOptions> options,
-        IHostEnvironment hostEnvironment)
+        bool isDevelopment,
+        string environmentName)
     {
         this.runner = runner ?? throw new ArgumentNullException(nameof(runner));
         this.logger = logger ?? throw new ArgumentNullException(nameof(logger));
         this.connections = connections ?? throw new ArgumentNullException(nameof(connections));
         this.options = options ?? throw new ArgumentNullException(nameof(options));
-        this.hostEnvironment = hostEnvironment ?? throw new ArgumentNullException(nameof(hostEnvironment));
+        this.isDevelopment = isDevelopment;
+        this.environmentName = environmentName ?? throw new ArgumentNullException(nameof(environmentName));
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
@@ -42,8 +45,8 @@ internal sealed class GroundworkStartupAdmissionService : IHostedService
         var autoApplyConnections = connections.Names
             .Where(name => options.Get(name).AutoApplyOnStartup)
             .ToArray();
-        if (autoApplyConnections.Length != 0 && !hostEnvironment.IsDevelopment())
-            throw RefuseAutoApply(autoApplyConnections, hostEnvironment.EnvironmentName);
+        if (autoApplyConnections.Length != 0 && !isDevelopment)
+            throw RefuseAutoApply(autoApplyConnections, environmentName);
 
         var report = runner.Run();
         foreach (var connection in report.Connections)

@@ -18,13 +18,23 @@ public sealed class GroundworkAdmissionRunner
 {
     private readonly IGroundworkConnections connections;
     private readonly IOptionsMonitor<GroundworkConnectionOptions> options;
+    private readonly bool autoApplyAllowed;
 
     public GroundworkAdmissionRunner(
         IGroundworkConnections connections,
         IOptionsMonitor<GroundworkConnectionOptions> options)
+        : this(connections, options, autoApplyAllowed: false)
+    {
+    }
+
+    internal GroundworkAdmissionRunner(
+        IGroundworkConnections connections,
+        IOptionsMonitor<GroundworkConnectionOptions> options,
+        bool autoApplyAllowed)
     {
         this.connections = connections ?? throw new ArgumentNullException(nameof(connections));
         this.options = options ?? throw new ArgumentNullException(nameof(options));
+        this.autoApplyAllowed = autoApplyAllowed;
     }
 
     /// <summary>The verdict from the last pass, or null before the host has started.</summary>
@@ -65,7 +75,7 @@ public sealed class GroundworkAdmissionRunner
         try
         {
             var units = configured.Units
-                .Select(unit => Admit(connection, unit, configured.AutoApplyOnStartup))
+                .Select(unit => Admit(connection, unit, autoApplyAllowed && configured.AutoApplyOnStartup))
                 .ToArray();
             var status = new[]
                 {

@@ -2,6 +2,8 @@ using Groundwork.Store;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace Groundwork.Extensions.DependencyInjection;
 
@@ -32,9 +34,26 @@ public static class GroundworkServiceCollectionExtensions
         guard = new GroundworkRegistrationGuard(services);
         services.AddSingleton(guard);
         services.AddSingleton<IGroundworkConnections, GroundworkConnections>();
-        services.AddSingleton<GroundworkAdmissionRunner>();
+        services.AddSingleton<GroundworkAdmissionRunner>(provider =>
+        {
+            var environment = provider.GetService<IHostEnvironment>();
+            return new GroundworkAdmissionRunner(
+                provider.GetRequiredService<IGroundworkConnections>(),
+                provider.GetRequiredService<IOptionsMonitor<GroundworkConnectionOptions>>(),
+                environment?.IsDevelopment() ?? false);
+        });
         services.AddSingleton<GroundworkHealthCheck>();
-        services.AddSingleton<IHostedService, GroundworkStartupAdmissionService>();
+        services.AddSingleton<IHostedService>(provider =>
+        {
+            var environment = provider.GetService<IHostEnvironment>();
+            return new GroundworkStartupAdmissionService(
+                provider.GetRequiredService<GroundworkAdmissionRunner>(),
+                provider.GetRequiredService<ILogger<GroundworkStartupAdmissionService>>(),
+                provider.GetRequiredService<IGroundworkConnections>(),
+                provider.GetRequiredService<IOptionsMonitor<GroundworkConnectionOptions>>(),
+                environment?.IsDevelopment() ?? false,
+                environment?.EnvironmentName ?? Environments.Production);
+        });
         return new GroundworkBuilder(services, guard);
     }
 }

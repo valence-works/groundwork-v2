@@ -235,6 +235,56 @@ public sealed class StartupAdmissionTests
         Assert.False(provider.GetRequiredService<IStorageProviderConnection>()
             .Schema.Diff(HostingFixture.Orders).IsEmpty);
         Assert.Null(provider.GetRequiredService<GroundworkAdmissionRunner>().Latest);
+
+        var health = await Check(provider);
+        Assert.Equal(HealthStatus.Unhealthy, health.Status);
+        Assert.False(provider.GetRequiredService<IStorageProviderConnection>()
+            .Schema.Diff(HostingFixture.Orders).IsEmpty);
+    }
+
+    [Fact]
+    public async Task A_production_health_check_before_host_start_does_not_auto_apply()
+    {
+        var services = fixture.Services(Environments.Production);
+        services.AddGroundwork().AddConnection(options =>
+        {
+            fixture.Connect(HostingFixture.Orders)(options);
+            options.AutoApplyOnStartup = true;
+        });
+        using var provider = services.BuildServiceProvider(validateScopes: true);
+
+        var health = await Check(provider);
+        Assert.Equal(HealthStatus.Unhealthy, health.Status);
+        Assert.False(provider.GetRequiredService<IStorageProviderConnection>()
+            .Schema.Diff(HostingFixture.Orders).IsEmpty);
+
+        var refusal = await Assert.ThrowsAsync<GroundworkHostingException>(
+            () => HostingFixture.StartAsync(provider));
+        Assert.Equal(GroundworkHostingDiagnostics.AutoApplyOnStartupNotAllowed, refusal.Code);
+        Assert.False(provider.GetRequiredService<IStorageProviderConnection>()
+            .Schema.Diff(HostingFixture.Orders).IsEmpty);
+    }
+
+    [Fact]
+    public async Task A_host_without_an_environment_defaults_to_safe_non_development_admission()
+    {
+        var services = fixture.Services(includeEnvironment: false);
+        services.AddGroundwork().AddConnection(options =>
+        {
+            fixture.Connect(HostingFixture.Orders)(options);
+            options.AutoApplyOnStartup = true;
+        });
+        using var provider = services.BuildServiceProvider(validateScopes: true);
+
+        var health = await Check(provider);
+        Assert.Equal(HealthStatus.Unhealthy, health.Status);
+        Assert.False(provider.GetRequiredService<IStorageProviderConnection>()
+            .Schema.Diff(HostingFixture.Orders).IsEmpty);
+
+        var refusal = await Assert.ThrowsAsync<GroundworkHostingException>(
+            () => HostingFixture.StartAsync(provider));
+        Assert.Equal(GroundworkHostingDiagnostics.AutoApplyOnStartupNotAllowed, refusal.Code);
+        Assert.Contains(Environments.Production, refusal.Message, StringComparison.Ordinal);
     }
 
     [Fact]

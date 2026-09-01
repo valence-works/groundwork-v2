@@ -64,12 +64,13 @@ internal sealed class HostingFixture
         connection.Schema.Apply(unit);
     }
 
-    internal ServiceCollection Services(string? environmentName = null)
+    internal ServiceCollection Services(string? environmentName = null, bool includeEnvironment = true)
     {
         var services = new ServiceCollection();
         services.AddLogging();
-        services.AddSingleton<IHostEnvironment>(new TestHostEnvironment(
-            environmentName ?? Environments.Development));
+        if (includeEnvironment)
+            services.AddSingleton<IHostEnvironment>(new TestHostEnvironment(
+                environmentName ?? Environments.Development));
         return services;
     }
 
