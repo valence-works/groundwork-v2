@@ -118,6 +118,84 @@ public sealed class MongoValueCodecTests
         Assert.Equal(42, decoded.GetProperty("answer").GetInt32());
     }
 
+    [Theory]
+    [InlineData("{\"answer\":42}", BsonType.Document)]
+    [InlineData("[1,\"two\"]", BsonType.Array)]
+    [InlineData("\"text\"", BsonType.String)]
+    [InlineData("42", BsonType.Int32)]
+    [InlineData("2147483648", BsonType.Int64)]
+    [InlineData("1.5", BsonType.Double)]
+    [InlineData("true", BsonType.Boolean)]
+    [InlineData("null", BsonType.Null)]
+    public void Json_codec_maps_every_portable_json_shape_to_native_bson(
+        string jsonText,
+        BsonType expectedType)
+    {
+        var column = new ColumnDefinition { Name = "payload", Type = PortableType.Json, IsNullable = true };
+        using var json = JsonDocument.Parse(jsonText);
+
+        var encoded = MongoValueCodec.Encode(json, column);
+
+        Assert.Equal(expectedType, encoded.BsonType);
+        var decoded = Assert.IsType<JsonElement>(MongoValueCodec.Decode(encoded, column));
+        Assert.Equal(json.RootElement.ValueKind, decoded.ValueKind);
+    }
+
+    [Fact]
+    public void Json_codec_exposes_all_native_bson_types_for_portable_json_admission()
+    {
+        var column = new ColumnDefinition { Name = "payload", Type = PortableType.Json };
+
+        Assert.Equal(
+            new[] { "object", "array", "string", "int", "long", "double", "decimal", "bool", "null" },
+            MongoValueCodec.GetAcceptedBsonTypeNames(column));
+    }
+
+    [Fact]
+    public void Json_codec_accepts_decimal128_but_refuses_non_json_bson_values_at_any_depth()
+    {
+        var column = new ColumnDefinition { Name = "payload", Type = PortableType.Json };
+
+        Assert.Equal(
+            BsonType.Decimal128,
+            MongoValueCodec.Encode(new BsonDecimal128(1.25m), column).BsonType);
+        var decodedDecimal = Assert.IsType<JsonElement>(
+            MongoValueCodec.Decode(new BsonDecimal128(1.25m), column));
+        Assert.Equal(1.25m, decodedDecimal.GetDecimal());
+        var decodedNestedDecimal = Assert.IsType<JsonElement>(MongoValueCodec.Decode(
+            new BsonDocument("nested", new BsonDecimal128(2.5m)),
+            column));
+        Assert.Equal(2.5m, decodedNestedDecimal.GetProperty("nested").GetDecimal());
+        Assert.Throws<ArgumentException>(() => MongoValueCodec.Encode(new BsonDateTime(DateTime.UtcNow), column));
+        Assert.Throws<ArgumentException>(() => MongoValueCodec.Encode(new BsonDouble(double.NaN), column));
+        Assert.Throws<ArgumentException>(() => MongoValueCodec.Encode(new BsonDecimal128(Decimal128.PositiveInfinity), column));
+        Assert.Throws<ArgumentException>(() => MongoValueCodec.Encode(
+            new BsonDocument("nested", new BsonObjectId(ObjectId.GenerateNewId())),
+            column));
+        Assert.Throws<InvalidOperationException>(() => MongoValueCodec.Decode(
+            new BsonDocument("nested", new BsonObjectId(ObjectId.GenerateNewId())),
+            column));
+    }
+
+    [Fact]
+    public void Non_json_codec_admission_remains_a_single_native_bson_type()
+    {
+        var column = new ColumnDefinition { Name = "status", Type = PortableType.String, IsNullable = false };
+
+        Assert.Equal(new[] { "string" }, MongoValueCodec.GetAcceptedBsonTypeNames(column));
+    }
+
+    [Fact]
+    public void Required_json_rejects_clr_null_but_admits_json_null()
+    {
+        var column = new ColumnDefinition { Name = "payload", Type = PortableType.Json, IsNullable = false };
+
+        Assert.Throws<ArgumentException>(() => MongoValueCodec.Encode(null, column));
+        using var json = JsonDocument.Parse("null");
+
+        Assert.Equal(BsonType.Null, MongoValueCodec.Encode(json, column).BsonType);
+    }
+
     [Fact]
     public void Provider_sequence_is_declared_as_an_evidence_gated_capability()
     {

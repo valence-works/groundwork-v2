@@ -653,14 +653,13 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
                 continue;
             }
 
-            var expectedType = MongoValueCodec.GetBsonTypeName(column);
             var acceptedValues = new BsonArray
             {
                 new BsonDocument(column.Name,
-                    new BsonDocument("$type", expectedType))
+                    new BsonDocument(
+                        "$type",
+                        new BsonArray(MongoValueCodec.GetAcceptedBsonTypeNames(column))))
             };
-            if (column.IsNullable)
-                acceptedValues.Add(new BsonDocument(column.Name, BsonNull.Value));
             var wrongType = collection.Find(new BsonDocument("$and", new BsonArray
                 {
                     new BsonDocument(column.Name, new BsonDocument("$exists", true)),
@@ -670,9 +669,10 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
                 .Any();
             if (wrongType)
             {
+                var acceptedTypeDescription = MongoValueCodec.GetAcceptedBsonTypeDescription(column);
                 columnDrift.Add(new SchemaRefusal(
                     "GW-RUNTIME-001",
-                    $"Physical MongoDB column '{column.Name}' contains a value whose BSON type does not match '{expectedType}'.",
+                    $"Physical MongoDB column '{column.Name}' contains a value whose BSON type does not match {acceptedTypeDescription}.",
                     $"columns.{column.Name}.type"));
             }
         }

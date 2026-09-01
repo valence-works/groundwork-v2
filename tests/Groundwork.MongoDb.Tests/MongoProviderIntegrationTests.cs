@@ -1617,6 +1617,59 @@ public sealed class MongoProviderIntegrationTests
     }
 
     [SkippableFact]
+    public void Mongo_json_admission_accepts_scalars_containers_and_json_null_for_required_columns()
+    {
+        using var connection = OpenConnection();
+        var nullableUnit = JsonAdmissionUnit("mongo-json-admission-" + Guid.NewGuid().ToString("N"), nullable: true);
+        var database = Assert.IsType<MongoDbProviderConnection>(connection).Database;
+        database.CreateCollection(nullableUnit.Name);
+        database.GetCollection<BsonDocument>(nullableUnit.Name).InsertMany(
+        [
+            new BsonDocument { ["_id"] = "object", ["id"] = "object", ["payload"] = new BsonDocument("kind", "object") },
+            new BsonDocument { ["_id"] = "array", ["id"] = "array", ["payload"] = new BsonArray { 1, "two" } },
+            new BsonDocument { ["_id"] = "string", ["id"] = "string", ["payload"] = "text" },
+            new BsonDocument { ["_id"] = "int", ["id"] = "int", ["payload"] = 42 },
+            new BsonDocument { ["_id"] = "long", ["id"] = "long", ["payload"] = 2147483648L },
+            new BsonDocument { ["_id"] = "double", ["id"] = "double", ["payload"] = 1.5 },
+            new BsonDocument { ["_id"] = "decimal", ["id"] = "decimal", ["payload"] = new BsonDecimal128(1.25m) },
+            new BsonDocument { ["_id"] = "boolean", ["id"] = "boolean", ["payload"] = true },
+            new BsonDocument { ["_id"] = "null", ["id"] = "null", ["payload"] = BsonNull.Value }
+        ]);
+
+        Assert.True(connection.Schema.Apply(nullableUnit).Applied);
+        var accepted = connection.InspectSchema(nullableUnit, MongoStorageAccess.Global);
+        Assert.True(accepted.IsProcessReady);
+        Assert.Empty(accepted.ColumnDrift);
+
+        database.GetCollection<BsonDocument>(nullableUnit.Name).InsertOne(
+            new BsonDocument { ["_id"] = "date", ["id"] = "date", ["payload"] = new BsonDateTime(DateTime.UtcNow) });
+        var coordinatorDrift = connection.InspectSchema(nullableUnit, MongoStorageAccess.Global);
+        var coordinatorRefusal = Assert.Single(coordinatorDrift.ColumnDrift,
+            refusal => refusal.Path == "columns.payload.type");
+        Assert.Contains("one of the accepted BSON types", coordinatorRefusal.Message, StringComparison.Ordinal);
+        Assert.Contains("'object'", coordinatorRefusal.Message, StringComparison.Ordinal);
+
+        var requiredUnit = JsonAdmissionUnit("mongo-json-required-" + Guid.NewGuid().ToString("N"), nullable: false);
+        database.CreateCollection(requiredUnit.Name);
+        database.GetCollection<BsonDocument>(requiredUnit.Name).InsertOne(
+            new BsonDocument { ["_id"] = "null", ["id"] = "null", ["payload"] = BsonNull.Value });
+
+        Assert.True(connection.Schema.Apply(requiredUnit).Applied);
+        var required = connection.InspectSchema(requiredUnit, MongoStorageAccess.Global);
+        Assert.True(required.IsProcessReady);
+        Assert.Empty(required.ColumnDrift);
+
+        var invalidUnit = JsonAdmissionUnit("mongo-json-invalid-" + Guid.NewGuid().ToString("N"), nullable: false);
+        database.CreateCollection(invalidUnit.Name);
+        database.GetCollection<BsonDocument>(invalidUnit.Name).InsertOne(
+            new BsonDocument { ["_id"] = "date", ["id"] = "date", ["payload"] = new BsonDateTime(DateTime.UtcNow) });
+
+        var refusal = Assert.Throws<InvalidOperationException>(() => connection.Schema.Apply(invalidUnit));
+        Assert.Contains("one of the accepted BSON types", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("'object'", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [SkippableFact]
     public void Scope_and_optimistic_concurrency_are_provider_behaviors()
     {
         using var connection = OpenConnection();
@@ -2315,6 +2368,18 @@ public sealed class MongoProviderIntegrationTests
         ],
         Key = new KeyDefinition { Columns = ["id"] },
         Indexes = [new IndexDefinition { Name = "by_payload", Columns = [new IndexColumn("payload")] }]
+    };
+
+    private static StorageUnit JsonAdmissionUnit(string name, bool nullable) => new()
+    {
+        Id = new StorageUnitId(name),
+        Name = name.Replace('-', '_'),
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.String, IsNullable = false },
+            new() { Name = "payload", Type = PortableType.Json, IsNullable = nullable }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] }
     };
 
     private static IMongoProviderConnection OpenConnection()
