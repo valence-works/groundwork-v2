@@ -3,7 +3,6 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Groundwork.Kernel;
 using MongoDB.Bson;
-using MongoDB.Bson.IO;
 using MongoDB.Bson.Serialization;
 
 namespace Groundwork.Substrate.Mongo;
@@ -58,6 +57,20 @@ public sealed class MongoIndexSpecification
 /// <summary>Maps each declared portable value to a native BSON value without an envelope.</summary>
 public static class MongoValueCodec
 {
+    private static readonly IReadOnlyList<string> JsonAcceptedBsonTypeNames =
+    [
+        "object",
+        "array",
+        "string",
+        "int",
+        "long",
+        "double",
+        "decimal",
+        "bool",
+        // A JSON literal null is distinct from a CLR null supplied to a required column.
+        "null"
+    ];
+
     public static BsonValue Encode(object? value, ColumnDefinition column) =>
         Encode(value, column, isPresent: true);
 
@@ -100,7 +113,7 @@ public static class MongoValueCodec
         ArgumentNullException.ThrowIfNull(value);
         ArgumentNullException.ThrowIfNull(column);
         if (value.IsBsonNull)
-            return null;
+            return column.Type == PortableType.Json ? DecodeJson(value) : null;
 
         return column.Type switch
         {
@@ -131,6 +144,28 @@ public static class MongoValueCodec
         PortableType.Double => "double",
         _ => throw new ArgumentOutOfRangeException(nameof(column), column.Type, null)
     };
+
+    /// <summary>
+    /// Returns the native BSON types admitted for a value of the declared portable type.
+    /// JSON is represented without an envelope, so its object, array, scalar, and literal-null
+    /// forms each remain native BSON values. A nullable non-JSON column additionally admits BSON
+    /// null; a required JSON column admits BSON null because it can represent a JSON literal null,
+    /// while a CLR null supplied to <see cref="Encode(object?, ColumnDefinition)"/> remains refused.
+    /// </summary>
+    internal static IReadOnlyList<string> GetAcceptedBsonTypeNames(ColumnDefinition column)
+    {
+        ArgumentNullException.ThrowIfNull(column);
+        if (column.Type == PortableType.Json)
+            return JsonAcceptedBsonTypeNames;
+
+        var expected = GetBsonTypeName(column);
+        return column.IsNullable ? [expected, "null"] : [expected];
+    }
+
+    internal static string GetAcceptedBsonTypeDescription(ColumnDefinition column) =>
+        column.Type == PortableType.Json
+            ? $"one of the accepted BSON types [{string.Join(", ", GetAcceptedBsonTypeNames(column).Select(type => $"'{type}'"))}]"
+            : $"'{GetBsonTypeName(column)}'";
 
     private static BsonValue EncodeString(object value, ColumnDefinition column)
     {
@@ -189,7 +224,11 @@ public static class MongoValueCodec
         try
         {
             if (value is BsonValue bson)
+            {
+                if (!IsPortableJsonBsonValue(bson))
+                    throw new ArgumentException($"Column '{column.Name}' does not contain portable JSON.", nameof(value));
                 return bson.DeepClone();
+            }
             var json = value switch
             {
                 string text => text,
@@ -206,13 +245,77 @@ public static class MongoValueCodec
         }
     }
 
+    private static bool IsPortableJsonBsonValue(BsonValue value) => value.BsonType switch
+    {
+        BsonType.Document => value.AsBsonDocument.Elements.All(element => IsPortableJsonBsonValue(element.Value)),
+        BsonType.Array => value.AsBsonArray.All(IsPortableJsonBsonValue),
+        BsonType.String or
+        BsonType.Int32 or
+        BsonType.Int64 or
+        BsonType.Boolean or
+        BsonType.Null => true,
+        BsonType.Double => double.IsFinite(value.AsDouble),
+        BsonType.Decimal128 =>
+            !Decimal128.IsInfinity(value.AsDecimal128) &&
+            !Decimal128.IsNaN(value.AsDecimal128),
+        _ => false
+    };
+
     private static JsonElement DecodeJson(BsonValue value)
     {
-        using var document = JsonDocument.Parse(value.ToJson(new JsonWriterSettings
-        {
-            OutputMode = JsonOutputMode.RelaxedExtendedJson
-        }));
+        if (!IsPortableJsonBsonValue(value))
+            throw new InvalidOperationException("The BSON value does not contain portable JSON.");
+
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+            WritePortableJson(writer, value);
+        using var document = JsonDocument.Parse(stream.ToArray());
         return document.RootElement.Clone();
+    }
+
+    private static void WritePortableJson(Utf8JsonWriter writer, BsonValue value)
+    {
+        switch (value.BsonType)
+        {
+            case BsonType.Document:
+                writer.WriteStartObject();
+                foreach (var element in value.AsBsonDocument.Elements)
+                {
+                    writer.WritePropertyName(element.Name);
+                    WritePortableJson(writer, element.Value);
+                }
+                writer.WriteEndObject();
+                break;
+            case BsonType.Array:
+                writer.WriteStartArray();
+                foreach (var item in value.AsBsonArray)
+                    WritePortableJson(writer, item);
+                writer.WriteEndArray();
+                break;
+            case BsonType.String:
+                writer.WriteStringValue(value.AsString);
+                break;
+            case BsonType.Int32:
+                writer.WriteNumberValue(value.AsInt32);
+                break;
+            case BsonType.Int64:
+                writer.WriteNumberValue(value.AsInt64);
+                break;
+            case BsonType.Double:
+                writer.WriteNumberValue(value.AsDouble);
+                break;
+            case BsonType.Decimal128:
+                writer.WriteRawValue(value.AsDecimal128.ToString(), skipInputValidation: false);
+                break;
+            case BsonType.Boolean:
+                writer.WriteBooleanValue(value.AsBoolean);
+                break;
+            case BsonType.Null:
+                writer.WriteNullValue();
+                break;
+            default:
+                throw new InvalidOperationException("The BSON value does not contain portable JSON.");
+        }
     }
 
     private static int ExactInt32(object value, ColumnDefinition column) => value switch
