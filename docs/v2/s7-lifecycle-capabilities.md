@@ -61,10 +61,13 @@ var result = session.ApplyRetention(operationId, new RetentionExecutionOptions
 // result.AffectedKeys is complete, distinct, and in portable deterministic order.
 ```
 
-The projection names one declared scalar column and a finite maximum. Providers materialize at
+The projection names one declared scalar column and a finite maximum of at most 1,000,000 distinct
+values. Providers materialize at
 most `maximum + 1` values natively; the extra value refuses the pass with
 `GW-RETENTION-005` before any row, ledger claim, or completion is committed. JSON and storage-only
-Double columns are refused because they have no portable total ordering. Projection, bound, scope,
+Double columns are refused because they have no portable total ordering. Binary projections must
+declare a positive `MaxLength` no greater than 16 MiB so every admitted result can be serialized and
+replayed under the same contract. Projection, bound, scope,
 and operation identity are part of the canonical fingerprint, so a same-nonce retry returns the
 identical affected-key evidence while any changed request raises `GW-RETENTION-001`. The optional
 `IExactRetentionAffectedKeysStorageSession` marker and

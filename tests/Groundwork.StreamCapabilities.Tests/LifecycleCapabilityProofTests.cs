@@ -338,6 +338,89 @@ public sealed class LifecycleCapabilityProofTests
         }
     }
 
+    [Theory]
+    [InlineData(1_000_001)]
+    [InlineData(int.MaxValue)]
+    public void InMemory_exact_retention_rejects_unreplayable_affected_key_bounds_before_mutation(
+        int maximumDistinctValues)
+    {
+        using var connection = new InMemoryProviderFactory().Create(
+            "lifecycle-retention-affected-bound-" + maximumDistinctValues + "-" + Guid.NewGuid().ToString("N"));
+        var unit = AffectedKeyUnit("lifecycle-retention-affected-bound-" + Guid.NewGuid().ToString("N"));
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(AffectedValues("old", "first"));
+        session.Insert(AffectedValues("new", "newest"));
+
+        var refusal = Assert.Throws<ArgumentOutOfRangeException>(() => session.ApplyRetention(
+            new OperationId(DateTimeOffset.UtcNow, "unreplayable-bound"),
+            new RetentionExecutionOptions
+            {
+                AffectedKeyProjection = new RetentionAffectedKeyProjection("category", maximumDistinctValues)
+            }));
+
+        Assert.Equal("MaxDistinctValues", refusal.ParamName);
+        Assert.Equal(2, session.Query(All(unit)).Rows.Count);
+    }
+
+    [Fact]
+    public void InMemory_exact_retention_accepts_maximum_replayable_affected_key_bound()
+    {
+        using var connection = new InMemoryProviderFactory().Create(
+            "lifecycle-retention-affected-maximum-bound-" + Guid.NewGuid().ToString("N"));
+        var unit = AffectedKeyUnit("lifecycle-retention-affected-maximum-bound-" + Guid.NewGuid().ToString("N"));
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(AffectedValues("old", "first"));
+        session.Insert(AffectedValues("new", "newest"));
+        var operation = new OperationId(DateTimeOffset.UtcNow, "maximum-replayable-bound");
+        var options = new RetentionExecutionOptions
+        {
+            AffectedKeyProjection = new RetentionAffectedKeyProjection("category", 1_000_000)
+        };
+
+        var executed = session.ApplyRetention(operation, options);
+        var replayed = session.ApplyRetention(operation, options);
+
+        Assert.Equal(new object?[] { "old" }, executed.AffectedKeys);
+        Assert.Equal(RetentionOperationStatus.Replayed, replayed.Status);
+        Assert.Equal(executed.AffectedKeys, replayed.AffectedKeys);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(16 * 1024 * 1024 + 1)]
+    public void InMemory_exact_retention_rejects_unreplayable_binary_projection_before_mutation(
+        int? maximumLength)
+    {
+        using var connection = new InMemoryProviderFactory().Create(
+            "lifecycle-retention-affected-unreplayable-binary-" + Guid.NewGuid().ToString("N"));
+        var unit = BinaryAffectedKeyUnit(
+            "lifecycle-retention-affected-unreplayable-binary-" + Guid.NewGuid().ToString("N")) with
+        {
+            Columns =
+            [
+                new() { Name = "sequence", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence },
+                new() { Name = "category", Type = PortableType.Binary, IsNullable = true, MaxLength = maximumLength },
+                new() { Name = "payload", Type = PortableType.String, IsNullable = false, MaxLength = 200 }
+            ]
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(BinaryAffectedValues([1], "first"));
+        session.Insert(BinaryAffectedValues([2], "newest"));
+
+        var refusal = Assert.Throws<ArgumentException>(() => session.ApplyRetention(
+            new OperationId(DateTimeOffset.UtcNow, "unreplayable-binary-projection"),
+            new RetentionExecutionOptions
+            {
+                AffectedKeyProjection = new RetentionAffectedKeyProjection("category", 2)
+            }));
+
+        Assert.Contains("MaxLength", refusal.Message, StringComparison.Ordinal);
+        Assert.Equal(2, session.Query(All(unit)).Rows.Count);
+    }
+
     [Fact]
     public void Affected_key_projection_orders_binary_values_structurally()
     {

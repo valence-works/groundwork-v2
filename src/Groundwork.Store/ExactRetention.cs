@@ -194,6 +194,9 @@ internal static class RetentionOperationCodec
     internal static string SerializeResult(RetentionOperationResult result)
     {
         ArgumentNullException.ThrowIfNull(result);
+        if (result.AffectedKeys.Count > RetentionAffectedKeys.MaximumDistinctValues)
+            throw new InvalidDataException(
+                $"An exact retention result cannot contain more than {RetentionAffectedKeys.MaximumDistinctValues} affected values.");
         if (result.AffectedKeys.Count == 0)
             return string.Join(
                 '|',
@@ -250,7 +253,8 @@ internal static class RetentionOperationCodec
             var batches = reader.ReadInt32();
             var completed = reader.ReadBoolean();
             var count = reader.ReadInt32();
-            if (!Enum.IsDefined(status) || deleted < 0 || batches < 0 || count < 0 || count > 1_000_000)
+            if (!Enum.IsDefined(status) || deleted < 0 || batches < 0 || count < 0 ||
+                count > RetentionAffectedKeys.MaximumDistinctValues)
                 throw new InvalidDataException();
             var values = new object?[count];
             for (var index = 0; index < values.Length; index++)
@@ -306,6 +310,9 @@ internal static class RetentionOperationCodec
                 writer.Write(guid.ToByteArray());
                 break;
             case byte[] bytes:
+                if (bytes.Length > RetentionAffectedKeys.MaximumBinaryValueBytes)
+                    throw new InvalidDataException(
+                        $"An affected binary value cannot exceed {RetentionAffectedKeys.MaximumBinaryValueBytes} bytes.");
                 writer.Write((byte)8);
                 writer.Write(bytes.Length);
                 writer.Write(bytes);
@@ -332,7 +339,7 @@ internal static class RetentionOperationCodec
     private static byte[] ReadBytes(BinaryReader reader)
     {
         var count = reader.ReadInt32();
-        if (count < 0 || count > 16 * 1024 * 1024)
+        if (count < 0 || count > RetentionAffectedKeys.MaximumBinaryValueBytes)
             throw new InvalidDataException();
         var bytes = reader.ReadBytes(count);
         if (bytes.Length != count)

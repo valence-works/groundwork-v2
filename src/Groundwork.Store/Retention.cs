@@ -233,6 +233,10 @@ public static class RetentionSessionExtensions
             if (projection.MaxDistinctValues <= 0)
                 throw new ArgumentOutOfRangeException(nameof(projection.MaxDistinctValues),
                     "The maximum number of distinct affected values must be positive.");
+            if (projection.MaxDistinctValues > RetentionAffectedKeys.MaximumDistinctValues)
+                throw new ArgumentOutOfRangeException(nameof(projection.MaxDistinctValues),
+                    $"The maximum number of distinct affected values cannot exceed " +
+                    $"{RetentionAffectedKeys.MaximumDistinctValues}.");
         }
     }
 
@@ -249,6 +253,9 @@ public static class RetentionSessionExtensions
 
 internal static class RetentionAffectedKeys
 {
+    internal const int MaximumDistinctValues = 1_000_000;
+    internal const int MaximumBinaryValueBytes = 16 * 1024 * 1024;
+
     internal static IReadOnlyList<object?> DistinctAndOrder(
         IEnumerable<IReadOnlyDictionary<string, object?>> rows,
         RetentionAffectedKeyProjection projection,
@@ -298,6 +305,14 @@ internal static class RetentionAffectedKeys
             throw new ArgumentException(
                 $"The affected-key projection column '{projection.Column}' uses '{column.Type}', which " +
                 "does not have portable total-order semantics; choose a comparable scalar column.", nameof(options));
+        if (column.Type == PortableType.Binary &&
+            column.MaxLength is not (>= 1 and <= MaximumBinaryValueBytes))
+        {
+            throw new ArgumentException(
+                $"The affected-key projection column '{projection.Column}' must declare a positive MaxLength " +
+                $"no greater than {MaximumBinaryValueBytes} bytes so its exact result can be replayed safely.",
+                nameof(options));
+        }
         return projection;
     }
 

@@ -262,13 +262,16 @@ var result = session.ApplyRetention(
     });
 ```
 
-The finite bound is strict: providers read at most `bound + 1` values natively and refuse with
+The finite bound is strict and cannot exceed 1,000,000 distinct values: providers read at most
+`bound + 1` values natively and refuse with
 `GW-RETENTION-005` before mutating rows or claiming the ledger when the bound is exceeded. A
 successful `AffectedKeys` list is complete, distinct, null-first, and deterministically ordered
 using Groundwork's portable structural comparison. The projection, bound, scope, and operation
 identity participate in the canonical fingerprint; the same nonce and request replays the exact
 same result, while changing any of them is `GW-RETENTION-001`. JSON and Double projections are
-refused as non-orderable. Inspect `IExactRetentionAffectedKeysStorageSession` and
+refused as non-orderable. Binary projections require a positive declared `MaxLength` no greater
+than 16 MiB, matching the exact-result codec's replay-safe value limit. Inspect
+`IExactRetentionAffectedKeysStorageSession` and
 `BatchWriteCapabilities.ExactRetentionAffectedKeys` before requesting this optional contract.
 
 Exact retention is **atomic at the provider boundary**: the bounded delete loop, ledger placeholder,
