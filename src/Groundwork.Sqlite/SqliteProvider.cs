@@ -76,6 +76,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
             exactAppendOutcomes: true,
             durableHighWaterInspection: true,
             exactRetention: true,
+            exactRetentionAffectedKeys: true,
             atomicCommit: true,
             compareAndDelete: true,
             setMutation: "Updates or deletes every row matching an index-covered portable predicate on SQLite in one UPDATE/DELETE statement; the statement is atomic and reports its affected-row count."));

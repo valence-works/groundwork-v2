@@ -50,6 +50,30 @@ uses the declaration, a positive value keeps that many newest rows, and zero del
 each partition without resetting the durable sequence high-water. The effective value is part of
 the exact-operation fingerprint, so a same-nonce retry with a different override is refused.
 
+An exact pass may also request a bounded affected-key projection:
+
+```csharp
+var result = session.ApplyRetention(operationId, new RetentionExecutionOptions
+{
+    MaxRowsPerBatch = 128,
+    AffectedKeyProjection = new RetentionAffectedKeyProjection("tenant", maxDistinctValues: 100)
+});
+// result.AffectedKeys is complete, distinct, and in portable deterministic order.
+```
+
+The projection names one declared scalar column and a finite maximum of at most 1,000,000 distinct
+values. Providers materialize at
+most `maximum + 1` values natively; the extra value refuses the pass with
+`GW-RETENTION-005` before any row, ledger claim, or completion is committed. JSON and storage-only
+Double columns are refused because they have no portable total ordering. Binary projections must
+declare a positive `MaxLength` no greater than 16 MiB so every admitted result can be serialized and
+replayed under the same contract. Projection, bound, scope,
+and operation identity are part of the canonical fingerprint, so a same-nonce retry returns the
+identical affected-key evidence while any changed request raises `GW-RETENTION-001`. The optional
+`IExactRetentionAffectedKeysStorageSession` marker and
+`BatchWriteCapabilities.ExactRetentionAffectedKeys` descriptor are advertised only by providers
+that can preserve this transaction boundary; standalone MongoDB intentionally omits and refuses it.
+
 Exact retention is atomic at the provider boundary. The bounded delete loop,
 ledger placeholder, and final result update share one transaction (or an
 equivalent provider transaction). Cancellation or a failed batch rolls back the
