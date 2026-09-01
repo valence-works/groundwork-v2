@@ -148,14 +148,19 @@ docker run -d --name gw-pg -e POSTGRES_PASSWORD=groundwork -p 5432:5432 postgres
 docker run -d --name gw-mssql -e ACCEPT_EULA=Y -e MSSQL_SA_PASSWORD=Groundwork!2026 -p 1433:1433 \
   mcr.microsoft.com/mssql/server:2022-CU21-ubuntu-22.04
 
-docker run -d --name gw-mongo -p 27017:27017 mongo:7.0.24 --replSet rs0 --bind_ip_all
+docker run -d --name gw-mongo --ulimit nofile=64000:64000 -p 27017:27017 \
+  mongo:7.0.24 --replSet rs0 --bind_ip_all
 docker exec gw-mongo mongosh --quiet --eval \
   'rs.initiate({_id:"rs0",members:[{_id:0,host:"localhost:27017"}]})'
 ```
 
 Remember: MongoDB needs a transaction-capable replica set or sharded deployment for transactional
 capabilities; the documented local fixture and production-supported topology use a replica set. A
-standalone instance will legitimately skip or refuse those tests.
+standalone instance will legitimately skip or refuse those tests. Keep the fixture's soft and hard
+open-file limits at `64000`: the Docker default of `1024` is too small when the live-provider suites
+create collections and indexes concurrently, and MongoDB aborts rather than recovering after
+WiredTiger exhausts that limit. `docker restart` cannot change a container's configured limit; an
+older disposable fixture must be recreated with the command above.
 
 ### The variable gates the tests; the database still has to exist
 
