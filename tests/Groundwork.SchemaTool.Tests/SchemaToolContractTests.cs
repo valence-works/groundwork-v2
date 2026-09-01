@@ -42,6 +42,11 @@ public sealed class SchemaToolContractTests
 
         Assert.Contains($"Usage: groundwork {command}", output.ToString(), StringComparison.Ordinal);
         Assert.Contains("--provider-assembly", output.ToString(), StringComparison.Ordinal);
+        if (command == "validate")
+        {
+            Assert.Contains("--deployment-id", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains("--phase", output.ToString(), StringComparison.Ordinal);
+        }
         Assert.Empty(error.ToString());
     }
 
@@ -59,7 +64,7 @@ public sealed class SchemaToolContractTests
     public async Task Built_in_provider_aliases_are_loaded_without_an_explicit_assembly()
     {
         var schema = Temp("built-in-provider-aliases.json", ValidSchema);
-        foreach (var provider in new[] { "sqlite", "postgresql", "sqlserver", "mongodb" })
+        foreach (var provider in new[] { "sqlite", "postgresql", "sqlserver", "mongodb", "mysql" })
         {
             output.GetStringBuilder().Clear();
             error.GetStringBuilder().Clear();

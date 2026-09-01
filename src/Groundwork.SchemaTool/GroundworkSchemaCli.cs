@@ -1054,7 +1054,8 @@ public static class GroundworkSchemaCli
                 "validate" =>
                     "Usage: groundwork validate --schema <file> --provider <name> [--offline] " +
                     "[--connection <value> | --connection-env <name> | --connection-file <file> | --connection-stdin] " +
-                    "[--database <name>] [--provider-assembly <file>] [--coverage <file>] " +
+                    "[--deployment-id <id>] [--database <name>] [--provider-assembly <file>] [--coverage <file>] " +
+                    "[--phase expand|contract] " +
                     "[--output json|human]" + Environment.NewLine,
                 "apply" =>
                     "Usage: groundwork apply --schema <file> --provider <name> --safe " +

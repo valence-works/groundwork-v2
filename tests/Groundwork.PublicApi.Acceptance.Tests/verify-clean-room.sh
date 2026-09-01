@@ -28,7 +28,7 @@ for required in \
   Groundwork.Query.Planning Groundwork.Schema \
   Groundwork.Records Groundwork.Store Groundwork.Records.Store Groundwork.Diagnostics \
   Groundwork.Substrate.Relational Groundwork.Sqlite Groundwork.MySql Groundwork.Documents \
-  Groundwork.EntityFrameworkCore Groundwork.Testing; do
+  Groundwork.EntityFrameworkCore Groundwork.Testing Groundwork.Tool; do
   test -f "$feed/$required.$version.nupkg" || {
     echo "The local feed is missing $required.$version." >&2
     exit 1
@@ -89,6 +89,22 @@ run_external_consumer() {
   NUGET_PACKAGES="$package_cache" dotnet tool install Groundwork.Tool --version "$version" \
     --tool-path "$tool_root" --configfile "$external_root/NuGet.Config" --no-cache --verbosity quiet
   test "$("$tool_root/groundwork" --version)" = "Groundwork.Tool $version"
+
+  schema_file="$external_root/groundwork.schema.json"
+  database="$external_root/groundwork.db"
+  printf '%s\n' '{"tables":[{"name":"tickets","columns":[{"name":"id","type":"String","nullable":false,"length":64,"precision":null,"scale":null,"folding":"None","generation":"Supplied"}],"key":["id"],"indexes":[]}]}' > "$schema_file"
+
+  "$tool_root/groundwork" apply --help > "$external_root/apply-help.txt"
+  grep -Fq 'Usage: groundwork apply' "$external_root/apply-help.txt"
+  "$tool_root/groundwork" apply --schema "$schema_file" --provider sqlite \
+    --database "$database" --safe --output json > "$external_root/apply-first.json"
+  test -f "$database"
+  "$tool_root/groundwork" apply --schema "$schema_file" --provider sqlite \
+    --database "$database" --safe --output json > "$external_root/apply-second.json"
+  grep -Eq '"targetMutated"[[:space:]]*:[[:space:]]*false' "$external_root/apply-second.json"
+  "$tool_root/groundwork" plan --schema "$schema_file" --provider sqlite \
+    --database "$database" --output json > "$external_root/plan.json"
+  grep -Eq '"targetMutated"[[:space:]]*:[[:space:]]*false' "$external_root/plan.json"
 }
 
 # Twice on the primary framework, because a second clean build from the same artifacts is what
