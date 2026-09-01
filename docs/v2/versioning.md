@@ -102,8 +102,18 @@ generators, and the portable contract packages remain `netstandard2.0`.
 the SDK's own MSBuild process rather than into the consumer's application.
 
 A nuget.org publishing pipeline exists alongside the Feedz preview channel. It
-validates on every run and publishes only on an explicit release, behind a
-protected environment and a credential that is a maintainer decision to
-provision. Publication is accepted only after every
+validates on every manual run, but a published GitHub release does not trigger
+it: previews remain Feedz-only unless a maintainer intentionally dispatches the
+workflow. To publish an exact version to nuget.org, dispatch
+`.github/workflows/publish-nuget.yml` against the intended release ref with
+`publish: true`, and provide that exact version in both `version` and `confirm`:
+
+```bash
+gh workflow run publish-nuget.yml --ref v0.4.0-preview.4 \
+  -f version=0.4.0-preview.4 -f publish=true -f confirm=0.4.0-preview.4
+```
+
+The run remains behind a protected environment and a credential that is a
+maintainer decision to provision. Publication is accepted only after every
 package in that allowlist and `Groundwork.Tool` restore at the exact version
-from Feedz.
+from nuget.org.

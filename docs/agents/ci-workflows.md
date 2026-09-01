@@ -3,6 +3,22 @@
 Groundwork separates verification by purpose and cadence. The split changes when evidence runs; it
 does not remove checks.
 
+## Release publication
+
+`publish-feedz.yml` publishes Feedz-only previews when a GitHub release is published. The separate
+`publish-nuget.yml` workflow is manual-only, so publishing that same GitHub release does not start a
+nuget.org run. To intentionally publish an exact version to nuget.org, dispatch it against the
+release tag and repeat the version in both inputs:
+
+```bash
+gh workflow run publish-nuget.yml --ref v0.4.0-preview.4 \
+  -f version=0.4.0-preview.4 -f publish=true -f confirm=0.4.0-preview.4
+```
+
+The dispatch still runs the full package/test, layout, clean-room, integrity, credential, symbol,
+protected-environment, and post-publication exact-version restore gates. A preview release does not
+need this dispatch unless nuget.org distribution is explicitly intended.
+
 ## Correctness
 
 `.github/workflows/ci.yml` (`Correctness`) runs for every pull request and push to `main`. It owns

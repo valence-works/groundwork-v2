@@ -6,12 +6,27 @@ Groundwork previews are **not on nuget.org yet**. They are published to a public
 https://f.feedz.io/valence-works/groundwork/nuget/index.json
 ```
 
-> A nuget.org release pipeline exists (`.github/workflows/publish-nuget.yml`) and is exercised on
-> every run, but it publishes nothing: it has no push or pull-request trigger, requires an explicit
-> GitHub release or a manually retyped version, runs behind a protected environment, and needs a
+> A nuget.org publication pipeline exists (`.github/workflows/publish-nuget.yml`) but is manual-only:
+> publishing a GitHub release does not start it. An intentional dispatch must provide the exact
+> package version in both `version` and `confirm`, runs behind a protected environment, and needs a
 > credential this repository does not hold. **Until a maintainer decides to publish, install from
 > Feedz.** When that changes, this page will say so and the nuget.org steps will be the shorter
 > ones — no `nuget.config` and no `--add-source`.
+
+## Intentionally publishing to nuget.org
+
+Feedz-only previews stay on the published-release workflow. If a maintainer deliberately wants the
+same exact package closure on nuget.org, dispatch the NuGet workflow against the release tag and
+repeat the exact version in both inputs:
+
+```bash
+gh workflow run publish-nuget.yml --ref v0.4.0-preview.4 \
+  -f version=0.4.0-preview.4 -f publish=true -f confirm=0.4.0-preview.4
+```
+
+The workflow still requires the full package/test proof, package layout and integrity manifests,
+the symbol push, the protected `nuget-org` environment, and a clean exact-version restore from
+nuget.org after publication.
 
 ## 1. Configure the feed
 

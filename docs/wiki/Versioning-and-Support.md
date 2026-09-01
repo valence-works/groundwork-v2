@@ -9,10 +9,11 @@ https://f.feedz.io/valence-works/groundwork/nuget/index.json
 ```
 
 Feedz stays the preview channel. A nuget.org release pipeline is in place and validated on every
-run, but it cannot publish on its own: it has no push or pull-request trigger, requires a published
-GitHub release or a manually retyped version, runs behind a protected environment with required
+manual run, but a published GitHub release does not start it. An intentional dispatch must provide
+the exact version in both `version` and `confirm`, runs behind a protected environment with required
 reviewers, and needs a credential the repository does not hold. Publishing to a public feed is a
-maintainer decision, not something CI arrives at.
+maintainer decision, not something CI arrives at. See [Installation](Installation) for the exact
+dispatch command.
 
 ## Target frameworks
 
