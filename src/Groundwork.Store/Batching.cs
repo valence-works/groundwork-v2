@@ -999,6 +999,10 @@ internal class BatchStorageSession : IStorageSession, IProviderBoundStorageSessi
 
     public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null)
     {
+        if (options?.AffectedKeyProjection is not null)
+            throw new InvalidOperationException(
+                "GW-RETENTION-006: affected-key projection requires operation-identified exact retention; " +
+                "use ApplyRetention(OperationId, options).");
         context.FlushAll();
         return inner is IRetentionStorageSession native
             ? native.ApplyRetention(options)
@@ -1007,6 +1011,10 @@ internal class BatchStorageSession : IStorageSession, IProviderBoundStorageSessi
 
     public async ValueTask<RetentionResult> ApplyRetentionAsync(RetentionExecutionOptions? options = null)
     {
+        if (options?.AffectedKeyProjection is not null)
+            throw new InvalidOperationException(
+                "GW-RETENTION-006: affected-key projection requires operation-identified exact retention; " +
+                "use ApplyRetention(OperationId, options).");
         var cancellationToken = options?.CancellationToken ?? CancellationToken.None;
         await context.FlushAllAsync(cancellationToken).ConfigureAwait(false);
         return inner is IRetentionStorageSession native
