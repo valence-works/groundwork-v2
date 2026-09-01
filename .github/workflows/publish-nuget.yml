@@ -1,13 +1,13 @@
 # Publishing Groundwork to nuget.org
 #
-# This workflow builds, validates, and — only on an explicit release — publishes the 26-package
-# public set to nuget.org. The Feedz feed remains the nightly preview channel and is unaffected;
+# This workflow builds, validates, and — only on an explicitly requested manual run — publishes
+# the 26-package public set to nuget.org. Feedz-only previews remain on the published-release path;
 # see publish-feedz.yml.
 #
 # **Nothing here can publish by accident.** Four independent conditions must all hold:
 #
-# 1. There is no `push` and no `pull_request` trigger, so ordinary repository activity cannot
-#    start this workflow at all.
+# 1. The only trigger is `workflow_dispatch`, so pushes, pull requests, and published GitHub
+#    releases cannot start this workflow automatically.
 # 2. A manual run must set `publish: true` **and** type the exact package version into `confirm`.
 #    The job compares them and refuses a mismatch, so a stray click cannot ship a release.
 # 3. The publish job runs in the `nuget-org` GitHub environment. Configure that environment with
@@ -18,16 +18,16 @@
 #
 # Everything before the push — build, full test suite on every shipped target framework, packaging
 # contract tests, pack, layout validation, and the clean-room package-only consumer proof — runs on
-# every trigger, so the release path stays continuously exercised without ever publishing.
+# every manual run, so the release path stays continuously exercised without ever publishing.
 #
-# To do a real release: publish a GitHub release tagged `v<version>` (for example `v0.2.0`), then
-# approve the `nuget-org` environment when GitHub asks.
+# To do a real nuget.org publication: dispatch this workflow against the intended release ref with
+# `publish: true`, provide the exact package version in both `version` and `confirm`, then approve
+# the `nuget-org` environment when GitHub asks. Publishing a GitHub release alone only publishes to
+# Feedz through publish-feedz.yml.
 
 name: Publish nuget.org packages
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       version:
@@ -143,11 +143,9 @@ jobs:
 
   publish:
     needs: package
-    # A published GitHub release, or a manual run that explicitly asked to publish. There is no
-    # push or pull_request trigger on this workflow, so no other event can reach this job.
-    if: >-
-      (github.event_name == 'release' && github.event.action == 'published') ||
-      (github.event_name == 'workflow_dispatch' && inputs.publish == true)
+    # Only a manual run that explicitly asked to publish can reach this job. There is no push,
+    # pull_request, or release trigger on this workflow.
+    if: github.event_name == 'workflow_dispatch' && inputs.publish == true
     runs-on: ubuntu-latest
     # Configure this environment with required reviewers: nuget.org publishes are irreversible,
     # because a published version is never replaced.
