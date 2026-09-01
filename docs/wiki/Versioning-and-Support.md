@@ -129,6 +129,19 @@ remains valid content. Mongo-only BSON values are refused recursively at the cod
 writes and later admission use the same accepted-type vocabulary. See the complete
 [0.4.0-preview.3 release notes](../v2/releases/0.4.0-preview.3.md).
 
+### `0.4.0-preview.4` — Index-compatible relational ordering
+
+This patch preview preserves the `0.4.0-preview.3` public API and persisted catalog contract.
+Existing `0.4.0-preview.3` catalogs remain compatible; no discard, migration, or schema
+re-application is required for this update.
+
+Relational renderers now omit redundant null-rank expressions only when the selected
+provider-resolved index declaration proves an ordered column is non-nullable. Matching composite
+indexes can therefore satisfy the requested order without an unnecessary sort, while nullable or
+unproven columns retain portable explicit null ordering. Provider-specific string, decimal, GUID,
+and keyset-continuation semantics remain unchanged. See the complete
+[0.4.0-preview.4 release notes](../v2/releases/0.4.0-preview.4.md).
+
 ---
 
 ## Provider support matrix
