@@ -103,6 +103,8 @@ public sealed class MySqlQueryRenderer : RelationalQueryRenderer
             return base.RenderOrderTerm(term);
         var expression = RenderColumn(term.Column);
         var direction = term.Direction == OrderDirection.Ascending ? "ASC" : "DESC";
+        if (!term.Column.IsNullable)
+            return RenderOrdinalKey(expression) + " " + direction;
         var nullRank = term.NullOrder == NullOrder.First ? "0" : "1";
         var nonNullRank = term.NullOrder == NullOrder.First ? "1" : "0";
         return $"CASE WHEN {expression} IS NULL THEN {nullRank} ELSE {nonNullRank} END ASC, {RenderOrdinalKey(expression)} {direction}";

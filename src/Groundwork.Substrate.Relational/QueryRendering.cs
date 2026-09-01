@@ -473,7 +473,7 @@ public abstract class RelationalQueryRenderer
                         .Select(RenderDistinctPartition));
                     var rankOrder = effectiveOrder.Count == 0
                         ? "(SELECT 1)"
-                        : string.Join(", ", effectiveOrder.Select(RenderOrderTerm));
+                        : RenderOrder(effectiveOrder, options);
                     var inputAlias = dialect.QuoteIdentifier("__groundwork_distinct_input");
                     var rankAlias = dialect.QuoteIdentifier("__groundwork_distinct_rank");
                     latestSource += ", __groundwork_distinct_ranked AS (SELECT " + inputAlias + ".*, ROW_NUMBER() OVER (PARTITION BY " +
@@ -498,7 +498,7 @@ public abstract class RelationalQueryRenderer
                 var page = "SELECT * FROM " + pageSource + " WHERE " + pageWhere;
                 if (effectiveOrder.Count != 0)
                 {
-                    page += " ORDER BY " + string.Join(", ", effectiveOrder.Select(RenderOrderTerm));
+                    page += " ORDER BY " + RenderOrder(effectiveOrder, options);
                     if (RequiresOrderForOffset && request.Paging.Offset is null && request.Paging.Limit is null)
                         page += " OFFSET 0 ROWS";
                 }
@@ -509,7 +509,7 @@ public abstract class RelationalQueryRenderer
                     "SELECT __groundwork_page.*, __groundwork_total.__groundwork_total_count, CASE WHEN __groundwork_page.__groundwork_has_row IS NULL THEN 1 ELSE 0 END AS __groundwork_count_only " +
                     "FROM __groundwork_total LEFT JOIN __groundwork_page ON 1 = 1 ORDER BY " +
                     dialect.QuoteIdentifier("__groundwork_count_only") + " ASC" +
-                    (effectiveOrder.Count == 0 ? string.Empty : ", " + string.Join(", ", effectiveOrder.Select(RenderOrderTerm))) + ";";
+                    (effectiveOrder.Count == 0 ? string.Empty : ", " + RenderOrder(effectiveOrder, options)) + ";";
             }
         }
         else
@@ -540,7 +540,7 @@ public abstract class RelationalQueryRenderer
                         .Select(RenderDistinctPartition));
                     var rankOrder = effectiveOrder.Count == 0
                         ? "(SELECT 1)"
-                        : string.Join(", ", effectiveOrder.Select(RenderOrderTerm));
+                        : RenderOrder(effectiveOrder, options);
                     var inputAlias = dialect.QuoteIdentifier("__groundwork_distinct_input");
                     var rankAlias = dialect.QuoteIdentifier("__groundwork_distinct_rank");
                     source = baseCte + ", __groundwork_distinct_ranked AS (SELECT " + inputAlias + ".*, ROW_NUMBER() OVER (PARTITION BY " +
@@ -552,7 +552,7 @@ public abstract class RelationalQueryRenderer
             if (cursor is not null && (request.LatestPerKey is not null || request.Distinct))
                 sql += " AND (" + RenderContinuation(effectiveOrder, cursor, parameters, ref parameterIndex) + ")";
             if (effectiveOrder.Count != 0)
-                sql += " ORDER BY " + string.Join(", ", effectiveOrder.Select(RenderOrderTerm));
+                sql += " ORDER BY " + RenderOrder(effectiveOrder, options);
             else if ((request.Paging.Offset is not null || request.Paging.Limit is not null) && RequiresOrderForOffset)
                 sql += " ORDER BY (SELECT 1)";
             sql += RenderPaging(request.Paging, parameters, ref parameterIndex) + ";";
@@ -687,20 +687,20 @@ public abstract class RelationalQueryRenderer
                     if (cursor is not null)
                         pageWhere += " AND (" + RenderContinuation(effectiveOrder, cursor, parameters, ref parameterIndex) + ")";
                     var page = "SELECT * FROM " + pageSource + " WHERE " + pageWhere;
-                    page += JoinedOrderAndPaging(request.Paging, effectiveOrder, parameters, ref parameterIndex);
+                    page += JoinedOrderAndPaging(request.Paging, effectiveOrder, parameters, ref parameterIndex, options);
                     sql = baseCte + ", __groundwork_page AS (" + page + "), __groundwork_total AS (SELECT " +
                         RenderCountAggregate() + " AS __groundwork_total_count FROM " + countSource + countWhere + ") " +
                         "SELECT __groundwork_page.*, __groundwork_total.__groundwork_total_count, " +
                         "CASE WHEN __groundwork_page.__groundwork_has_row IS NULL THEN 1 ELSE 0 END AS __groundwork_count_only " +
                         "FROM __groundwork_total LEFT JOIN __groundwork_page ON 1 = 1 ORDER BY " +
                         dialect.QuoteIdentifier("__groundwork_count_only") + " ASC" +
-                        (effectiveOrder.Count == 0 ? string.Empty : ", " + string.Join(", ", effectiveOrder.Select(RenderOrderTerm))) + ";";
+                        (effectiveOrder.Count == 0 ? string.Empty : ", " + RenderOrder(effectiveOrder, options)) + ";";
                 }
             }
             else if (!scope.UsesDerivedSource)
             {
                 sql = "SELECT " + selection + " FROM " + from + " WHERE " + where +
-                    JoinedOrderAndPaging(request.Paging, effectiveOrder, parameters, ref parameterIndex) + ";";
+                    JoinedOrderAndPaging(request.Paging, effectiveOrder, parameters, ref parameterIndex, options) + ";";
             }
             else
             {
@@ -717,7 +717,7 @@ public abstract class RelationalQueryRenderer
                 if (cursor is not null)
                     sourceWhere += " AND (" + RenderContinuation(effectiveOrder, cursor, parameters, ref parameterIndex) + ")";
                 sql = baseCte + " SELECT * FROM " + source + " WHERE " + sourceWhere +
-                    JoinedOrderAndPaging(request.Paging, effectiveOrder, parameters, ref parameterIndex) + ";";
+                    JoinedOrderAndPaging(request.Paging, effectiveOrder, parameters, ref parameterIndex, options) + ";";
             }
 
             if (parameters.Count > parameterBudget)
@@ -810,7 +810,7 @@ public abstract class RelationalQueryRenderer
             : options.TieBreakColumns;
         latestOrder.AddRange(tieBreaks
             .Where(column => !SameQualifiedColumn(column, latest.Timestamp))
-            .Select(column => RenderOrderTerm(new OrderTerm(column, OrderDirection.Ascending, NullOrder.First))));
+            .Select(column => RenderOrderTerm(new OrderTerm(column, OrderDirection.Ascending, NullOrder.First), options)));
         var partitions = new[] { latest.Key }
             .Concat(options.LatestPartitionColumns)
             .GroupBy(column => (column.Table, column.Name))
@@ -833,7 +833,7 @@ public abstract class RelationalQueryRenderer
             .Select(RenderDistinctPartition));
         var rankOrder = effectiveOrder.Count == 0
             ? "(SELECT 1)"
-            : string.Join(", ", effectiveOrder.Select(RenderOrderTerm));
+            : RenderOrder(effectiveOrder, options);
         var inputAlias = dialect.QuoteIdentifier("__groundwork_distinct_input");
         var rankAlias = dialect.QuoteIdentifier("__groundwork_distinct_rank");
         return ", __groundwork_distinct_ranked AS (SELECT " + inputAlias +
@@ -846,13 +846,14 @@ public abstract class RelationalQueryRenderer
         Paging paging,
         IReadOnlyList<OrderTerm> effectiveOrder,
         ICollection<QueryRenderParameter> parameters,
-        ref int parameterIndex)
+        ref int parameterIndex,
+        QueryRenderOptions options)
     {
         var text = effectiveOrder.Count == 0
             ? paging.Offset is not null || paging.Limit is not null
                 ? RequiresOrderForOffset ? " ORDER BY (SELECT 1)" : string.Empty
                 : string.Empty
-            : " ORDER BY " + string.Join(", ", effectiveOrder.Select(RenderOrderTerm));
+            : " ORDER BY " + RenderOrder(effectiveOrder, options);
         return text + RenderPaging(paging, parameters, ref parameterIndex);
     }
 
@@ -881,7 +882,7 @@ public abstract class RelationalQueryRenderer
         {
             var rankOrder = effectiveOrder.Count == 0
                 ? "(SELECT 1)"
-                : string.Join(", ", effectiveOrder.Select(RenderOrderTerm));
+                : RenderOrder(effectiveOrder, options);
             var rankAlias = dialect.QuoteIdentifier("__groundwork_reduction_distinct_rank");
             windowed = "SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY " +
                 RenderDistinctPartition(reduction.Column) + " ORDER BY " + rankOrder + ") AS " + rankAlias +
@@ -897,7 +898,7 @@ public abstract class RelationalQueryRenderer
         {
             windowed = "SELECT * FROM (" + source + ") AS " + inputAlias;
         }
-        windowed += JoinedOrderAndPaging(request.Paging, effectiveOrder, parameters, ref parameterIndex);
+        windowed += JoinedOrderAndPaging(request.Paging, effectiveOrder, parameters, ref parameterIndex, options);
 
         var pageAlias = dialect.QuoteIdentifier("__groundwork_reduction_page");
         var valueExpression = pageAlias + "." + dialect.QuoteIdentifier(scope.Field(reduction.Column));
@@ -909,7 +910,7 @@ public abstract class RelationalQueryRenderer
             var rankName = dialect.QuoteIdentifier("__groundwork_reduction_value_rank");
             var direction = reduction is ResultShape.Min ? OrderDirection.Ascending : OrderDirection.Descending;
             aggregateSource = "SELECT " + orderedAlias + ".*, ROW_NUMBER() OVER (ORDER BY " +
-                RenderOrderTerm(new OrderTerm(reduction.Column, direction, NullOrder.Last)) + ") AS " + rankName +
+                RenderOrderTerm(new OrderTerm(reduction.Column, direction, NullOrder.Last), options) + ") AS " + rankName +
                 " FROM (" + windowed + ") AS " + orderedAlias;
             aggregate = RenderReductionAggregate(
                 reduction,
@@ -1087,7 +1088,7 @@ public abstract class RelationalQueryRenderer
             // unless it is selected literally).
             var rankOrder = effectiveOrder.Count == 0
                 ? "(SELECT 1)"
-                : string.Join(", ", effectiveOrder.Select(RenderOrderTerm));
+                : RenderOrder(effectiveOrder, options);
             windowed = "SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY " +
                 RenderDistinctPartition(reduction.Column) + " ORDER BY " + rankOrder + ") AS " +
                 dialect.QuoteIdentifier("__groundwork_reduction_distinct_rank") + " FROM (" + source +
@@ -1108,7 +1109,7 @@ public abstract class RelationalQueryRenderer
 
         var hasPaging = request.Paging.Offset is not null || request.Paging.Limit is not null;
         if (hasPaging && effectiveOrder.Count != 0)
-            windowed += " ORDER BY " + string.Join(", ", effectiveOrder.Select(RenderOrderTerm));
+            windowed += " ORDER BY " + RenderOrder(effectiveOrder, options);
         else if (hasPaging && RequiresOrderForOffset)
             windowed += " ORDER BY (SELECT 1)";
         windowed += RenderPaging(request.Paging, parameters, ref parameterIndex);
@@ -1122,7 +1123,7 @@ public abstract class RelationalQueryRenderer
             var orderedAlias = dialect.QuoteIdentifier("__groundwork_reduction_ordered");
             var rankName = dialect.QuoteIdentifier("__groundwork_reduction_value_rank");
             var direction = reduction is ResultShape.Min ? OrderDirection.Ascending : OrderDirection.Descending;
-            var orderTerm = RenderOrderTerm(new OrderTerm(reduction.Column, direction, NullOrder.Last));
+            var orderTerm = RenderOrderTerm(new OrderTerm(reduction.Column, direction, NullOrder.Last), options);
             aggregateSource = "SELECT " + orderedAlias + ".*, ROW_NUMBER() OVER (ORDER BY " + orderTerm + ") AS " + rankName +
                 " FROM (" + windowed + ") AS " + orderedAlias;
             var orderedValue = pageAlias + "." + dialect.QuoteIdentifier(reduction.Column.Name);
@@ -1153,7 +1154,7 @@ public abstract class RelationalQueryRenderer
         var latestOrder = new List<string> { RenderColumn(latest.Timestamp) + " DESC" };
         latestOrder.AddRange(tieBreak
             .Where(column => !string.Equals(column.Name, latest.Timestamp.Name, StringComparison.Ordinal))
-            .Select(column => RenderOrderTerm(new OrderTerm(column, OrderDirection.Ascending, NullOrder.First))));
+            .Select(column => RenderOrderTerm(new OrderTerm(column, OrderDirection.Ascending, NullOrder.First), options)));
         var partitions = new[] { latest.Key }
             .Concat(options.LatestPartitionColumns)
             .GroupBy(column => column.Name, StringComparer.Ordinal)
@@ -1212,6 +1213,29 @@ public abstract class RelationalQueryRenderer
 
     private IReadOnlyList<OrderTerm> EffectiveOrder(QueryRequest request, QueryRenderOptions options) =>
         options.GetEffectiveOrder(request);
+
+    private string RenderOrder(IReadOnlyList<OrderTerm> order, QueryRenderOptions options) =>
+        string.Join(", ", order.Select(term => RenderOrderTerm(term, options)));
+
+    private string RenderOrderTerm(OrderTerm term, QueryRenderOptions options)
+    {
+        var selectedIndex = options.FindSelectedIndex();
+        var provesNonNull = selectedIndex is not null &&
+            selectedIndex.Columns.Any(column => string.Equals(column, term.Column.Name, StringComparison.Ordinal)) &&
+            !selectedIndex.NullableColumns.Contains(term.Column.Name) &&
+            (joinedColumnScope.Value is not { } scope || term.Column.Table == scope.Join.SourceTable);
+        var column = term.Column;
+        var carrier = new ColumnRef(
+            column.Table,
+            column.Name,
+            column.Type,
+            isNullable: !provesNonNull,
+            maxLength: column.MaxLength,
+            decimalPrecision: column.DecimalPrecision,
+            decimalScale: column.DecimalScale,
+            stringComparison: column.StringComparison);
+        return RenderOrderTerm(new OrderTerm(carrier, term.Direction, term.NullOrder));
+    }
 
     protected string RenderPredicate(
         Predicate predicate,
@@ -1392,6 +1416,8 @@ public abstract class RelationalQueryRenderer
     {
         var expression = RenderColumn(term.Column);
         var direction = term.Direction == OrderDirection.Ascending ? "ASC" : "DESC";
+        if (!term.Column.IsNullable)
+            return expression + " " + direction;
         var nullRank = term.NullOrder == NullOrder.First ? "0" : "1";
         var nonNullRank = term.NullOrder == NullOrder.First ? "1" : "0";
         return "CASE WHEN " + expression + " IS NULL THEN " + nullRank + " ELSE " + nonNullRank + " END ASC, " + expression + " " + direction;

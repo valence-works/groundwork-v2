@@ -65,6 +65,8 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
         {
             var guidExpression = RenderGuidOrderKey(RenderColumn(term.Column));
             var guidDirection = term.Direction == OrderDirection.Ascending ? "ASC" : "DESC";
+            if (!term.Column.IsNullable)
+                return guidExpression + " " + guidDirection;
             var guidNullRank = term.NullOrder == NullOrder.First ? "0" : "1";
             var guidNonNullRank = term.NullOrder == NullOrder.First ? "1" : "0";
             return "CASE WHEN " + RenderColumn(term.Column) + " IS NULL THEN " + guidNullRank + " ELSE " + guidNonNullRank + " END ASC, " + guidExpression + " " + guidDirection;

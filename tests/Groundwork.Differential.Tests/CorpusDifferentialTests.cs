@@ -23,6 +23,7 @@ public sealed class CorpusDifferentialTests
     private static readonly string SemanticEdgeTableName = "g2_semantic_edge_" + Guid.NewGuid().ToString("N");
     private static readonly string LatestTableName = "g2_latest_" + Guid.NewGuid().ToString("N");
     private static readonly string ScopedTableName = "g2_scoped_" + Guid.NewGuid().ToString("N");
+    private static readonly string ExplainIndexTableName = "g2_explain_index_" + Guid.NewGuid().ToString("N");
     private static readonly string ExplainTableName = "g2_explain_" + Guid.NewGuid().ToString("N");
     private static readonly string DeclaredKeyExplainTableName = "g2_key_explain_" + Guid.NewGuid().ToString("N");
     private static readonly string PrefixTableName = "g2_prefix_" + Guid.NewGuid().ToString("N");
@@ -51,22 +52,22 @@ public sealed class CorpusDifferentialTests
     public void Explain_assert_flag_executes_a_native_plan_check_and_retains_the_sqlite_plan()
     {
         using var environment = new ExplainEnvironment("positive");
-        using var sqlite = OpenSqlite();
-        var table = new TableId(RunTableName);
-        var number = new ColumnRef(table, "numberValue", QueryType.Decimal, isNullable: true, decimalPrecision: 18, decimalScale: 4);
+        using var sqlite = OpenSqlite(ExplainIndexUnit, ExplainIndexRows, analyze: true);
+        var table = new TableId(ExplainIndexTableName);
+        var number = new ColumnRef(table, "numberValue", QueryType.Int32, isNullable: false);
         var request = new QueryRequest(
             table,
-            new Predicate.Equal(number, QueryConstant.Of(number, 10m)),
+            new Predicate.Equal(number, QueryConstant.Of(number, 10)),
             [],
             Projection.ColumnsOnly(number),
             Paging.None);
 
-        var result = sqlite.Query(request, Options(request));
+        var result = sqlite.Query(request, ExplainIndexOptions(request));
 
-        Assert.Equal("ix_number", result.SelectedIndex);
+        Assert.Equal("ix_number_id", result.SelectedIndex);
         var artifact = Assert.Single(Directory.GetFiles(environment.ArtifactDirectory, "*.txt"));
         Assert.Contains(
-            "INDEX " + SqliteDialect.PhysicalIndexName(RunTableName, "ix_number"),
+            "INDEX " + SqliteDialect.PhysicalIndexName(ExplainIndexTableName, "ix_number_id"),
             File.ReadAllText(artifact),
             StringComparison.OrdinalIgnoreCase);
     }
@@ -159,7 +160,7 @@ public sealed class CorpusDifferentialTests
                 ["numberValue"] = (decimal)value
             })
             .ToArray();
-        using var sqlite = OpenSqlite(ExplainUnit, rows);
+        using var sqlite = OpenSqlite(ExplainUnit, rows, analyze: true, decimalIndexCompatible: true);
         using var pg = OpenPostgreSql(postgres, ExplainUnit, rows);
         using var sql = OpenSqlServer(sqlServer, ExplainUnit, rows);
         using var mongoSession = OpenMongo(mongo, ExplainUnit, rows);
@@ -209,7 +210,7 @@ public sealed class CorpusDifferentialTests
                 ["payload"] = "value-" + value
             })
             .ToArray();
-        using var sqlite = OpenSqlite(DeclaredKeyExplainUnit, rows);
+        using var sqlite = OpenSqlite(DeclaredKeyExplainUnit, rows, analyze: true);
         using var pg = OpenPostgreSql(postgres, DeclaredKeyExplainUnit, rows);
         using var sql = OpenSqlServer(sqlServer, DeclaredKeyExplainUnit, rows);
         using var mongoSession = OpenMongo(mongo, DeclaredKeyExplainUnit, rows);
@@ -794,6 +795,21 @@ public sealed class CorpusDifferentialTests
             tieBreakColumns: [id]);
     }
 
+    private static QueryRenderOptions ExplainIndexOptions(QueryRequest request)
+    {
+        var id = new ColumnRef(request.Table, "id", QueryType.Int64, isNullable: false);
+        return new QueryRenderOptions(
+            [new QueryIndexDeclaration(
+                "ix_number_id",
+                [
+                    new QueryIndexColumn("numberValue", isNullable: false, QueryType.Int32),
+                    new QueryIndexColumn("id", isNullable: false, QueryType.Int64)
+                ],
+                QueryIndexPinning.Pinned)],
+            selectedIndex: "ix_number_id",
+            tieBreakColumns: [id]);
+    }
+
     private static StorageUnit Unit => new()
     {
         Id = new StorageUnitId(RunTableName),
@@ -832,6 +848,19 @@ public sealed class CorpusDifferentialTests
                 MissingValues = MissingValueBehavior.Excluded
             }
         ]
+    };
+
+    private static StorageUnit ExplainIndexUnit => new()
+    {
+        Id = new StorageUnitId(ExplainIndexTableName),
+        Name = ExplainIndexTableName,
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.Int64, IsNullable = false },
+            new() { Name = "numberValue", Type = PortableType.Int32, IsNullable = false }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] },
+        Indexes = [new IndexDefinition { Name = "ix_number_id", Columns = [new IndexColumn("numberValue"), new IndexColumn("id")] }]
     };
 
     private static StorageUnit ExplainUnit => new()
@@ -1077,6 +1106,13 @@ public sealed class CorpusDifferentialTests
             ["binaryValue"] = index % 8 == 0 ? null : new byte[] { (byte)index, (byte)(255 - index), 0 }
         }).ToArray();
 
+    private static IReadOnlyList<IReadOnlyDictionary<string, object?>> ExplainIndexRows => Enumerable.Range(1, 2_000).Select(index =>
+        (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["id"] = (long)index,
+            ["numberValue"] = index == 10 ? 10 : index
+        }).ToArray();
+
     private static IReadOnlyList<IReadOnlyDictionary<string, object?>> PrefixRows =>
     [
         new Dictionary<string, object?> { ["id"] = 1L, ["folded"] = null, ["ascii"] = null, ["ordinal"] = null },
@@ -1094,15 +1130,46 @@ public sealed class CorpusDifferentialTests
 
     private static CorpusSession OpenSqlite() => OpenSqlite(Unit, Rows);
 
-    private static CorpusSession OpenSqlite(StorageUnit unit, IReadOnlyList<IReadOnlyDictionary<string, object?>> rows)
+    private static CorpusSession OpenSqlite(
+        StorageUnit unit,
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> rows,
+        bool analyze = false,
+        bool decimalIndexCompatible = false)
     {
         var connection = new SqliteProviderFactory().Create("Data Source=file:g2q4_" + Guid.NewGuid().ToString("N") + "?mode=memory&cache=shared");
         connection.Schema.Apply(unit);
+        if (decimalIndexCompatible)
+        {
+            // SQLite stores decimals as text while the renderer applies its semantic decimal
+            // collation. Rebuild this proof fixture's index with the same collation so the native
+            // plan assertion tests the selected ordered index rather than a collation mismatch.
+            var index = unit.Indexes.Single(index => string.Equals(index.Name, "ix_number_id", StringComparison.Ordinal));
+            var physicalIndex = SqliteDialect.PhysicalIndexName(unit.Name, index.Name);
+            var columns = string.Join(", ", index.Columns.Select(column =>
+                SqliteProviderConnection.QuoteIdentifier(column.Column) +
+                (string.Equals(column.Column, "numberValue", StringComparison.Ordinal)
+                    ? " COLLATE GROUNDWORK_DECIMAL_18_4"
+                    : string.Empty) +
+                (column.Direction == SortDirection.Ascending ? " ASC" : " DESC")));
+            using var indexCommand = ((SqliteProviderConnection)connection).Connection.CreateCommand();
+            indexCommand.CommandText =
+                "DROP INDEX IF EXISTS " + SqliteProviderConnection.QuoteIdentifier(physicalIndex) + "; " +
+                "CREATE " + (index.IsUnique ? "UNIQUE " : string.Empty) + "INDEX " +
+                SqliteProviderConnection.QuoteIdentifier(physicalIndex) + " ON " +
+                SqliteProviderConnection.QuoteIdentifier(unit.Name) + " (" + columns + ");";
+            indexCommand.ExecuteNonQuery();
+        }
         var session = connection.OpenSession(unit, StorageAccess.Global);
         foreach (var row in rows)
         {
             session.Delete(new StorageKey(KeyValues(unit, row)));
             session.Insert(new StorageValues(row));
+        }
+        if (analyze)
+        {
+            using var command = ((SqliteProviderConnection)connection).Connection.CreateCommand();
+            command.CommandText = "ANALYZE;";
+            command.ExecuteNonQuery();
         }
         return new CorpusSession("SQLite", session.Query, connection.Dispose);
     }
