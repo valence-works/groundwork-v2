@@ -102,9 +102,9 @@ importer, typed bridge, and chosen provider, then create the `DbContext` or desi
 application-controlled code:
 
 ```bash
-dotnet add package Groundwork.EntityFrameworkCore --version 0.4.0-preview.2
-dotnet add package Groundwork.Records.Store --version 0.4.0-preview.2
-dotnet add package Groundwork.PostgreSql --version 0.4.0-preview.2
+dotnet add package Groundwork.EntityFrameworkCore --version 0.4.0-preview.3
+dotnet add package Groundwork.Records.Store --version 0.4.0-preview.3
+dotnet add package Groundwork.PostgreSql --version 0.4.0-preview.3
 ```
 
 Install the `Groundwork.Tool` CLI as described in **[Installation](Installation#installing-the-schema-tool)**

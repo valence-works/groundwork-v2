@@ -116,6 +116,19 @@ the provider-neutral `BatchWriteException`. Wrapper-owned exact-batch transactio
 commit a losing operation or a trailing write. See the complete
 [0.4.0-preview.2 release notes](../v2/releases/0.4.0-preview.2.md).
 
+### `0.4.0-preview.3` — MongoDB portable JSON admission
+
+This patch preview preserves the `0.4.0-preview.2` public API and persisted catalog contract.
+Existing `0.4.0-preview.2` catalogs remain compatible; no discard, migration, or schema
+re-application is required for this update.
+
+MongoDB schema and runtime admission now accept the native BSON representations produced by
+portable JSON, including objects, arrays, strings, numbers, booleans, and JSON literal `null`.
+Required JSON columns continue to reject missing values and CLR `null`, while JSON literal `null`
+remains valid content. Mongo-only BSON values are refused recursively at the codec boundary, so
+writes and later admission use the same accepted-type vocabulary. See the complete
+[0.4.0-preview.3 release notes](../v2/releases/0.4.0-preview.3.md).
+
 ---
 
 ## Provider support matrix
