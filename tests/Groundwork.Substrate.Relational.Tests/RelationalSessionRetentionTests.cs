@@ -1,4 +1,5 @@
 using Groundwork.Kernel;
+using Groundwork.Kernel.Schema;
 using Groundwork.Store;
 using Groundwork.Substrate.Relational;
 using Xunit;
@@ -94,6 +95,37 @@ public sealed class RelationalSessionRetentionTests
     }
 
     [Fact]
+    public async Task Count_only_replay_accepts_a_legacy_v1_fingerprint_and_result()
+    {
+        var adapter = new FakeRetentionAdapter();
+        var retention = Create(adapter);
+        var operation = retention.PrepareExact(Operation("legacy"), null);
+        var legacyFingerprint = SchemaFingerprint.Create(
+        [
+            "retention-operation-v1",
+            operation.Unit.Id.Value,
+            operation.Unit.Name,
+            operation.Unit.Scope.ToString(),
+            operation.Retention.KeepNewest.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            operation.Retention.Declaration.OrderColumn,
+            operation.Retention.Declaration.Trigger.ToString(),
+            .. operation.Retention.Declaration.PartitionColumns,
+            operation.Retention.Options.MaxRowsPerBatch.ToString(System.Globalization.CultureInfo.InvariantCulture)
+        ]);
+        adapter.ReadResults.Enqueue(new RelationalRetentionLedgerEntry(
+            ProviderNow,
+            legacyFingerprint,
+            Serialized(5, 2)));
+
+        var result = await retention.ApplyExact(operation, RelationalExecution.Synchronous);
+
+        Assert.Equal(RetentionOperationStatus.Replayed, result.Status);
+        Assert.Equal(5, result.DeletedRows);
+        Assert.Empty(result.AffectedKeys);
+        Assert.DoesNotContain("delete-batch", adapter.Events);
+    }
+
+    [Fact]
     public async Task Exact_replay_refuses_a_different_fingerprint_or_missing_result()
     {
         var conflictAdapter = new FakeRetentionAdapter();
@@ -166,6 +198,31 @@ public sealed class RelationalSessionRetentionTests
         Assert.Contains("could not be completed", failure.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Affected_exact_retention_does_not_publish_when_ledger_completion_fails()
+    {
+        var adapter = new FakeRetentionAdapter
+        {
+            DeletedBatches = new Queue<int>([1, 0]),
+            CompletionSucceeds = false,
+            AffectedValues = ["old"]
+        };
+        var retention = new RelationalSessionRetention(AffectedUnit(), StorageAccess.Global, adapter);
+        var operation = retention.PrepareExact(Operation("affected-incomplete"), new RetentionExecutionOptions
+        {
+            MaxRowsPerBatch = 1,
+            AffectedKeyProjection = new RetentionAffectedKeyProjection("category", 1)
+        });
+
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await retention.ApplyExact(operation, RelationalExecution.Synchronous));
+
+        Assert.Contains("could not be completed", failure.Message, StringComparison.Ordinal);
+        Assert.Equal(
+            ["prepare-ledger", "reclaim", "read", "claim", "affected", "delete-batch", "delete-batch", "complete"],
+            adapter.Events);
+    }
+
     private static RelationalSessionRetention Create(FakeRetentionAdapter adapter) =>
         new(Unit(), StorageAccess.Global, adapter);
 
@@ -188,6 +245,16 @@ public sealed class RelationalSessionRetentionTests
         RetentionIdempotency = new RetentionIdempotencyDeclaration { Window = TimeSpan.FromMinutes(5) }
     };
 
+    private static StorageUnit AffectedUnit() => Unit() with
+    {
+        Columns =
+        [
+            new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false },
+            new ColumnDefinition { Name = "createdAt", Type = PortableType.DateTimeOffset, IsNullable = false },
+            new ColumnDefinition { Name = "category", Type = PortableType.String, IsNullable = true }
+        ]
+    };
+
     private sealed class FakeRetentionAdapter : IRelationalRetentionAdapter
     {
         internal List<string> Events { get; } = [];
@@ -195,6 +262,7 @@ public sealed class RelationalSessionRetentionTests
         internal Queue<int> DeletedBatches { get; init; } = new([0]);
         internal Queue<RelationalRetentionLedgerEntry?> ReadResults { get; } = new();
         internal Queue<RelationalRetentionReplayEntry?> WinnerResults { get; } = new();
+        internal IReadOnlyList<object?> AffectedValues { get; init; } = [];
         internal Action<int>? AfterDelete { get; init; }
         internal bool ClaimSucceeds { get; init; } = true;
         internal bool CompletionSucceeds { get; init; } = true;
@@ -209,6 +277,14 @@ public sealed class RelationalSessionRetentionTests
             var deleted = DeletedBatches.Dequeue();
             AfterDelete?.Invoke(deleted);
             return ValueTask.FromResult(deleted);
+        }
+
+        public ValueTask<IReadOnlyList<object?>> ReadAffectedKeys(
+            RelationalExactRetentionOperation operation,
+            RelationalExecution execution)
+        {
+            Events.Add("affected");
+            return ValueTask.FromResult(AffectedValues);
         }
 
         public ValueTask<DateTimeOffset> PrepareLedger(

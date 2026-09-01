@@ -94,8 +94,11 @@ internal static class PublicApiApprovalFixture
         _ = typeof(RetentionIdempotencyDeclaration);
         _ = typeof(RetentionOperationResult);
         _ = typeof(RetentionExecutionOptions);
+        _ = typeof(RetentionAffectedKeyProjection);
+        _ = typeof(RetentionAffectedKeyLimitExceededException);
         _ = typeof(IStorageInspectionSession);
         _ = typeof(IExactRetentionStorageSession);
+        _ = typeof(IExactRetentionAffectedKeysStorageSession);
         _ = typeof(SetMutationOptions);
         _ = typeof(SetMutationOutcomeMode);
         _ = typeof(SetMutationOutcome);
@@ -207,6 +210,11 @@ internal static class PublicApiApprovalFixture
         _ = new Func<IStorageSession, OperationId, RetentionExecutionOptions, RetentionOperationResult>(
             (session, operation, options) => session.ApplyRetention(operation, options));
         _ = new RetentionExecutionOptions { KeepNewestOverride = 0 };
+        _ = new RetentionExecutionOptions
+        {
+            AffectedKeyProjection = new RetentionAffectedKeyProjection("category", 32)
+        };
+        _ = new Func<RetentionOperationResult, IReadOnlyList<object?>>(result => result.AffectedKeys);
         _ = new Func<SetMutationOptions>(() => new SetMutationOptions
         {
             AcceptedScan = ScanAcceptance.Allow(

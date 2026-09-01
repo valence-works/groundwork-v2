@@ -239,10 +239,37 @@ The ledger stores a canonical request fingerprint and a versioned exact result.
 | `GW-RETENTION-002` | Malformed/legacy exact result. Remediation: use a new nonce. |
 | `GW-RETENTION-003` | Provider does not advertise exact retention |
 | `GW-RETENTION-004` | `RetentionIdempotency` declared **without** `Retention` |
+| `GW-RETENTION-005` | Bounded affected-key projection exceeded its finite maximum; no rows changed |
+| `GW-RETENTION-006` | Status-only retention received an affected-key projection |
+| `GW-RETENTION-007` | Provider does not advertise bounded affected-key retention |
 
 `KeepNewestOverride` is an optional non-negative per-pass value: null uses the declaration, a positive
 value keeps that many, and **zero deletes every row without resetting the durable high-water**. The
 effective value is part of the fingerprint, so a same-nonce retry with a different override is refused.
+
+#### Bounded affected-key evidence
+
+An operation-identified pass can return the complete distinct values of one declared scalar column
+from the rows it removes:
+
+```csharp
+var result = session.ApplyRetention(
+    operation,
+    new RetentionExecutionOptions
+    {
+        MaxRowsPerBatch = 128,
+        AffectedKeyProjection = new RetentionAffectedKeyProjection("tenant", 100)
+    });
+```
+
+The finite bound is strict: providers read at most `bound + 1` values natively and refuse with
+`GW-RETENTION-005` before mutating rows or claiming the ledger when the bound is exceeded. A
+successful `AffectedKeys` list is complete, distinct, null-first, and deterministically ordered
+using Groundwork's portable structural comparison. The projection, bound, scope, and operation
+identity participate in the canonical fingerprint; the same nonce and request replays the exact
+same result, while changing any of them is `GW-RETENTION-001`. JSON and Double projections are
+refused as non-orderable. Inspect `IExactRetentionAffectedKeysStorageSession` and
+`BatchWriteCapabilities.ExactRetentionAffectedKeys` before requesting this optional contract.
 
 Exact retention is **atomic at the provider boundary**: the bounded delete loop, ledger placeholder,
 and final result update share one transaction. Cancellation or a failed batch rolls back the whole

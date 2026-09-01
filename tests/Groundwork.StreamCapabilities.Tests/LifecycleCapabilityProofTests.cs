@@ -215,6 +215,309 @@ public sealed class LifecycleCapabilityProofTests
     }
 
     [Fact]
+    public void InMemory_exact_retention_returns_distinct_bounded_affected_keys_and_refuses_overflow()
+    {
+        using var connection = new InMemoryProviderFactory().Create("lifecycle-retention-affected-" + Guid.NewGuid().ToString("N"));
+        AssertAffectedRetention(connection, "inmemory");
+    }
+
+    [Fact]
+    public void InMemory_exact_retention_projection_is_scope_local_and_projection_changes_conflict()
+    {
+        using var connection = new InMemoryProviderFactory().Create("lifecycle-retention-affected-scope-" + Guid.NewGuid().ToString("N"));
+        var unit = AffectedKeyUnit("lifecycle-retention-affected-scope-" + Guid.NewGuid().ToString("N")) with
+        {
+            Scope = ScopePolicy.Scoped
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var scopeA = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("scope-a")));
+        var scopeB = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("scope-b")));
+        scopeA.Insert(AffectedValues("a", "a-old"));
+        scopeA.Insert(AffectedValues("a-new", "a-newest"));
+        scopeB.Insert(AffectedValues("b", "b-old"));
+        scopeB.Insert(AffectedValues("b-new", "b-newest"));
+
+        var operation = new OperationId(DateTimeOffset.UtcNow, "same-scope-aware-retention");
+        var options = new RetentionExecutionOptions
+        {
+            MaxRowsPerBatch = 1,
+            AffectedKeyProjection = new RetentionAffectedKeyProjection("category", 2)
+        };
+        var resultA = scopeA.ApplyRetention(operation, options);
+        var resultB = scopeB.ApplyRetention(operation, options);
+
+        Assert.Equal(new object?[] { "a" }, resultA.AffectedKeys);
+        Assert.Equal(new object?[] { "b" }, resultB.AffectedKeys);
+        Assert.Equal(RetentionOperationStatus.Replayed, scopeA.ApplyRetention(operation, options).Status);
+        var projectionConflict = Assert.Throws<RetentionIdempotencyConflictException>(() => scopeA.ApplyRetention(
+            operation,
+            options with { AffectedKeyProjection = new RetentionAffectedKeyProjection("payload", 2) }));
+        Assert.StartsWith(RetentionIdempotencyConflictException.DiagnosticCode, projectionConflict.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void InMemory_exact_retention_projection_rollback_leaves_rows_and_allows_same_nonce_retry()
+    {
+        using var connection = new InMemoryProviderFactory().Create("lifecycle-retention-affected-rollback-" + Guid.NewGuid().ToString("N"));
+        var unit = AffectedKeyUnit("lifecycle-retention-affected-rollback-" + Guid.NewGuid().ToString("N"));
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var options = new RetentionExecutionOptions
+        {
+            MaxRowsPerBatch = 1,
+            AffectedKeyProjection = new RetentionAffectedKeyProjection("category", 2)
+        };
+        var operation = new OperationId(DateTimeOffset.UtcNow, "same-nonce-after-uow-rollback");
+        var seed = connection.OpenSession(unit, StorageAccess.Global);
+        seed.Insert(AffectedValues("old", "first"));
+        seed.Insert(AffectedValues("new", "second"));
+        using (var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit))
+        {
+            var session = work.OpenSession(unit);
+            Assert.Equal(RetentionOperationStatus.Executed, session.ApplyRetention(operation, options).Status);
+            work.Rollback();
+        }
+
+        var retry = connection.OpenSession(unit, StorageAccess.Global).ApplyRetention(operation, options);
+        Assert.Equal(RetentionOperationStatus.Executed, retry.Status);
+        Assert.Equal(new object?[] { "old" }, retry.AffectedKeys);
+        Assert.Single(connection.OpenSession(unit, StorageAccess.Global).Query(All(unit)).Rows);
+    }
+
+    [Fact]
+    public void InMemory_exact_retention_projection_cancellation_before_capture_leaves_no_ledger_and_retries()
+    {
+        using var connection = new InMemoryProviderFactory().Create("lifecycle-retention-affected-cancel-before-" + Guid.NewGuid().ToString("N"));
+        var unit = AffectedKeyUnit("lifecycle-retention-affected-cancel-before-" + Guid.NewGuid().ToString("N"));
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(AffectedValues("old", "first"));
+        session.Insert(AffectedValues("new", "second"));
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var operation = new OperationId(DateTimeOffset.UtcNow, "cancel-before-capture");
+        var options = new RetentionExecutionOptions
+        {
+            AffectedKeyProjection = new RetentionAffectedKeyProjection("category", 2),
+            CancellationToken = cancellation.Token
+        };
+
+        Assert.Throws<OperationCanceledException>(() => session.ApplyRetention(operation, options));
+        Assert.Equal(2, session.Query(All(unit)).Rows.Count);
+        var retry = session.ApplyRetention(operation, options with { CancellationToken = CancellationToken.None });
+        Assert.Equal(RetentionOperationStatus.Executed, retry.Status);
+        Assert.Equal(new object?[] { "old" }, retry.AffectedKeys);
+    }
+
+    [Fact]
+    public void InMemory_exact_retention_rejects_non_orderable_projection_types_before_mutation()
+    {
+        foreach (var type in new[] { PortableType.Double, PortableType.Json })
+        {
+            using var connection = new InMemoryProviderFactory().Create("lifecycle-retention-affected-invalid-" + type + "-" + Guid.NewGuid().ToString("N"));
+            var unit = AffectedKeyUnit("lifecycle-retention-affected-invalid-" + type + "-" + Guid.NewGuid().ToString("N")) with
+            {
+                Columns =
+                [
+                    new() { Name = "sequence", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence },
+                    new() { Name = "category", Type = type, IsNullable = true },
+                    new() { Name = "payload", Type = PortableType.String, IsNullable = false, MaxLength = 200 }
+                ]
+            };
+            Assert.True(connection.Schema.Apply(unit).Applied);
+            var session = connection.OpenSession(unit, StorageAccess.Global);
+            session.Insert(new StorageValues(new Dictionary<string, object?> { ["payload"] = "row" }));
+
+            var refusal = Assert.Throws<ArgumentException>(() => session.ApplyRetention(
+                new OperationId(DateTimeOffset.UtcNow, "invalid-projection"),
+                new RetentionExecutionOptions
+                {
+                    AffectedKeyProjection = new RetentionAffectedKeyProjection("category", 2)
+                }));
+            Assert.Contains(type.ToString(), refusal.Message, StringComparison.Ordinal);
+            Assert.Single(session.Query(All(unit)).Rows);
+        }
+    }
+
+    [Fact]
+    public void Affected_key_projection_orders_binary_values_structurally()
+    {
+        using var connection = new InMemoryProviderFactory().Create("lifecycle-retention-affected-binary-" + Guid.NewGuid().ToString("N"));
+        var unit = BinaryAffectedKeyUnit("lifecycle-retention-affected-binary-" + Guid.NewGuid().ToString("N"));
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(BinaryAffectedValues([2], "first"));
+        session.Insert(BinaryAffectedValues([1], "second"));
+        session.Insert(BinaryAffectedValues([2], "third"));
+        session.Insert(BinaryAffectedValues([3], "newest"));
+
+        var result = session.ApplyRetention(
+            new OperationId(DateTimeOffset.UtcNow, "binary-projection"),
+            new RetentionExecutionOptions
+            {
+                AffectedKeyProjection = new RetentionAffectedKeyProjection("category", 2)
+            });
+
+        Assert.Equal(3, result.DeletedRows);
+        Assert.Equal(2, result.AffectedKeys.Count);
+        Assert.Equal(new byte[] { 1 }, Assert.IsType<byte[]>(result.AffectedKeys[0]));
+        Assert.Equal(new byte[] { 2 }, Assert.IsType<byte[]>(result.AffectedKeys[1]));
+    }
+
+    [Fact]
+    public async Task InMemory_concurrent_identical_projection_retention_executes_once_and_replays_once()
+    {
+        using var connection = new InMemoryProviderFactory().Create("lifecycle-retention-affected-concurrent-identical-" + Guid.NewGuid().ToString("N"));
+        var unit = AffectedKeyUnit("lifecycle-retention-affected-concurrent-identical-" + Guid.NewGuid().ToString("N"));
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var seed = connection.OpenSession(unit, StorageAccess.Global);
+        seed.Insert(AffectedValues("old-a", "first"));
+        seed.Insert(AffectedValues("old-b", "second"));
+        seed.Insert(AffectedValues("new", "newest"));
+        var operation = new OperationId(DateTimeOffset.UtcNow, "concurrent-identical");
+        var options = new RetentionExecutionOptions
+        {
+            AffectedKeyProjection = new RetentionAffectedKeyProjection("category", 2)
+        };
+        var first = connection.OpenSession(unit, StorageAccess.Global);
+        var second = connection.OpenSession(unit, StorageAccess.Global);
+        var results = await Task.WhenAll(
+            Task.Run(() => first.ApplyRetention(operation, options)),
+            Task.Run(() => second.ApplyRetention(operation, options)));
+
+        Assert.Single(results, result => result.Status == RetentionOperationStatus.Executed);
+        Assert.Single(results, result => result.Status == RetentionOperationStatus.Replayed);
+        Assert.Equal(results[0].AffectedKeys, results[1].AffectedKeys);
+        Assert.Equal(new object?[] { "old-a", "old-b" }, results[0].AffectedKeys);
+        Assert.Single(seed.Query(All(unit)).Rows);
+    }
+
+    [Fact]
+    public void SQLite_exact_retention_returns_distinct_bounded_affected_keys()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "groundwork-affected-" + Guid.NewGuid().ToString("N") + ".db");
+        try
+        {
+            using var connection = new SqliteProviderFactory().Create($"Data Source={path}");
+            AssertAffectedRetention(connection, "sqlite");
+        }
+        finally
+        {
+            try { File.Delete(path); } catch { }
+        }
+    }
+
+    [Fact]
+    public void SQLite_exact_retention_projection_replays_after_restart()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "groundwork-affected-restart-" + Guid.NewGuid().ToString("N") + ".db");
+        var unit = AffectedKeyUnit("lifecycle-sqlite-affected-restart-" + Guid.NewGuid().ToString("N"));
+        var operation = new OperationId(DateTimeOffset.UtcNow, "restart-replay");
+        var options = new RetentionExecutionOptions
+        {
+            MaxRowsPerBatch = 1,
+            AffectedKeyProjection = new RetentionAffectedKeyProjection("category", 2)
+        };
+        RetentionOperationResult executed;
+        try
+        {
+            using (var first = new SqliteProviderFactory().Create($"Data Source={path}"))
+            {
+                Assert.True(first.Schema.Apply(unit).Applied);
+                var session = first.OpenSession(unit, StorageAccess.Global);
+                session.Insert(AffectedValues("old", "first"));
+                session.Insert(AffectedValues("new", "second"));
+                executed = session.ApplyRetention(operation, options);
+            }
+
+            using var restarted = new SqliteProviderFactory().Create($"Data Source={path}");
+            var replay = restarted.OpenSession(unit, StorageAccess.Global).ApplyRetention(operation, options);
+            Assert.Equal(RetentionOperationStatus.Replayed, replay.Status);
+            Assert.Equal(executed.AffectedKeys, replay.AffectedKeys);
+            Assert.Equal(executed.DeletedRows, replay.DeletedRows);
+        }
+        finally
+        {
+            try { File.Delete(path); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task SQLite_exact_retention_projection_cancellation_after_capture_rolls_back_and_retries()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "groundwork-affected-cancel-" + Guid.NewGuid().ToString("N") + ".db");
+        try
+        {
+            using var connection = new SqliteProviderFactory().Create($"Data Source={path}");
+            var unit = AffectedKeyUnit("lifecycle-sqlite-affected-cancel-" + Guid.NewGuid().ToString("N"));
+            Assert.True(connection.Schema.Apply(unit).Applied);
+            var seed = connection.OpenSession(unit, StorageAccess.Global);
+            seed.Insert(AffectedValues("old-a", "first"));
+            seed.Insert(AffectedValues("old-b", "second"));
+            seed.Insert(AffectedValues("new", "newest"));
+            using var cancellation = new CancellationTokenSource();
+            var observer = new CancelAfterFirstRetentionBatch(cancellation);
+            var session = connection.OpenSession(unit, StorageAccess.Global, observer);
+            var operation = new OperationId(DateTimeOffset.UtcNow, "capture-cancel");
+            var options = new RetentionExecutionOptions
+            {
+                MaxRowsPerBatch = 1,
+                AffectedKeyProjection = new RetentionAffectedKeyProjection("category", 2),
+                CancellationToken = cancellation.Token
+            };
+            await Assert.ThrowsAsync<OperationCanceledException>(async () =>
+                await session.ApplyRetentionAsync(operation, options));
+            Assert.Equal(3, seed.Query(All(unit)).Rows.Count);
+
+            var retry = seed.ApplyRetention(operation, options with { CancellationToken = CancellationToken.None });
+            Assert.Equal(RetentionOperationStatus.Executed, retry.Status);
+            Assert.Equal(new object?[] { "old-a", "old-b" }, retry.AffectedKeys);
+        }
+        finally
+        {
+            try { File.Delete(path); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task SQLite_exact_retention_projection_uses_one_snapshot_with_a_concurrent_append()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "groundwork-affected-concurrent-" + Guid.NewGuid().ToString("N") + ".db");
+        try
+        {
+            using var first = new SqliteProviderFactory().Create($"Data Source={path}");
+            var unit = AffectedKeyUnit("lifecycle-sqlite-affected-concurrent-" + Guid.NewGuid().ToString("N"));
+            Assert.True(first.Schema.Apply(unit).Applied);
+            var seed = first.OpenSession(unit, StorageAccess.Global);
+            seed.Insert(AffectedValues("old-a", "first"));
+            seed.Insert(AffectedValues("old-b", "second"));
+            seed.Insert(AffectedValues("keep", "newest"));
+            using var observer = new BlockingAffectedRetentionObserver();
+            var retentionSession = first.OpenSession(unit, StorageAccess.Global, observer);
+            var operation = new OperationId(DateTimeOffset.UtcNow, "concurrent-append");
+            var options = new RetentionExecutionOptions
+            {
+                MaxRowsPerBatch = 1,
+                AffectedKeyProjection = new RetentionAffectedKeyProjection("category", 2)
+            };
+            var retention = Task.Run(() => retentionSession.ApplyRetention(operation, options));
+            Assert.True(observer.Captured.Wait(TimeSpan.FromSeconds(5)), "The affected-key capture did not start.");
+            var append = Task.Run(() => first.OpenSession(unit, StorageAccess.Global).Insert(AffectedValues("concurrent", "after-capture")));
+            await Task.Delay(100);
+            observer.Release.Set();
+            var result = await retention;
+            Assert.True((await append).Succeeded);
+
+            Assert.Equal(new object?[] { "old-a", "old-b" }, result.AffectedKeys);
+            var remaining = seed.Query(All(unit)).Rows.Select(row => row["payload"]).OrderBy(value => value).ToArray();
+            Assert.Equal(new object?[] { "after-capture", "newest" }, remaining);
+        }
+        finally
+        {
+            try { File.Delete(path); } catch { }
+        }
+    }
+
+    [Fact]
     public void InMemory_exact_retention_with_zero_keep_deletes_all_rows_and_replays()
     {
         using var connection = new InMemoryProviderFactory().Create("lifecycle-retention-delete-all-" + Guid.NewGuid().ToString("N"));
@@ -374,6 +677,7 @@ public sealed class LifecycleCapabilityProofTests
 
         using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
         var session = work.OpenSession(unit);
+        Assert.IsAssignableFrom<IExactRetentionAffectedKeysStorageSession>(session);
         session.Insert(Values("first"));
         session.Insert(Values("second"));
         var operation = new OperationId(DateTimeOffset.UtcNow, "retention-uow");
@@ -534,6 +838,7 @@ public sealed class LifecycleCapabilityProofTests
         var session = connection.OpenSession(unit, StorageAccess.Global);
         Assert.False(session is IStorageInspectionSession);
         Assert.False(session is IExactRetentionStorageSession);
+        Assert.False(session is IExactRetentionAffectedKeysStorageSession);
 
         var inspectionRefusal = Assert.Throws<NotSupportedException>(() => session.Inspect());
         Assert.StartsWith("GW-INSPECT-001", inspectionRefusal.Message, StringComparison.Ordinal);
@@ -554,6 +859,7 @@ public sealed class LifecycleCapabilityProofTests
 
         Assert.IsAssignableFrom<IStorageInspectionSession>(session);
         Assert.IsAssignableFrom<IExactRetentionStorageSession>(session);
+        Assert.IsAssignableFrom<IExactRetentionAffectedKeysStorageSession>(session);
         Assert.Contains(connection.Capabilities, capability => capability.Id == BatchWriteCapabilities.DurableHighWaterInspection);
         Assert.Contains(connection.Capabilities, capability => capability.Id == BatchWriteCapabilities.ExactRetention);
     }
@@ -608,6 +914,97 @@ public sealed class LifecycleCapabilityProofTests
     private static StorageValues Values(string payload) =>
         new(new Dictionary<string, object?> { ["payload"] = payload });
 
+    private static StorageUnit AffectedKeyUnit(string name) => LifecycleUnit(name, ScopePolicy.Global, keepNewest: 1) with
+    {
+        Columns =
+        [
+            new() { Name = "sequence", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence },
+            new() { Name = "category", Type = PortableType.String, IsNullable = true, MaxLength = 32 },
+            new() { Name = "payload", Type = PortableType.String, IsNullable = false, MaxLength = 200 }
+        ]
+    };
+
+    private static StorageValues AffectedValues(string? category, string payload) =>
+        new(new Dictionary<string, object?> { ["category"] = category, ["payload"] = payload });
+
+    private static StorageUnit BinaryAffectedKeyUnit(string name) => AffectedKeyUnit(name) with
+    {
+        Columns =
+        [
+            new() { Name = "sequence", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence },
+            new() { Name = "category", Type = PortableType.Binary, IsNullable = true, MaxLength = 32 },
+            new() { Name = "payload", Type = PortableType.String, IsNullable = false, MaxLength = 200 }
+        ]
+    };
+
+    private static StorageValues BinaryAffectedValues(byte[] category, string payload) =>
+        new(new Dictionary<string, object?> { ["category"] = category, ["payload"] = payload });
+
+    private static void AssertAffectedRetention(IStorageProviderConnection connection, string provider)
+    {
+        var unit = AffectedKeyUnit($"lifecycle-{provider}-affected-" + Guid.NewGuid().ToString("N"));
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        Assert.Contains(connection.Capabilities, capability => capability.Id == BatchWriteCapabilities.ExactRetentionAffectedKeys);
+        var seed = connection.OpenSession(unit, StorageAccess.Global);
+        seed.Insert(AffectedValues("beta", "first"));
+        seed.Insert(AffectedValues("alpha", "second"));
+        seed.Insert(AffectedValues("beta", "third"));
+        seed.Insert(AffectedValues(null, "fourth"));
+        seed.Insert(AffectedValues("gamma", "newest"));
+        var observer = new RecordingRetentionObserver();
+        var session = connection.OpenSession(unit, StorageAccess.Global, observer);
+
+        var operation = new OperationId(DateTimeOffset.UtcNow, $"{provider}-affected");
+        var options = new RetentionExecutionOptions
+        {
+            MaxRowsPerBatch = 2,
+            AffectedKeyProjection = new RetentionAffectedKeyProjection("category", 3)
+        };
+        var executed = session.ApplyRetention(operation, options);
+
+        Assert.Equal(RetentionOperationStatus.Executed, executed.Status);
+        Assert.Equal(4, executed.DeletedRows);
+        Assert.Equal(new object?[] { null, "alpha", "beta" }, executed.AffectedKeys);
+        if (!string.Equals(provider, "inmemory", StringComparison.Ordinal))
+        {
+            var affectedRead = Assert.Single(observer.Events.Where(item =>
+                item.Operation.Contains("affected-keys", StringComparison.OrdinalIgnoreCase)));
+            Assert.Equal(ProviderCommandKind.Read, affectedRead.Kind);
+            Assert.Contains("affected_limit", affectedRead.CommandText ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+        }
+        var replayed = session.ApplyRetention(operation, options);
+        Assert.Equal(RetentionOperationStatus.Replayed, replayed.Status);
+        Assert.Equal(executed.AffectedKeys, replayed.AffectedKeys);
+        Assert.Throws<RetentionIdempotencyConflictException>(() => session.ApplyRetention(
+            operation,
+            options with { AffectedKeyProjection = new RetentionAffectedKeyProjection("category", 4) }));
+        Assert.Single(session.Query(All(unit)).Rows);
+
+        var overflowUnit = AffectedKeyUnit($"lifecycle-{provider}-affected-overflow-" + Guid.NewGuid().ToString("N"));
+        Assert.True(connection.Schema.Apply(overflowUnit).Applied);
+        var overflowSession = connection.OpenSession(overflowUnit, StorageAccess.Global);
+        overflowSession.Insert(AffectedValues("beta", "first"));
+        overflowSession.Insert(AffectedValues("alpha", "second"));
+        overflowSession.Insert(AffectedValues("beta", "third"));
+        overflowSession.Insert(AffectedValues(null, "fourth"));
+        overflowSession.Insert(AffectedValues("gamma", "newest"));
+        var overflowOperation = new OperationId(DateTimeOffset.UtcNow, $"{provider}-affected-overflow");
+        var overflow = Assert.Throws<RetentionAffectedKeyLimitExceededException>(() => overflowSession.ApplyRetention(
+            overflowOperation,
+            options with { AffectedKeyProjection = new RetentionAffectedKeyProjection("category", 2) }));
+        Assert.StartsWith(RetentionAffectedKeyLimitExceededException.DiagnosticCode, overflow.Message, StringComparison.Ordinal);
+        Assert.Equal(5, overflowSession.Query(All(overflowUnit)).Rows.Count);
+        var corrected = overflowSession.ApplyRetention(
+            overflowOperation,
+            options with { AffectedKeyProjection = new RetentionAffectedKeyProjection("category", 3) });
+        Assert.Equal(RetentionOperationStatus.Executed, corrected.Status);
+        Assert.Equal(new object?[] { null, "alpha", "beta" }, corrected.AffectedKeys);
+
+        var statusOnly = new CapabilityHidingSession(session);
+        var refusal = Assert.Throws<InvalidOperationException>(() => statusOnly.ApplyRetention(options));
+        Assert.StartsWith("GW-RETENTION-006", refusal.Message, StringComparison.Ordinal);
+    }
+
     private static QueryRequest All(StorageUnit unit) => new(
         new TableId(unit.Name),
         Predicate.AlwaysTrue.Instance,
@@ -634,6 +1031,7 @@ public sealed class LifecycleCapabilityProofTests
         Assert.Equal(executed.DeletedRows, replayed.DeletedRows);
         Assert.Single(session.Query(All(unit)).Rows);
         AssertDeleteAllLifecycle(connection, provider);
+        AssertAffectedRetention(connection, provider);
     }
 
     private static void AssertDeleteAllLifecycle(IStorageProviderConnection connection, string provider)
@@ -807,6 +1205,27 @@ public sealed class LifecycleCapabilityProofTests
         public List<ProviderCommandEvent> Events { get; } = [];
 
         public void Observe(ProviderCommandEvent command) => Events.Add(command);
+    }
+
+    private sealed class BlockingAffectedRetentionObserver : IProviderCommandObserver, IDisposable
+    {
+        internal ManualResetEventSlim Captured { get; } = new();
+        internal ManualResetEventSlim Release { get; } = new();
+
+        public void Observe(ProviderCommandEvent command)
+        {
+            if (!command.Operation.Contains("affected-keys", StringComparison.OrdinalIgnoreCase))
+                return;
+            Captured.Set();
+            if (!Release.Wait(TimeSpan.FromSeconds(10)))
+                throw new TimeoutException("The concurrent retention test did not release its capture gate.");
+        }
+
+        public void Dispose()
+        {
+            Captured.Dispose();
+            Release.Dispose();
+        }
     }
 
     private sealed class CapabilityHidingSession(IStorageSession inner) : IStorageSession

@@ -63,6 +63,7 @@ required operation surface, and only the object returned by `OpenOwnedSession` i
 | `IConcurrencyStorageSession` | Atomic optimistic conditional upsert |
 | `IRetentionStorageSession` | Retention execution |
 | `IExactRetentionStorageSession` | Exact compare-and-delete retention |
+| `IExactRetentionAffectedKeysStorageSession` | Exact retention with bounded affected-key evidence; advertise only with transactional support |
 | `ISetMutationStorageSession` | Set-based update/delete |
 | `ICompareAndDeleteStorageSession` | Atomic compare-and-delete |
 

@@ -909,7 +909,7 @@ internal interface IMongoSchemaBoundSession
     void EnsureSchemaCurrent();
 }
 
-internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongoCompareAndDeleteStorageSession, IMongoExactAppendStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, ISetMutationStorageSession, IMongoSchemaBoundSession
+internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongoCompareAndDeleteStorageSession, IMongoExactAppendStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IExactRetentionAffectedKeysStorageSession, ISetMutationStorageSession, IMongoSchemaBoundSession
 {
     private const string HighWaterValue = "high_water";
     private readonly MongoProviderState state;
@@ -2041,7 +2041,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         ApplyExactRetention(operationId, options,
             MongoExecution.Asynchronous(options?.CancellationToken ?? CancellationToken.None));
 
-    private ValueTask<RetentionOperationResult> ApplyExactRetention(
+    private async ValueTask<RetentionOperationResult> ApplyExactRetention(
         OperationId operationId,
         RetentionExecutionOptions? options,
         MongoExecution mode)
@@ -2053,8 +2053,31 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         options ??= new RetentionExecutionOptions();
         RetentionSessionExtensions.ValidateExecutionOptions(options);
         RetentionOperationCodec.ValidateOperation(operationId);
-        return ExecuteWithTransactionIfNeeded(
-            transactional => transactional.ApplyExactRetentionCore(operationId, declaration, options, mode), mode);
+        RetentionAffectedKeys.Validate(Unit, options);
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                return await ExecuteWithTransactionIfNeeded(
+                    transactional => transactional.ApplyExactRetentionCore(operationId, declaration, options, mode), mode)
+                    .ConfigureAwait(false);
+            }
+            catch (MongoLedgerConflictException) when (attempt == 0)
+            {
+                // A concurrent upsert can surface as a duplicate-key error after the other
+                // transaction commits. A standalone exact-retention call can safely retry its
+                // whole transaction and then replay the winner. An explicit unit of work must
+                // retry the complete unit of work because the duplicate-key error aborts it.
+                if (transactionSession is not null)
+                {
+                    try { await Abort(transactionSession, mode).ConfigureAwait(false); }
+                    catch (MongoException) { }
+                    unitOfWork?.Poison();
+                    throw new MongoUnitOfWorkConflictException(
+                        "A concurrent retention nonce conflict aborted the whole MongoDB unit of work; retry the complete unit of work.");
+                }
+            }
+        }
     }
 
     private async ValueTask<RetentionOperationResult> ApplyExactRetentionCore(
@@ -2065,7 +2088,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
     {
         var scope = Access.Scope?.Value ?? string.Empty;
         var ledger = state.Operations(declaration.LedgerName);
-        var fingerprint = RetentionOperationCodec.Fingerprint(Unit, options);
+        var fingerprint = RetentionOperationCodec.Fingerprint(Unit, operationId, scope, options);
         var cutoffExpression = new BsonDocument("$dateSubtract", new BsonDocument
         {
             ["startDate"] = "$$NOW",
@@ -2151,8 +2174,14 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
 
         // This method is called through ExecuteWithTransactionIfNeeded. A cancellation or
         // provider failure aborts the transaction, so no delete batch can outlive its ledger result.
+        var affectedKeys = options.AffectedKeyProjection is { } projection
+            ? await ReadAffectedKeys(projection, options, mode).ConfigureAwait(false)
+            : Array.Empty<object?>();
         var retention = await ApplyRetentionCore(options, mode).ConfigureAwait(false);
-        var result = new RetentionOperationResult(RetentionOperationStatus.Executed, retention.DeletedRows, retention.Batches, retention.Completed);
+        var result = new RetentionOperationResult(RetentionOperationStatus.Executed, retention.DeletedRows, retention.Batches, retention.Completed)
+        {
+            AffectedKeys = Array.AsReadOnly(affectedKeys.ToArray())
+        };
         var completed = Builders<BsonDocument>.Update.Set("exact_result", RetentionOperationCodec.SerializeResult(result));
         await mode.Run(
             token => transactionSession is null
@@ -2166,6 +2195,61 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                     ledger.UpdateOne(transactionSession, new BsonDocument("_id", identity), completed);
             }).ConfigureAwait(false);
         return result;
+    }
+
+    private async ValueTask<IReadOnlyList<object?>> ReadAffectedKeys(
+        RetentionAffectedKeyProjection projection,
+        RetentionExecutionOptions options,
+        MongoExecution mode)
+    {
+        var declaration = Unit.Retention ?? throw new InvalidOperationException(
+            $"Storage unit '{Unit.Name}' does not declare retention.");
+        var sort = new BsonDocument
+        {
+            [declaration.OrderColumn] = -1
+        };
+        foreach (var key in Unit.Key.Columns.Where(key =>
+                     !string.Equals(key, declaration.OrderColumn, StringComparison.Ordinal)))
+            sort[key] = 1;
+        var window = new BsonDocument
+        {
+            ["sortBy"] = sort,
+            ["output"] = new BsonDocument("__groundwork_retention_rank", new BsonDocument("$documentNumber", new BsonDocument()))
+        };
+        if (declaration.PartitionColumns.Count != 0)
+        {
+            var partition = new BsonDocument();
+            foreach (var column in declaration.PartitionColumns)
+                partition[column] = "$" + column;
+            window["partitionBy"] = partition;
+        }
+
+        var stages = new List<BsonDocument>
+        {
+            new("$setWindowFields", window),
+            new("$match", new BsonDocument("__groundwork_retention_rank",
+                new BsonDocument("$gt", RetentionSessionExtensions.EffectiveKeepNewest(Unit, options)))),
+            new("$group", new BsonDocument("_id", "$" + projection.Column)),
+            new("$sort", new BsonDocument("_id", 1)),
+            new("$limit", checked(projection.MaxDistinctValues + 1)),
+            new("$project", new BsonDocument { ["_id"] = 0, ["value"] = "$_id" })
+        };
+        var pipeline = PipelineDefinition<BsonDocument, BsonDocument>.Create(stages);
+        var documents = await mode.Aggregate(collection, transactionSession, pipeline).ConfigureAwait(false);
+        commandObserver?.Observe(new ProviderCommandEvent(
+            "mongodb.retention-affected-keys",
+            $"MongoDB.Aggregate(retention affected distinct; limit:{projection.MaxDistinctValues + 1})",
+            ProviderCommandKind.Read,
+            IsProbe: false));
+        var decodeColumn = Unit.Columns.Single(candidate => candidate.Name == projection.Column);
+        var values = documents.Select(document =>
+            document.GetValue("value", BsonNull.Value).IsBsonNull
+                ? null
+                : MongoValueCodec.Decode(document["value"], decodeColumn));
+        return RetentionAffectedKeys.DistinctAndOrderValues(
+            values,
+            projection,
+            projection.MaxDistinctValues);
     }
 
     private RetentionOperationResult ReadExistingRetention(

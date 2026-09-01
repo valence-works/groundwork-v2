@@ -11,7 +11,7 @@ using Groundwork.Diagnostics;
 
 namespace Groundwork.Sqlite;
 
-internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
+internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IExactRetentionAffectedKeysStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
 {
     private readonly SqliteProviderConnection owner;
     private readonly SqliteConnection connection;
@@ -1337,6 +1337,51 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
 
     private sealed class SqliteRetentionAdapter(SqliteStorageSession session) : IRelationalRetentionAdapter
     {
+        public ValueTask<IReadOnlyList<object?>> ReadAffectedKeys(
+            RelationalExactRetentionOperation operation,
+            RelationalExecution execution)
+        {
+            var projection = operation.Retention.Options.AffectedKeyProjection ??
+                throw new InvalidOperationException("An affected-key projection is required.");
+            var declaration = operation.Retention.Declaration;
+            var partition = declaration.PartitionColumns.Count == 0
+                ? string.Empty
+                : $"PARTITION BY {string.Join(", ", declaration.PartitionColumns.Select(Quote))} ";
+            var scope = operation.Unit.Columns.Any(column => column.Name == SqliteSchemaCoordinator.ScopeColumn)
+                ? $" WHERE {Quote(SqliteSchemaCoordinator.ScopeColumn)}=@__groundwork_scope"
+                : string.Empty;
+            var ordering = string.Join(", ", [
+                $"{Quote(declaration.OrderColumn)} DESC",
+                .. operation.Unit.Key.Columns
+                    .Where(column => !string.Equals(column, declaration.OrderColumn, StringComparison.Ordinal))
+                    .Select(column => $"{Quote(column)} ASC")]);
+            var projectionColumn = Quote(projection.Column);
+            if (session.Column(projection.Column).Type == PortableType.String)
+                projectionColumn += " COLLATE GROUNDWORK_UTF16_ORDINAL";
+            using var command = session.Command(
+                $"WITH ranked AS (" +
+                $"SELECT {projectionColumn}, ROW_NUMBER() OVER ({partition}ORDER BY {ordering}) AS __groundwork_retention_rank " +
+                $"FROM {Quote(operation.Unit.Name)}{scope}) " +
+                $"SELECT DISTINCT {projectionColumn} FROM ranked " +
+                $"WHERE __groundwork_retention_rank > @keep " +
+                $"ORDER BY {projectionColumn} LIMIT @affected_limit;");
+            command.Parameters.AddWithValue("@keep", operation.Retention.KeepNewest);
+            command.Parameters.AddWithValue("@affected_limit", checked(projection.MaxDistinctValues + 1));
+            if (operation.Unit.Columns.Any(column => column.Name == SqliteSchemaCoordinator.ScopeColumn))
+                command.Parameters.AddWithValue("@__groundwork_scope", operation.Scope);
+            using var reader = command.ExecuteReader();
+            var values = new List<object?>(Math.Min(projection.MaxDistinctValues + 1, 4096));
+            var column = session.Column(projection.Column);
+            while (reader.Read())
+                values.Add(reader.IsDBNull(0) ? null : FromSqlite(reader.GetValue(0), column));
+            session.commandObserver?.Observe(new ProviderCommandEvent(
+                "sqlite.retention-affected-keys",
+                command.CommandText,
+                ProviderCommandKind.Read,
+                IsProbe: false));
+            return ValueTask.FromResult<IReadOnlyList<object?>>(values);
+        }
+
         public ValueTask<int> DeleteBatch(
             RelationalRetentionOperation operation,
             RelationalExecution execution)
@@ -1352,7 +1397,9 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
             var keys = string.Join(", ", keyColumns.Select(Quote));
             var ordering = string.Join(", ", [
                 $"{Quote(declaration.OrderColumn)} DESC",
-                .. keyColumns.Select(column => $"{Quote(column)} ASC")]);
+                .. keyColumns
+                    .Where(column => !string.Equals(column, declaration.OrderColumn, StringComparison.Ordinal))
+                    .Select(column => $"{Quote(column)} ASC")]);
             var equality = string.Join(" AND ", keyColumns.Select(column =>
                 $"target.{Quote(column)}=victim.{Quote(column)}"));
             using var command = session.Command(

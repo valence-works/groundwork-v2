@@ -13,7 +13,49 @@ public sealed record RetentionExecutionOptions
     /// <summary>Optional per-pass retention override. Null uses the declaration; zero deletes all rows.</summary>
     public int? KeepNewestOverride { get; init; }
 
+    /// <summary>
+    /// Optional projection whose distinct values are returned for rows removed by an
+    /// operation-identified retention pass. This is honored only by exact retention; status-only
+    /// retention rejects a requested projection because it has no replay boundary.
+    /// </summary>
+    public RetentionAffectedKeyProjection? AffectedKeyProjection { get; init; }
+
     public CancellationToken CancellationToken { get; init; }
+}
+
+/// <summary>Declares one retained-row column and the finite result bound for affected values.</summary>
+public sealed record RetentionAffectedKeyProjection
+{
+    public RetentionAffectedKeyProjection(string column, int maxDistinctValues)
+    {
+        Column = column ?? throw new ArgumentNullException(nameof(column));
+        MaxDistinctValues = maxDistinctValues;
+    }
+
+    public string Column { get; init; }
+
+    public int MaxDistinctValues { get; init; }
+
+}
+
+/// <summary>Refuses an exact retention pass before mutation when its affected-key bound is exceeded.</summary>
+public sealed class RetentionAffectedKeyLimitExceededException : InvalidOperationException
+{
+    public const string DiagnosticCode = "GW-RETENTION-005";
+
+    public RetentionAffectedKeyLimitExceededException(string column, int maximum)
+        : base(
+            $"{DiagnosticCode}: exact retention affected-key projection '{column}' exceeded its " +
+            $"declared maximum of {maximum} distinct values; no rows or ledger state were changed. " +
+            "Retry the same operation with a bound that can accommodate all distinct values.")
+    {
+        Column = column;
+        Maximum = maximum;
+    }
+
+    public string Column { get; }
+
+    public int Maximum { get; }
 }
 
 /// <summary>Evidence returned by one retention pass.</summary>
@@ -44,6 +86,12 @@ public static class RetentionSessionExtensions
         StorageAccessValidation.EnsurePointOperation(session.Access, "retention");
         options ??= new RetentionExecutionOptions();
         ValidateExecutionOptions(options);
+        if (options.AffectedKeyProjection is not null)
+        {
+            throw new InvalidOperationException(
+                "GW-RETENTION-006: affected-key projection requires operation-identified exact retention; " +
+                "use ApplyRetention(OperationId, options).");
+        }
         return session is IRetentionStorageSession native
             ? native.ApplyRetention(options)
             : ApplyReference(session, options);
@@ -62,6 +110,12 @@ public static class RetentionSessionExtensions
         StorageAccessValidation.EnsurePointOperation(session.Access, "retention");
         options ??= new RetentionExecutionOptions();
         ValidateExecutionOptions(options);
+        if (options.AffectedKeyProjection is not null)
+        {
+            throw new InvalidOperationException(
+                "GW-RETENTION-006: affected-key projection requires operation-identified exact retention; " +
+                "use ApplyRetention(OperationId, options).");
+        }
         return session is IRetentionStorageSession native
             ? native.ApplyRetentionAsync(options)
             : ApplyReferenceAsync(session, options);
@@ -172,6 +226,14 @@ public static class RetentionSessionExtensions
         if (options.KeepNewestOverride is < 0)
             throw new ArgumentOutOfRangeException(nameof(options.KeepNewestOverride),
                 "KeepNewestOverride cannot be negative.");
+        if (options.AffectedKeyProjection is { } projection)
+        {
+            if (string.IsNullOrWhiteSpace(projection.Column))
+                throw new ArgumentException("An affected-key projection requires a column name.", nameof(options));
+            if (projection.MaxDistinctValues <= 0)
+                throw new ArgumentOutOfRangeException(nameof(projection.MaxDistinctValues),
+                    "The maximum number of distinct affected values must be positive.");
+        }
     }
 
     internal static int EffectiveKeepNewest(StorageUnit unit, RetentionExecutionOptions options)
@@ -182,6 +244,101 @@ public static class RetentionSessionExtensions
             throw new InvalidOperationException($"Storage unit '{unit.Name}' does not declare retention.");
         ValidateExecutionOptions(options);
         return options.KeepNewestOverride ?? declaration.KeepNewest;
+    }
+}
+
+internal static class RetentionAffectedKeys
+{
+    internal static IReadOnlyList<object?> DistinctAndOrder(
+        IEnumerable<IReadOnlyDictionary<string, object?>> rows,
+        RetentionAffectedKeyProjection projection,
+        int? maximum = null)
+    {
+        return DistinctAndOrderValues(
+            rows.Select(row => row.GetValueOrDefault(projection.Column)),
+            projection,
+            maximum);
+    }
+
+    internal static IReadOnlyList<object?> DistinctAndOrderValues(
+        IEnumerable<object?> values,
+        RetentionAffectedKeyProjection projection,
+        int? maximum = null)
+    {
+        var ordered = values
+            .Distinct(StructuralValueComparer.Instance)
+            .OrderBy(value => value, StructuralValueComparer.Instance)
+            .ToArray();
+        if (maximum is { } bound && ordered.Length > bound)
+            throw new RetentionAffectedKeyLimitExceededException(projection.Column, bound);
+        return Array.AsReadOnly(ordered.Select(value => value is byte[] bytes ? bytes.ToArray() : value).ToArray());
+    }
+
+    internal static RetentionAffectedKeyProjection? Validate(
+        StorageUnit unit,
+        RetentionExecutionOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(unit);
+        ArgumentNullException.ThrowIfNull(options);
+        var projection = options.AffectedKeyProjection;
+        if (projection is null)
+            return null;
+        RetentionSessionExtensions.ValidateExecutionOptions(options);
+        if (projection.Column.StartsWith("__groundwork_", StringComparison.Ordinal))
+            throw new ArgumentException(
+                $"The affected-key projection column '{projection.Column}' is provider-owned.",
+                nameof(options));
+        var column = unit.Columns.FirstOrDefault(candidate =>
+            string.Equals(candidate.Name, projection.Column, StringComparison.Ordinal));
+        if (column is null)
+            throw new ArgumentException(
+                $"The affected-key projection column '{projection.Column}' is not declared by '{unit.Name}'.",
+                nameof(options));
+        if (column.Type is PortableType.Json or PortableType.Double)
+            throw new ArgumentException(
+                $"The affected-key projection column '{projection.Column}' uses '{column.Type}', which " +
+                "does not have portable total-order semantics; choose a comparable scalar column.", nameof(options));
+        return projection;
+    }
+
+    internal sealed class StructuralValueComparer : IEqualityComparer<object?>, IComparer<object?>
+    {
+        internal static StructuralValueComparer Instance { get; } = new();
+
+        public new bool Equals(object? left, object? right) => Compare(left, right) == 0;
+
+        public int GetHashCode(object? value)
+        {
+            var hash = new HashCode();
+            switch (value)
+            {
+                case null: break;
+                case byte[] bytes:
+                    foreach (var item in bytes) hash.Add(item);
+                    break;
+                case DateTimeOffset instant: hash.Add(instant.UtcTicks); break;
+                default: hash.Add(value); break;
+            }
+            return hash.ToHashCode();
+        }
+
+        public int Compare(object? left, object? right)
+        {
+            if (ReferenceEquals(left, right)) return 0;
+            if (left is null) return -1;
+            if (right is null) return 1;
+            if (left is DateTimeOffset leftInstant && right is DateTimeOffset rightInstant)
+                return leftInstant.UtcTicks.CompareTo(rightInstant.UtcTicks);
+            if (left is byte[] leftBytes && right is byte[] rightBytes)
+                return leftBytes.AsSpan().SequenceCompareTo(rightBytes);
+            if (left is string leftText && right is string rightText)
+                return string.CompareOrdinal(leftText, rightText);
+            if (left.GetType() != right.GetType())
+                return string.CompareOrdinal(left.GetType().FullName, right.GetType().FullName);
+            return left is IComparable comparable
+                ? comparable.CompareTo(right)
+                : string.CompareOrdinal(left.ToString(), right.ToString());
+        }
     }
 }
 

@@ -12,7 +12,7 @@ using NpgsqlTypes;
 
 namespace Groundwork.PostgreSql;
 
-internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
+internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IExactRetentionAffectedKeysStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
 {
     private readonly PostgreSqlProviderConnection owner;
     private readonly NpgsqlConnection connection;
@@ -1450,8 +1450,64 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
     }
 
     private sealed class PostgreSqlRetentionAdapter(
-        PostgreSqlStorageSession session) : IRelationalRetentionAdapter
+        PostgreSqlStorageSession session) : IRelationalRetentionAdapter, IRelationalAffectedRetentionSnapshotAdapter
     {
+        public async ValueTask AcquireAffectedRetentionSnapshot(
+            RelationalExactRetentionOperation operation,
+            RelationalExecution execution)
+        {
+            using var command = session.Command(
+                $"LOCK TABLE {Quote(operation.Unit.Name)} IN SHARE ROW EXCLUSIVE MODE;");
+            await execution.ExecuteNonQuery(command).ConfigureAwait(false);
+            session.Observe(
+                "postgresql.retention-affected-lock",
+                command.CommandText,
+                ProviderCommandKind.Write);
+        }
+
+        public async ValueTask<IReadOnlyList<object?>> ReadAffectedKeys(
+            RelationalExactRetentionOperation operation,
+            RelationalExecution execution)
+        {
+            var projection = operation.Retention.Options.AffectedKeyProjection ??
+                throw new InvalidOperationException("An affected-key projection is required.");
+            var declaration = operation.Retention.Declaration;
+            var partition = declaration.PartitionColumns.Count == 0
+                ? string.Empty
+                : $"PARTITION BY {string.Join(", ", declaration.PartitionColumns.Select(Quote))} ";
+            var scoped = operation.Unit.Columns.Any(column => column.Name == PostgreSqlSchemaCoordinator.ScopeColumn);
+            var scope = scoped
+                ? $" WHERE {Quote(PostgreSqlSchemaCoordinator.ScopeColumn)}=@__groundwork_scope"
+                : string.Empty;
+            var ordering = string.Join(", ", [
+                $"{Quote(declaration.OrderColumn)} DESC",
+                .. operation.Unit.Key.Columns
+                    .Where(column => !string.Equals(column, declaration.OrderColumn, StringComparison.Ordinal))
+                    .Select(column => $"{Quote(column)} ASC")]);
+            var projectionColumn = Quote(projection.Column);
+            if (session.Column(projection.Column).Type == PortableType.String)
+                projectionColumn += " COLLATE \"C\"";
+            using var command = session.Command(
+                $"WITH ranked AS (" +
+                $"SELECT {projectionColumn}, ROW_NUMBER() OVER ({partition}ORDER BY {ordering}) AS __groundwork_retention_rank " +
+                $"FROM {Quote(operation.Unit.Name)}{scope}) " +
+                $"SELECT DISTINCT {projectionColumn} FROM ranked " +
+                $"WHERE __groundwork_retention_rank > @keep " +
+                $"ORDER BY {projectionColumn} ASC NULLS FIRST LIMIT @affected_limit;");
+            session.Add(command, "keep", operation.Retention.KeepNewest);
+            session.Add(command, "affected_limit", checked(projection.MaxDistinctValues + 1));
+            if (scoped)
+                session.Add(command, "__groundwork_scope", operation.Scope);
+            await using var readerScope = await execution.ExecuteReader(command).ConfigureAwait(false);
+            var reader = readerScope.Reader;
+            var values = new List<object?>(Math.Min(projection.MaxDistinctValues + 1, 4096));
+            var column = session.Column(projection.Column);
+            while (await execution.Read(reader).ConfigureAwait(false))
+                values.Add(reader.IsDBNull(0) ? null : FromDatabase(reader.GetValue(0), column));
+            session.Observe("postgresql.retention-affected-keys", command.CommandText, ProviderCommandKind.Read);
+            return values;
+        }
+
         public async ValueTask<int> DeleteBatch(
             RelationalRetentionOperation operation,
             RelationalExecution execution)
@@ -1467,7 +1523,9 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
             var keys = string.Join(", ", keyColumns.Select(Quote));
             var ordering = string.Join(", ", [
                 $"{Quote(operation.Declaration.OrderColumn)} DESC",
-                .. keyColumns.Select(column => $"{Quote(column)} ASC")]);
+                .. keyColumns
+                    .Where(column => !string.Equals(column, operation.Declaration.OrderColumn, StringComparison.Ordinal))
+                    .Select(column => $"{Quote(column)} ASC")]);
             var equality = string.Join(" AND ", keyColumns.Select(column =>
                 $"target.{Quote(column)}=victim.{Quote(column)}"));
             using var command = session.Command($"WITH ranked AS (" +

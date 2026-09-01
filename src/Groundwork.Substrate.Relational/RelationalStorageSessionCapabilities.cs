@@ -155,6 +155,12 @@ public abstract class RelationalRetentionAdapter : IRelationalRetentionAdapter
         RelationalRetentionCommand operation,
         RelationalExecution execution);
 
+    protected virtual ValueTask<IReadOnlyList<object?>> ReadAffectedKeys(
+        RelationalExactRetentionCommand operation,
+        RelationalExecution execution) =>
+        ValueTask.FromException<IReadOnlyList<object?>>(
+            new NotSupportedException("This relational provider does not advertise affected retention keys."));
+
     protected abstract ValueTask<DateTimeOffset> PrepareLedger(
         RelationalExactRetentionCommand operation,
         RelationalExecution execution);
@@ -190,6 +196,10 @@ public abstract class RelationalRetentionAdapter : IRelationalRetentionAdapter
     ValueTask<int> IRelationalRetentionAdapter.DeleteBatch(
         RelationalRetentionOperation operation,
         RelationalExecution execution) => DeleteBatch(ToPublic(operation), execution);
+
+    ValueTask<IReadOnlyList<object?>> IRelationalRetentionAdapter.ReadAffectedKeys(
+        RelationalExactRetentionOperation operation,
+        RelationalExecution execution) => ReadAffectedKeys(ToPublic(operation), execution);
 
     ValueTask<DateTimeOffset> IRelationalRetentionAdapter.PrepareLedger(
         RelationalExactRetentionOperation operation,
