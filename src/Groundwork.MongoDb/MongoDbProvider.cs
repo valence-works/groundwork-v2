@@ -3432,10 +3432,48 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         string operation = "mongodb.write-probe",
         bool isProbe = true)
     {
-        commandObserver?.Observe(new ProviderCommandEvent(operation, "MongoDB.FindOne", ProviderCommandKind.Read, IsProbe: isProbe));
+        if (commandObserver is not null)
+        {
+            var commandText = operation == "mongodb.read" && !isProbe
+                ? PointReadCommandText(identity)
+                : "MongoDB.FindOne";
+            commandObserver.Observe(new ProviderCommandEvent(operation, commandText, ProviderCommandKind.Read, IsProbe: isProbe));
+        }
         return mode.FirstOrDefault(transactionSession is null
             ? collection.Find(new BsonDocument("_id", identity))
             : collection.Find(transactionSession, new BsonDocument("_id", identity)))!;
+    }
+
+    private string PointReadCommandText(BsonValue identity)
+    {
+        var command = new BsonDocument
+        {
+            ["collection"] = collection.CollectionNamespace.CollectionName,
+            ["filter"] = new BsonDocument("_id", new BsonDocument("$eq", RedactIdentity(identity))),
+            ["limit"] = 1
+        };
+        return command.ToJson();
+    }
+
+    private static BsonValue RedactIdentity(BsonValue identity)
+    {
+        if (identity is BsonDocument document)
+        {
+            var redacted = new BsonDocument();
+            foreach (var element in document)
+                redacted.Add(element.Name, RedactIdentity(element.Value));
+            return redacted;
+        }
+
+        if (identity is BsonArray array)
+        {
+            var redacted = new BsonArray();
+            foreach (var value in array)
+                redacted.Add(RedactIdentity(value));
+            return redacted;
+        }
+
+        return new BsonString("<redacted>");
     }
 
     private ValueTask InsertOne(BsonDocument document, MongoExecution mode) =>
