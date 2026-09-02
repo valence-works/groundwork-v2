@@ -574,7 +574,7 @@ public static class QueryRequestExecution
         {
             var expandedLimit = request.Result.MaxRows is int maxRows
                 ? Math.Min(limit, maxRows)
-                : checked(limit + 1);
+                : limit == int.MaxValue ? limit : limit + 1;
             paging = request.Paging.ContinuationToken is { } token
                 ? Paging.Continuation(token, expandedLimit)
                 : request.Paging.Offset is int offset

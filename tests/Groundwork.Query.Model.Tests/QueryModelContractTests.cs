@@ -572,6 +572,19 @@ public sealed class QueryModelContractTests
     }
 
     [Fact]
+    public void Provider_page_preserves_the_maximum_representable_limit()
+    {
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.All,
+            Paging.Keyset(int.MaxValue));
+
+        Assert.Equal(int.MaxValue, QueryRequestExecution.ForProviderPage(request, QueryRenderOptions.Default).Paging.Limit);
+    }
+
+    [Fact]
     public void First_materialization_preserves_an_empty_take()
     {
         var request = new QueryRequest(
