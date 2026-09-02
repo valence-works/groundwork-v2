@@ -3432,10 +3432,13 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         string operation = "mongodb.write-probe",
         bool isProbe = true)
     {
-        var commandText = operation == "mongodb.read" && !isProbe
-            ? PointReadCommandText(identity)
-            : "MongoDB.FindOne";
-        commandObserver?.Observe(new ProviderCommandEvent(operation, commandText, ProviderCommandKind.Read, IsProbe: isProbe));
+        if (commandObserver is not null)
+        {
+            var commandText = operation == "mongodb.read" && !isProbe
+                ? PointReadCommandText(identity)
+                : "MongoDB.FindOne";
+            commandObserver.Observe(new ProviderCommandEvent(operation, commandText, ProviderCommandKind.Read, IsProbe: isProbe));
+        }
         return mode.FirstOrDefault(transactionSession is null
             ? collection.Find(new BsonDocument("_id", identity))
             : collection.Find(transactionSession, new BsonDocument("_id", identity)))!;
