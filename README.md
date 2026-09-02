@@ -54,7 +54,7 @@ dependencies. For example:
 Then install the exact preview required by the application:
 
 ```shell
-dotnet add package Groundwork.Sqlite --version 0.4.0-preview.6
+dotnet add package Groundwork.Sqlite --version 0.4.0-preview.7
 ```
 
 ## Sample application
