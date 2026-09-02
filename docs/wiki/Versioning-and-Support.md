@@ -156,6 +156,18 @@ plan before using Unicode ordinal ignore-case element-substring queries. No
 catalog discard is required. See the complete
 [0.4.0-preview.5 release notes](../v2/releases/0.4.0-preview.5.md).
 
+### `0.4.0-preview.6` — Exact-package documentation evidence
+
+This patch preview ships XML documentation with every public assembly and
+adds the exact-package API-reference, package README, executable snippet,
+documentation-link, generated-matrix, all-provider sample, published-portal,
+and newcomer evidence gates.
+
+There is no public runtime API, diagnostic, provider-behavior, or persisted
+schema change from preview.5. Existing catalogs remain compatible and require
+no schema apply or recreation. See the complete
+[0.4.0-preview.6 release notes](../v2/releases/0.4.0-preview.6.md).
+
 ---
 
 ## Provider support matrix
