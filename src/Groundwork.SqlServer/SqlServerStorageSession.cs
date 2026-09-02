@@ -181,13 +181,13 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
         using (var enable = Command("SET STATISTICS XML ON"))
             await mode.ExecuteNonQuery(enable).ConfigureAwait(false);
         string rawPlan;
+        var plans = new List<string>();
         try
         {
             using var explain = Command(query.CommandText);
             RelationalQueryResultReader.AddParameters(explain, query);
             await using var readerScope = await mode.ExecuteReader(explain).ConfigureAwait(false);
             var reader = readerScope.Reader;
-            var plans = new List<string>();
             do
             {
                 while (await mode.Read(reader).ConfigureAwait(false))
@@ -215,7 +215,8 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
         }
         ExplainAssertionMode.AssertChosenIndex(
             "SQL Server", logicalIndex, physicalIndex, query.IndexHintApplied, rawPlan,
-            SqlServerExplainPlanInspector.ChoseIndex(rawPlan, physicalIndex));
+            plans.Count == query.Statements.Length &&
+            plans.All(plan => SqlServerExplainPlanInspector.ChoseIndex(plan, physicalIndex)));
     }
 
     public StoredEntry? Read(StorageKey key) =>

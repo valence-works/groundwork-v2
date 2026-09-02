@@ -78,8 +78,14 @@ An empty `In` normalizes to match-none; a pinned declaration is still carried on
 command. A pinned index that excludes null values is refused when the predicate could match an
 excluded null, except for match-none. This preserves the v1 sparse-index safety rule.
 
-`ResultShape.Rows` never adds a count expression. `ResultShape.TotalCount` adds the provider
-window-count projection. `ResultShape.First` and `ResultShape.FirstOrDefault` execute with a
+`ResultShape.Rows` never adds a count expression. `ResultShape.TotalCount` adds a provider-side
+count. Relational providers return the ordered page and its count as two result sets in one database
+command and round trip; this keeps the page's declared index order intact instead of sorting a
+count/page envelope. The materializer attaches the count to the page and retains it when the page is
+empty. The two statements reuse one parameter set and run inside the caller's existing transaction
+when present. Its isolation level governs concurrent visibility between them; `TotalCount` does not
+promise snapshot isolation in a read-committed session. `ResultShape.First` and
+`ResultShape.FirstOrDefault` execute with a
 one-row bound, while `ResultShape.Single` and `ResultShape.SingleOrDefault` use a two-row bound
 so an over-one result can be detected. `First` and `FirstOrDefault` require an explicit order;
 `Single` and `SingleOrDefault` use their bounded probe to detect an over-one result without

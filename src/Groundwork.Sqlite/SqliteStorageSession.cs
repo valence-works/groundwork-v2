@@ -270,16 +270,21 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         if (query.IsMatchNone || !ExplainAssertionMode.ShouldAssert(query.SelectedIndex)) return;
         var logicalIndex = query.SelectedIndex!;
         var physicalIndex = options.ResolvePhysicalIndexName(logicalIndex);
-        using var explain = Command("EXPLAIN QUERY PLAN " + query.CommandText.TrimEnd().TrimEnd(';'));
-        RelationalQueryResultReader.AddParameters(explain, query);
-        using var reader = explain.ExecuteReader();
-        var details = new List<string>();
-        while (reader.Read())
-            details.Add(string.Join('\t', Enumerable.Range(0, reader.FieldCount).Select(index => Convert.ToString(reader.GetValue(index), CultureInfo.InvariantCulture))));
-        var rawPlan = string.Join(Environment.NewLine, details);
+        var plans = new List<string>(query.Statements.Length);
+        foreach (var statement in query.Statements)
+        {
+            using var explain = Command("EXPLAIN QUERY PLAN " + statement.TrimEnd().TrimEnd(';'));
+            RelationalQueryResultReader.AddParameters(explain, query);
+            using var reader = explain.ExecuteReader();
+            var details = new List<string>();
+            while (reader.Read())
+                details.Add(string.Join('\t', Enumerable.Range(0, reader.FieldCount).Select(index => Convert.ToString(reader.GetValue(index), CultureInfo.InvariantCulture))));
+            plans.Add(string.Join(Environment.NewLine, details));
+        }
+        var rawPlan = string.Join(Environment.NewLine, plans);
         ExplainAssertionMode.AssertChosenIndex(
             "SQLite", logicalIndex, physicalIndex, query.IndexHintApplied, rawPlan,
-            SqliteExplainPlanInspector.ChoseIndex(rawPlan, physicalIndex));
+            plans.All(plan => SqliteExplainPlanInspector.ChoseIndex(plan, physicalIndex)));
     }
 
     public StoredEntry? Read(StorageKey key)
