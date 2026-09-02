@@ -10,12 +10,89 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using MongoDB.Bson;
 using MongoDB.Driver;
+using System.Text.Json;
 using Xunit;
 
 namespace Groundwork.MongoDb.Tests;
 
 public sealed class MongoProviderIntegrationTests
 {
+    [SkippableFact]
+    public void Global_point_read_observer_describes_physical_collection_and_redacted_identity()
+    {
+        using var connection = OpenConnection();
+        var unit = PointReadUnit("global_observer", ScopePolicy.Global);
+        var key = "global-point-read-secret";
+        var command = ObservePointRead(
+            connection,
+            unit,
+            MongoStorageAccess.Global,
+            new Dictionary<string, object?> { ["id"] = key, ["payload"] = "value" },
+            new Dictionary<string, object?> { ["id"] = key });
+
+        AssertPointReadCommand(
+            command,
+            unit.Name,
+            [],
+            key);
+    }
+
+    [SkippableFact]
+    public void Scoped_point_read_observer_describes_hashed_collection_and_redacts_scope_and_identity()
+    {
+        using var connection = OpenConnection();
+        var unit = PointReadUnit("scoped_observer", ScopePolicy.Scoped);
+        var access = MongoStorageAccess.Scoped(new StorageScope("tenant-point-read-secret"));
+        var key = "scoped-point-read-secret";
+        var command = ObservePointRead(
+            connection,
+            unit,
+            access,
+            new Dictionary<string, object?> { ["id"] = key, ["payload"] = "value" },
+            new Dictionary<string, object?> { ["id"] = key });
+        var expectedCollection = MongoSchemaCoordinator.CollectionName(
+            new MongoAppliedUnit(unit, unit.Name),
+            MongoStorageAccess.Scoped(new StorageScope(access.Scope!.Value)));
+
+        AssertPointReadCommand(
+            command,
+            expectedCollection,
+            [],
+            key,
+            access.Scope.Value);
+    }
+
+    [SkippableFact]
+    public void Composite_point_read_observer_preserves_key_shape_while_redacting_every_value()
+    {
+        using var connection = OpenConnection();
+        var unit = CompositePointReadUnit();
+        var tenantKey = "composite-tenant-secret";
+        var recordKey = "composite-record-secret";
+        var command = ObservePointRead(
+            connection,
+            unit,
+            MongoStorageAccess.Global,
+            new Dictionary<string, object?>
+            {
+                ["tenantKey"] = tenantKey,
+                ["recordKey"] = recordKey,
+                ["payload"] = "value"
+            },
+            new Dictionary<string, object?>
+            {
+                ["tenantKey"] = tenantKey,
+                ["recordKey"] = recordKey
+            });
+
+        AssertPointReadCommand(
+            command,
+            unit.Name,
+            ["tenantKey", "recordKey"],
+            tenantKey,
+            recordKey);
+    }
+
     [SkippableFact]
     public void Joined_explicit_projection_materializes_qualified_source_and_target_rows()
     {
@@ -2238,6 +2315,95 @@ public sealed class MongoProviderIntegrationTests
             new QueryRequest(new TableId(unit.Name), Predicate.AlwaysTrue.Instance, [], Projection.All, Paging.None)));
 
         Assert.Contains("GW-ACCESS-006", failure.Message, StringComparison.Ordinal);
+    }
+
+    private static void AssertPointReadCommand(
+        ProviderCommandEvent command,
+        string expectedCollection,
+        IReadOnlyList<string> expectedIdentityFields,
+        params string[] redactedValues)
+    {
+        Assert.Equal("mongodb.read", command.Operation);
+        Assert.Equal(ProviderCommandKind.Read, command.Kind);
+        Assert.False(command.IsProbe);
+        Assert.NotNull(command.CommandText);
+
+        using var document = JsonDocument.Parse(command.CommandText);
+        var root = document.RootElement;
+        Assert.Equal(
+            ["collection", "filter", "limit"],
+            root.EnumerateObject().Select(property => property.Name));
+        Assert.Equal(expectedCollection, root.GetProperty("collection").GetString());
+        Assert.Equal(1, root.GetProperty("limit").GetInt32());
+        Assert.False(root.TryGetProperty("sort", out _));
+
+        var filter = root.GetProperty("filter");
+        Assert.Equal(["_id"], filter.EnumerateObject().Select(property => property.Name));
+        var equality = filter.GetProperty("_id");
+        Assert.Equal(["$eq"], equality.EnumerateObject().Select(property => property.Name));
+        var redactedIdentity = equality.GetProperty("$eq");
+        if (expectedIdentityFields.Count == 0)
+            Assert.Equal("<redacted>", redactedIdentity.GetString());
+        else
+        {
+            Assert.Equal(expectedIdentityFields, redactedIdentity.EnumerateObject().Select(property => property.Name));
+            Assert.All(redactedIdentity.EnumerateObject(), property =>
+                Assert.Equal("<redacted>", property.Value.GetString()));
+        }
+        Assert.All(redactedValues, value =>
+            Assert.DoesNotContain(value, command.CommandText, StringComparison.Ordinal));
+    }
+
+    private static ProviderCommandEvent ObservePointRead(
+        IMongoProviderConnection connection,
+        StorageUnit unit,
+        MongoStorageAccess access,
+        IReadOnlyDictionary<string, object?> values,
+        IReadOnlyDictionary<string, object?> key)
+    {
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var seeded = connection.OpenSession(unit, access);
+        Assert.True(seeded.Insert(new MongoStorageValues(values)).Succeeded);
+
+        var observer = new ProviderCommandObserver();
+        var session = connection.OpenSession(unit, access, observer);
+        Assert.NotNull(session.Read(new MongoStorageKey(key)));
+        return Assert.Single(observer.Commands);
+    }
+
+    private static StorageUnit PointReadUnit(string idPrefix, ScopePolicy scope)
+    {
+        var suffix = Guid.NewGuid().ToString("N");
+        return new StorageUnit
+        {
+            Id = new StorageUnitId($"mongo-{idPrefix}-{suffix}"),
+            Name = $"mongo_{idPrefix}_{suffix}",
+            Scope = scope,
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+                new() { Name = "payload", Type = PortableType.String, MaxLength = 64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+    }
+
+    private static StorageUnit CompositePointReadUnit()
+    {
+        var suffix = Guid.NewGuid().ToString("N");
+        return new StorageUnit
+        {
+            Id = new StorageUnitId($"mongo-composite-observer-{suffix}"),
+            Name = $"mongo_composite_observer_{suffix}",
+            Scope = ScopePolicy.Global,
+            Columns =
+            [
+                new() { Name = "tenantKey", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+                new() { Name = "recordKey", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+                new() { Name = "payload", Type = PortableType.String, MaxLength = 64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["tenantKey", "recordKey"] }
+        };
     }
 
     private static StorageUnit ScopedCrossScopeUnit(string prefix)
