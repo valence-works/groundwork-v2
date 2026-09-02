@@ -339,15 +339,22 @@ public sealed class PackagingContractTests
 
         Assert.Contains("push:", triggers, StringComparison.Ordinal);
         Assert.Contains("pull_request:", triggers, StringComparison.Ordinal);
-        foreach (var path in new[] { "README.md", "docs/**", "samples/**", "eng/verify-documentation.py", ".github/workflows/documentation-evidence.yml" })
+        foreach (var path in new[]
+        {
+            "README.md", "docs/**", "samples/**", "eng/verify-documentation.py",
+            "eng/generate-provider-matrices.sh", "eng/provider-matrix/**", ".github/workflows/documentation-evidence.yml"
+        })
             Assert.Contains(path, triggers, StringComparison.Ordinal);
         Assert.Contains("python3 eng/verify-documentation.py", workflow, StringComparison.Ordinal);
+        Assert.Contains("bash eng/generate-provider-matrices.sh check", workflow, StringComparison.Ordinal);
         Assert.DoesNotContain("dotnet test", workflow, StringComparison.Ordinal);
         Assert.DoesNotContain("Groundwork.slnx", workflow, StringComparison.Ordinal);
         Assert.DoesNotContain("concurrency.yml", workflow, StringComparison.Ordinal);
         Assert.DoesNotContain("performance.yml", workflow, StringComparison.Ordinal);
         Assert.DoesNotContain("actions/checkout@v4", workflow, StringComparison.Ordinal);
         Assert.Contains("actions/checkout@11d5960a326750d5838078e36cf38b85af677262", workflow, StringComparison.Ordinal);
+        Assert.Contains("actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9", workflow, StringComparison.Ordinal);
+        Assert.Contains("dotnet-version: 10.0.x", workflow, StringComparison.Ordinal);
     }
 
     [Fact]

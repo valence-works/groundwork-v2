@@ -7,6 +7,9 @@ on:
       - docs/**
       - samples/**
       - eng/verify-documentation.py
+      - eng/generate-provider-matrices.sh
+      - eng/provider-matrix/**
+      - docs/v2/generated/**
       - docs/v2/executable-snippets.json
       - .github/workflows/documentation-evidence.yml
       - .github/workflows/documentation-verification.yml
@@ -16,6 +19,9 @@ on:
       - docs/**
       - samples/**
       - eng/verify-documentation.py
+      - eng/generate-provider-matrices.sh
+      - eng/provider-matrix/**
+      - docs/v2/generated/**
       - docs/v2/executable-snippets.json
       - .github/workflows/documentation-evidence.yml
       - .github/workflows/documentation-verification.yml
@@ -33,5 +39,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: 10.0.x
       - name: Verify Markdown links, anchors, and executable snippets
         run: python3 eng/verify-documentation.py
+      - name: Verify generated package and provider matrices
+        run: bash eng/generate-provider-matrices.sh check

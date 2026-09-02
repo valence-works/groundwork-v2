@@ -21,6 +21,11 @@ capture before escalation.
 
 ## Provider matrix
 
+The [generated package matrix](generated/package-matrix.md) is derived from the public package
+allowlist. The [generated provider capability matrix](generated/provider-capability-matrix.md) is
+derived from public provider capability objects and is the executable capability catalog; the
+topology and support commitments below provide the operational context.
+
 | Component/provider | Tier | Supported topology |
 | --- | --- | --- |
 | SQLite | **Production-supported** | SQLite 3.35.0+ in a file on storage with ordinary local filesystem locking, with exactly one long-lived `IStorageProviderConnection` and one application writer process per database file. WAL and the provider's busy timeout remain enabled. `:memory:` databases are development/reference-only. |
