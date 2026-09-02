@@ -509,7 +509,10 @@ internal sealed class PostgreSqlProviderCatalog
             indexes.Add(new ProviderIndex(index.Name,
                 metadata.Columns.Where(column => column.Name != PostgreSqlSchemaCoordinator.ScopeColumn)
                     .Select(column => new ProviderIndexColumn(column.Name, column.Direction)).ToArray(),
-                metadata.IsUnique, index.MissingValues, index.SchemaVersion));
+                metadata.IsUnique, index.MissingValues, index.SchemaVersion,
+                metadata.IncludedColumns
+                    .Where(column => column != PostgreSqlSchemaCoordinator.ScopeColumn)
+                    .ToArray()));
         }
         return indexes;
     }

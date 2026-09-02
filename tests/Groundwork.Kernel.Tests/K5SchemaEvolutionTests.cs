@@ -30,6 +30,196 @@ public sealed class K5SchemaEvolutionTests
     }
 
     [Fact]
+    public void Canonical_index_payload_keeps_old_shape_and_tags_ordinal_identity_opt_in()
+    {
+        var ordinary = new IndexDefinition
+        {
+            Name = "by-name",
+            Columns = [new IndexColumn("name")]
+        };
+        var ordinal = ordinary with { UseOrdinalIdentities = true };
+        var oldCanonical = SchemaFingerprint.Canonicalize(["by-name", "False", "Included", "1", "name:Ascending"]);
+
+        Assert.Equal(oldCanonical, CanonicalIndexPayload.From(ordinary).Canonical);
+        Assert.True(CanonicalIndexPayload.TryParse(oldCanonical, out var oldPayload));
+        Assert.False(oldPayload.UseOrdinalIdentities);
+        Assert.Equal(
+            SchemaFingerprint.Canonicalize([
+                "by-name", "False", "Included", "1", "name:Ascending", "ordinal-identities:true"]),
+            CanonicalIndexPayload.From(ordinal).Canonical);
+        Assert.True(CanonicalIndexPayload.TryParse(CanonicalIndexPayload.From(ordinal).Canonical, out var ordinalPayload));
+        Assert.True(ordinalPayload.UseOrdinalIdentities);
+
+        var covered = ordinal with { IncludedColumns = ["description"] };
+        var coveredCanonical = CanonicalIndexPayload.From(covered).Canonical;
+        Assert.Equal(
+            SchemaFingerprint.Canonicalize([
+                "by-name", "False", "Included", "1", "name:Ascending", "included:description", "ordinal-identities:true"]),
+            coveredCanonical);
+        Assert.True(CanonicalIndexPayload.TryParse(coveredCanonical, out var coveredPayload));
+        Assert.True(new[] { "description" }.SequenceEqual(coveredPayload.IncludedColumns));
+        Assert.True(coveredPayload.UseOrdinalIdentities);
+
+        Assert.Equal(
+            CanonicalIndexPayload.From(ordinal with { IncludedColumns = ["description", "payload"] }).Canonical,
+            CanonicalIndexPayload.From(ordinal with { IncludedColumns = ["payload", "description"] }).Canonical);
+
+        Assert.False(CanonicalIndexPayload.TryParse(
+            SchemaFingerprint.Canonicalize([
+                "by-name", "False", "Included", "1", "name:Ascending", "ordinal-identities:false"]),
+            out _));
+        Assert.False(CanonicalIndexPayload.TryParse(
+            SchemaFingerprint.Canonicalize([
+                "by-name", "False", "Included", "1", "name:Ascending", "included:payload", "included:description"]),
+            out _));
+    }
+
+    [Fact]
+    public void Ordinal_identity_marker_toggle_plans_an_authorized_index_rebuild()
+    {
+        var marked = CreateTarget(OrdinalIndexUnit(useOrdinalIdentities: true));
+        var executor = new FakeExecutor();
+        PhysicalSchemaApplication.Apply(marked, executor, PlannedAt.AddMinutes(1));
+        var markedJson = PhysicalSchemaAppliedStateSerializer.Serialize(executor.AppliedState!);
+        Assert.Contains("\"useOrdinalIdentities\":true", markedJson, StringComparison.Ordinal);
+        Assert.True(
+            Assert.Single(PhysicalSchemaAppliedStateSerializer.Deserialize(markedJson).Snapshot.Subject.Indexes)
+                .UseOrdinalIdentities);
+
+        var unmarked = CreateTarget(OrdinalIndexUnit(useOrdinalIdentities: false));
+        Assert.NotEqual(marked.Fingerprint, unmarked.Fingerprint);
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            unmarked,
+            PhysicalSchemaHistoryState.FromApplied(executor.AppliedState!),
+            PlannedAt.AddMinutes(2));
+
+        Assert.True(plan.IsApplicable, string.Join("; ", plan.Refusals.Select(refusal => refusal.Message)));
+        Assert.Empty(plan.Operations.OfType<CreatePhysicalIndexOperation>());
+        var rebuild = Assert.Single(plan.Operations.OfType<RebuildPhysicalIndexOperation>());
+        Assert.Equal("by_name", rebuild.Index.Name);
+        Assert.False(rebuild.Index.UseOrdinalIdentities);
+        Assert.True(rebuild.RequiresAuthorization);
+        Assert.Contains(
+            rebuild.Identity,
+            PhysicalSchemaPlanProtection.Inspect(plan.Operations).DestructiveOperationIdentities);
+    }
+
+    [Fact]
+    public void Schema_subject_snapshot_preserves_ordinal_cover_metadata()
+    {
+        var index = Assert.Single(new SchemaSubject(OrdinalIndexUnit(useOrdinalIdentities: true)).Indexes);
+
+        Assert.True(index.UseOrdinalIdentities);
+        Assert.True(new[] { "name" }.SequenceEqual(index.IncludedColumns!));
+    }
+
+    [Fact]
+    public void Ordinal_identity_marker_requires_a_matching_ordinal_source()
+    {
+        var logical = StorageUnit.Declare("people", "people")
+            .Int32("id", column => column.Required())
+            .String("name", 32, column => column.Required())
+            .Key("id")
+            .Index("by_name", index => index.UseOrdinalIdentities().Column("name"))
+            .Build();
+
+        var error = Assert.Throws<InvalidOperationException>(() => SearchKeyProjection.Expand(logical));
+        Assert.Contains("does not include an ordinal identity source", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Ordinal_identity_marker_rejects_a_source_with_another_projection()
+    {
+        var logical = StorageUnit.Declare("people", "people")
+            .Int32("id", column => column.Required())
+            .String("name", 32, column => column.Required()
+                .LocaleOrder("sv-SE", 12)
+                .OrdinalIdentity("__groundwork_ordinal_name"))
+            .Key("id")
+            .Index("by_name", index => index.UseOrdinalIdentities().Column("name"))
+            .Build();
+
+        var error = Assert.Throws<InvalidOperationException>(() => SearchKeyProjection.Expand(logical));
+        Assert.Contains("also declares a folded or locale projection", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Unique_index_cannot_use_a_portable_include_that_changes_fallback_key_semantics()
+    {
+        var logical = new StorageUnit
+        {
+            Id = new StorageUnitId("unique-covering-index"),
+            Name = "people",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new() { Name = "name", Type = PortableType.String, IsNullable = false, MaxLength = 32 },
+                new() { Name = "description", Type = PortableType.String, MaxLength = 32 }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Indexes =
+            [
+                new IndexDefinition
+                {
+                    Name = "ux_name",
+                    Columns = [new IndexColumn("name")],
+                    IsUnique = true,
+                    IncludedColumns = ["description"]
+                }
+            ]
+        };
+
+        var error = Assert.Throws<InvalidOperationException>(() => SearchKeyProjection.Expand(logical));
+        Assert.Contains("cannot declare portable included columns", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Index_include_declaration_reports_reference_diagnostics()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("invalid-index-includes"),
+            Name = "people",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new() { Name = "name", Type = PortableType.String, IsNullable = false, MaxLength = 32 }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Indexes =
+            [
+                new IndexDefinition
+                {
+                    Name = "by_name",
+                    Columns = [new IndexColumn("name")],
+                    IncludedColumns = ["missing", "name", "name"]
+                }
+            ]
+        };
+
+        var findings = StorageDeclarationReferenceValidation.Validate(unit);
+
+        Assert.Contains(findings, finding => finding.Code == "GW-DECL-INDEX-004");
+        Assert.Contains(findings, finding => finding.Code == "GW-DECL-INDEX-005");
+        Assert.Contains(findings, finding => finding.Code == "GW-DECL-INDEX-006");
+    }
+
+    [Fact]
+    public void Applied_state_without_the_new_index_marker_round_trips_as_false()
+    {
+        var executor = new FakeExecutor();
+        var applied = PhysicalSchemaApplication.Apply(
+            CreateTarget(CreateUnit(includePriority: false)),
+            executor,
+            PlannedAt.AddMinutes(1)).AppliedState!;
+        var json = PhysicalSchemaAppliedStateSerializer.Serialize(applied);
+
+        Assert.DoesNotContain("useOrdinalIdentities", json, StringComparison.Ordinal);
+        var restored = PhysicalSchemaAppliedStateSerializer.Deserialize(json);
+        Assert.All(restored.Snapshot.Subject.Indexes, index => Assert.False(index.UseOrdinalIdentities));
+    }
+
+    [Fact]
     public void A_columns_only_subject_plans_without_a_route_and_applies()
     {
         var target = CreateTarget(CreateUnit(includePriority: true));
@@ -952,6 +1142,21 @@ public sealed class K5SchemaEvolutionTests
     private static PhysicalSchemaTarget CreateTarget(StorageUnit unit) =>
         new(new SchemaSubject(unit), Provider);
 
+    private static StorageUnit OrdinalIndexUnit(bool useOrdinalIdentities)
+    {
+        var builder = StorageUnit.Declare("people", "people")
+            .Int32("id", column => column.Required())
+            .String("name", 32, column => column.Required().OrdinalIdentity("__groundwork_ordinal_name"))
+            .Key("id");
+        builder.Index("by_name", index =>
+        {
+            if (useOrdinalIdentities)
+                index.UseOrdinalIdentities();
+            index.Column("name");
+        });
+        return SearchKeyProjection.Expand(builder.Build());
+    }
+
     private static GroundworkRuntimeSchemaAdmissionResult AutoApplyAddedIndex(
         ImmutableArray<SchemaRefusal> postApplyIndexDrift)
     {
@@ -1005,6 +1210,28 @@ public sealed class K5SchemaEvolutionTests
         Indexes = includePriority
             ? [new IndexDefinition { Name = "by_priority", Columns = [new IndexColumn("priority")] }]
             : []
+    };
+
+    private static StorageUnit CreateCoveringIndexUnit() => new()
+    {
+        Id = new StorageUnitId("covering-customer"),
+        Name = "CoveringCustomer",
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.Guid, IsNullable = false },
+            new() { Name = "name", Type = PortableType.String, IsNullable = false, MaxLength = 100 },
+            new() { Name = "description", Type = PortableType.String, MaxLength = 100 }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] },
+        Indexes =
+        [
+            new IndexDefinition
+            {
+                Name = "by_name",
+                Columns = [new IndexColumn("name")],
+                IncludedColumns = ["description"]
+            }
+        ]
     };
 
     private static StorageUnit CreateDefaultsUnit(byte[] binary, Dictionary<string, object?> json) => new()
@@ -1367,6 +1594,59 @@ public sealed class K5SchemaEvolutionTests
                 PhysicalSchemaHistoryState.FromApplied(applied.AppliedState),
                 PlannedAt.AddMinutes(4))
             .Operations);
+    }
+
+    [Fact]
+    public void Altering_an_included_column_drops_and_recreates_its_index_around_the_alteration()
+    {
+        var original = CreateCoveringIndexUnit();
+        var executor = new FakeExecutor();
+        PhysicalSchemaApplication.Apply(CreateTarget(original), executor, PlannedAt.AddMinutes(1));
+        var altered = original with
+        {
+            Columns = [.. original.Columns.Select(column => column.Name == "description"
+                ? column with { MaxLength = 200 }
+                : column)]
+        };
+
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            CreateTarget(altered),
+            PhysicalSchemaHistoryState.FromApplied(executor.AppliedState!),
+            PlannedAt.AddMinutes(2));
+
+        Assert.True(plan.IsApplicable, string.Join("; ", plan.Refusals.Select(refusal => refusal.Message)));
+        var drop = Assert.Single(plan.Operations.OfType<DropPhysicalIndexOperation>());
+        var alter = Assert.Single(plan.Operations.OfType<AlterColumnOperation>());
+        var create = Assert.Single(plan.Operations.OfType<CreatePhysicalIndexOperation>());
+        Assert.True(drop.IsRebuild);
+        Assert.True(Array.IndexOf(plan.Operations.ToArray(), drop) < Array.IndexOf(plan.Operations.ToArray(), alter));
+        Assert.True(Array.IndexOf(plan.Operations.ToArray(), alter) < Array.IndexOf(plan.Operations.ToArray(), create));
+    }
+
+    [Fact]
+    public void Removing_an_included_column_drops_its_index_before_the_column_and_rebuilds_afterward()
+    {
+        var original = CreateCoveringIndexUnit();
+        var executor = new FakeExecutor();
+        PhysicalSchemaApplication.Apply(CreateTarget(original), executor, PlannedAt.AddMinutes(1));
+        var withoutDescription = original with
+        {
+            Columns = [.. original.Columns.Where(column => column.Name != "description")],
+            Indexes = [original.Indexes[0] with { IncludedColumns = null }]
+        };
+
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            CreateTarget(withoutDescription),
+            PhysicalSchemaHistoryState.FromApplied(executor.AppliedState!),
+            PlannedAt.AddMinutes(2));
+
+        Assert.True(plan.IsApplicable, string.Join("; ", plan.Refusals.Select(refusal => refusal.Message)));
+        var dropIndex = Assert.Single(plan.Operations.OfType<DropPhysicalIndexOperation>());
+        var dropColumn = Assert.Single(plan.Operations.OfType<DropColumnOperation>());
+        var rebuild = Assert.Single(plan.Operations.OfType<RebuildPhysicalIndexOperation>());
+        Assert.True(dropIndex.IsRebuild);
+        Assert.True(Array.IndexOf(plan.Operations.ToArray(), dropIndex) < Array.IndexOf(plan.Operations.ToArray(), dropColumn));
+        Assert.True(Array.IndexOf(plan.Operations.ToArray(), dropColumn) < Array.IndexOf(plan.Operations.ToArray(), rebuild));
     }
 
     [Fact]

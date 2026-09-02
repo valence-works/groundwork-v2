@@ -766,6 +766,17 @@ public sealed class ProviderIndex
         bool isUnique,
         MissingValueBehavior missingValues,
         int schemaVersion = 1)
+        : this(name, columns, isUnique, missingValues, schemaVersion, includedColumns: null)
+    {
+    }
+
+    public ProviderIndex(
+        string name,
+        IReadOnlyList<ProviderIndexColumn> columns,
+        bool isUnique,
+        MissingValueBehavior missingValues,
+        int schemaVersion,
+        IReadOnlyList<string>? includedColumns)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         ArgumentNullException.ThrowIfNull(columns);
@@ -774,6 +785,7 @@ public sealed class ProviderIndex
         IsUnique = isUnique;
         MissingValues = missingValues;
         SchemaVersion = schemaVersion;
+        IncludedColumns = Array.AsReadOnly((includedColumns ?? []).ToArray());
     }
 
     public string Name { get; }
@@ -785,6 +797,9 @@ public sealed class ProviderIndex
     public MissingValueBehavior MissingValues { get; }
 
     public int SchemaVersion { get; }
+
+    /// <summary>Columns stored with the index but not participating in key ordering.</summary>
+    public IReadOnlyList<string> IncludedColumns { get; }
 }
 
 public enum SchemaChangeKind

@@ -422,7 +422,9 @@ public sealed class SchemaSubject
         {
             Name = index.Name,
             Columns = index.Columns.Select(column => new IndexColumn(column.Column, column.Direction)).ToImmutableArray(),
+            IncludedColumns = index.IncludedColumns?.ToImmutableArray(),
             IsUnique = index.IsUnique,
+            UseOrdinalIdentities = index.UseOrdinalIdentities,
             MissingValues = index.MissingValues,
             SchemaVersion = index.SchemaVersion
         }).ToImmutableArray(),

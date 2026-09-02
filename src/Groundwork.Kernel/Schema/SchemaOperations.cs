@@ -295,7 +295,9 @@ public sealed class CreatePhysicalIndexOperation : PhysicalSchemaOperation
     {
         Name = index.Name,
         Columns = index.Columns.Select(column => new IndexColumn(column.Column, column.Direction)).ToImmutableArray(),
+        IncludedColumns = index.IncludedColumns?.ToImmutableArray(),
         IsUnique = index.IsUnique,
+        UseOrdinalIdentities = index.UseOrdinalIdentities,
         MissingValues = index.MissingValues,
         SchemaVersion = index.SchemaVersion
     };
@@ -379,7 +381,9 @@ internal sealed record CanonicalIndexPayload(
     bool IsUnique,
     MissingValueBehavior MissingValues,
     int SchemaVersion,
-    ImmutableArray<IndexColumn> Columns)
+    ImmutableArray<IndexColumn> Columns,
+    ImmutableArray<string> IncludedColumns = default,
+    bool UseOrdinalIdentities = false)
 {
     public string Canonical => SchemaFingerprint.Canonicalize(
     [
@@ -387,7 +391,11 @@ internal sealed record CanonicalIndexPayload(
         IsUnique.ToString(CultureInfo.InvariantCulture),
         MissingValues.ToString(),
         SchemaVersion.ToString(CultureInfo.InvariantCulture),
-        .. Columns.Select(column => $"{column.Column}:{column.Direction}")
+        .. Columns.Select(column => $"{column.Column}:{column.Direction}"),
+        .. (IncludedColumns.IsDefault ? [] : IncludedColumns)
+            .OrderBy(column => column, StringComparer.Ordinal)
+            .Select(column => $"included:{column}"),
+        .. UseOrdinalIdentities ? (string?[])["ordinal-identities:true"] : []
     ]);
 
     public static CanonicalIndexPayload From(IndexDefinition index) => new(
@@ -395,7 +403,9 @@ internal sealed record CanonicalIndexPayload(
         index.IsUnique,
         index.MissingValues,
         index.SchemaVersion,
-        index.Columns.Select(column => new IndexColumn(column.Column, column.Direction)).ToImmutableArray());
+        index.Columns.Select(column => new IndexColumn(column.Column, column.Direction)).ToImmutableArray(),
+        (index.IncludedColumns ?? []).OrderBy(column => column, StringComparer.Ordinal).ToImmutableArray(),
+        index.UseOrdinalIdentities);
 
     public static bool TryParse(string canonical, out CanonicalIndexPayload payload)
     {
@@ -410,6 +420,29 @@ internal sealed record CanonicalIndexPayload(
         {
             return false;
         }
+
+        var useOrdinalIdentities = false;
+        if (parts.Length > 5 && string.Equals(parts[^1], "ordinal-identities:true", StringComparison.Ordinal))
+        {
+            useOrdinalIdentities = true;
+            parts = parts[..^1];
+        }
+        else if (parts.Length > 5 && parts[^1]?.StartsWith("ordinal-identities:", StringComparison.Ordinal) == true)
+        {
+            return false;
+        }
+
+        var included = new List<string>();
+        while (parts.Length > 5 && parts[^1] is { } includedPart &&
+               includedPart.StartsWith("included:", StringComparison.Ordinal))
+        {
+            var includedColumn = includedPart["included:".Length..];
+            if (string.IsNullOrWhiteSpace(includedColumn))
+                return false;
+            included.Add(includedColumn);
+            parts = parts[..^1];
+        }
+        included.Reverse();
 
         var columns = ImmutableArray.CreateBuilder<IndexColumn>(parts.Length - 4);
         for (var index = 4; index < parts.Length; index++)
@@ -427,7 +460,14 @@ internal sealed record CanonicalIndexPayload(
             columns.Add(new IndexColumn(term[..separator], direction));
         }
 
-        var parsed = new CanonicalIndexPayload(parts[0]!, unique, missingValues, schemaVersion, columns.MoveToImmutable());
+        var parsed = new CanonicalIndexPayload(
+            parts[0]!,
+            unique,
+            missingValues,
+            schemaVersion,
+            columns.MoveToImmutable(),
+            included.ToImmutableArray(),
+            useOrdinalIdentities);
         if (!string.Equals(parsed.Canonical, canonical, StringComparison.Ordinal))
             return false;
         payload = parsed;

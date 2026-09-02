@@ -234,7 +234,11 @@ internal sealed class SqlServerDialect : RelationalDialect
         var name = PhysicalIndexName(table, index.Name);
         var columns = string.Join(", ", index.Columns.Select(column =>
             $"{QuoteIdentifier(column.Column)} {(column.Direction == SortDirection.Ascending ? "ASC" : "DESC")}"));
+        var included = index.IncludedColumns is { Count: > 0 }
+            ? $" INCLUDE ({string.Join(", ", index.IncludedColumns.Select(QuoteIdentifier))})"
+            : string.Empty;
         return $"CREATE {unique}NONCLUSTERED INDEX {QuoteIdentifier(name)} ON {QuoteIdentifier(table)} ({columns})" +
+               included +
                (filter is null ? ";" : $" WHERE {filter};");
     }
 
@@ -630,13 +634,21 @@ internal sealed class SqlServerDialect : RelationalDialect
         reader.Close();
         using var columns = connection.CreateCommand();
         columns.Transaction = transaction;
-        columns.CommandText = "SELECT c.name,ic.is_descending_key FROM sys.index_columns ic JOIN sys.tables t ON t.object_id=ic.object_id JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id JOIN sys.indexes i ON i.object_id=ic.object_id AND i.index_id=ic.index_id WHERE t.schema_id=SCHEMA_ID(N'dbo') AND t.name=@table AND i.name=@index AND ic.key_ordinal>0 ORDER BY ic.key_ordinal;";
+        columns.CommandText = "SELECT c.name,ic.is_descending_key,ic.is_included_column,ic.key_ordinal FROM sys.index_columns ic JOIN sys.tables t ON t.object_id=ic.object_id JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id JOIN sys.indexes i ON i.object_id=ic.object_id AND i.index_id=ic.index_id WHERE t.schema_id=SCHEMA_ID(N'dbo') AND t.name=@table AND i.name=@index AND (ic.key_ordinal>0 OR ic.is_included_column=1) ORDER BY CASE WHEN ic.key_ordinal>0 THEN 0 ELSE 1 END,ic.key_ordinal,c.name;";
         AddParameter(columns, "@table", table);
         AddParameter(columns, "@index", physical);
         using var columnReader = columns.ExecuteReader();
         var result = new List<RelationalIndexColumnMetadata>();
-        while (columnReader.Read()) result.Add(new(columnReader.GetString(0), columnReader.GetBoolean(1) ? SortDirection.Descending : SortDirection.Ascending));
-        return new RelationalIndexMetadata(unique, result, filter);
+        var included = new List<string>();
+        while (columnReader.Read())
+        {
+            var name = columnReader.GetString(0);
+            if (columnReader.GetBoolean(2))
+                included.Add(name);
+            else
+                result.Add(new(name, columnReader.GetBoolean(1) ? SortDirection.Descending : SortDirection.Ascending));
+        }
+        return new RelationalIndexMetadata(unique, result, filter, included);
     }
 
     public override RelationalConstraintMetadata? ReadConstraint(

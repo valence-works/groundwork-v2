@@ -275,6 +275,9 @@ Raised by `Groundwork.Extensions.DependencyInjection`, carried on
 | `GW-DECL-KEY-001`…`003` | Invalid key declaration |
 | `GW-DECL-INDEX-001`, `-002` | Invalid index declaration |
 | `GW-DECL-INDEX-003` | Index over a JSON column — *"Leave the JSON column unindexed"* |
+| `GW-DECL-INDEX-004` | Index included column is blank or not declared on the storage unit |
+| `GW-DECL-INDEX-005` | Index included column is listed more than once |
+| `GW-DECL-INDEX-006` | Index column cannot be both a key and an included column |
 | `GW-DECL-REF-001` | A logical reference has a blank, undeclared, or duplicate source column |
 | `GW-DECL-REF-002` | A logical reference does not resolve exactly to the target unit's complete key shape |
 | `GW-DECL-REF-003` | Referencing and target units use different scope policies |

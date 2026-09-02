@@ -272,7 +272,7 @@ public sealed class StorageDeclarationBuilder
             throw new ArgumentNullException(nameof(configure));
         var builder = new IndexBuilder();
         configure(builder);
-        state.AddIndex(name, builder.Columns, unique, builder.MissingValues);
+        state.AddIndex(name, builder.Columns, unique, builder.MissingValues, builder.UsesOrdinalIdentities);
         return this;
     }
 }
@@ -400,9 +400,11 @@ public sealed class IndexBuilder
 {
     private readonly List<IndexColumn> columns = [];
     private MissingValueBehavior missingValues = MissingValueBehavior.Included;
+    private bool useOrdinalIdentities;
 
     internal IReadOnlyList<IndexColumn> Columns => columns;
     internal MissingValueBehavior MissingValues => missingValues;
+    internal bool UsesOrdinalIdentities => useOrdinalIdentities;
 
     public IndexBuilder Ascending(string column)
     {
@@ -423,6 +425,13 @@ public sealed class IndexBuilder
     public IndexBuilder ExcludeMissingValues()
     {
         missingValues = MissingValueBehavior.Excluded;
+        return this;
+    }
+
+    /// <summary>Marks this index as the covering route for persisted ordinal identities.</summary>
+    public IndexBuilder UseOrdinalIdentities()
+    {
+        useOrdinalIdentities = true;
         return this;
     }
 }
@@ -577,7 +586,8 @@ internal sealed class StorageDeclarationState
         string name,
         IEnumerable<IndexColumn> indexColumns,
         bool unique,
-        MissingValueBehavior missingValues = MissingValueBehavior.Included)
+        MissingValueBehavior missingValues = MissingValueBehavior.Included,
+        bool useOrdinalIdentities = false)
     {
         var indexName = RequireText(name, nameof(name));
         if (indexes.Any(index => string.Equals(index.Name, indexName, StringComparison.Ordinal)))
@@ -590,6 +600,7 @@ internal sealed class StorageDeclarationState
             Name = indexName,
             Columns = Array.AsReadOnly(columns),
             IsUnique = unique,
+            UseOrdinalIdentities = useOrdinalIdentities,
             MissingValues = missingValues
         });
     }

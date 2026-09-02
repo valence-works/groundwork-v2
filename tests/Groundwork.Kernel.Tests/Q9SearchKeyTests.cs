@@ -200,6 +200,40 @@ public sealed class Q9SearchKeyTests
     }
 
     [Fact]
+    public void Ordinal_identity_singleton_indexes_retain_the_logical_source_as_a_cover()
+    {
+        var logical = StorageUnit.Declare("people", "people")
+            .String("name", 512, column => column.Required().OrdinalIdentity("__groundwork_ordinal_name"))
+            .Key("name")
+            .Index("by_name", index => index.UseOrdinalIdentities().Column("name"))
+            .Build();
+
+        var physical = SearchKeyProjection.Expand(logical);
+        var index = Assert.Single(physical.Indexes);
+
+        Assert.Equal(["__groundwork_ordinal_name"], index.Columns.Select(column => column.Column));
+        Assert.Equal(["name"], index.IncludedColumns);
+    }
+
+    [Fact]
+    public void Ordinal_identity_composite_indexes_do_not_duplicate_the_bounded_logical_source()
+    {
+        var logical = StorageUnit.Declare("events", "events")
+            .String("scope", 64, column => column.Required())
+            .String("executionId", 512, column => column.Required().OrdinalIdentity("__groundwork_ordinal_executionId"))
+            .String("order", 64, column => column.Required())
+            .String("tie", 64, column => column.Required())
+            .Key("scope", "executionId")
+            .Index("by_execution", "scope", "executionId", "order", "tie")
+            .Build();
+
+        var physical = SearchKeyProjection.Expand(logical);
+        var index = Assert.Single(physical.Indexes);
+
+        Assert.Equal(["scope", "executionId", "order", "tie"], index.Columns.Select(column => column.Column));
+    }
+
+    [Fact]
     public void Ordinal_identity_requires_its_dedicated_provider_owned_namespace()
     {
         var logical = StorageUnit.Declare("people", "people")

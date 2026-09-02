@@ -422,7 +422,10 @@ internal sealed class MySqlSchemaCoordinator : ISchemaCoordinator
                 Environment.NewLine,
                 portability.Refusals.Select(refusal => $"{refusal.Code} at {refusal.Path}: {refusal.Message}")));
         }
-        return ProviderOwnedColumns.Physicalize(source, ColumnPolicy);
+        // MySQL/MariaDB has no INCLUDE clause. Keep the declared lookup key as the prefix and
+        // lower covering columns to trailing key columns so the index remains physically covering.
+        return SearchKeyProjection.LowerIncludedColumnsToKey(
+            ProviderOwnedColumns.Physicalize(source, ColumnPolicy));
     }
 
     private void Remember(StorageUnit original, StorageUnit physical) => units[original.Id] = physical;

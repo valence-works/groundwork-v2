@@ -62,6 +62,32 @@ internal static class StorageDeclarationReferenceValidation
                         $"indexes.{declaredIndex.Name}.columns[{columnIndex}]"));
                 }
             }
+
+            var seenIncludedColumns = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var includedColumn in declaredIndex.IncludedColumns ?? [])
+            {
+                if (string.IsNullOrWhiteSpace(includedColumn) || !declarations.ContainsKey(includedColumn))
+                {
+                    diagnostics.Add(new(
+                        "GW-DECL-INDEX-004",
+                        $"Index '{declaredIndex.Name}' included column '{includedColumn}' is not declared on the storage unit.",
+                        $"indexes.{declaredIndex.Name}.includedColumns"));
+                }
+                if (!string.IsNullOrWhiteSpace(includedColumn) && !seenIncludedColumns.Add(includedColumn))
+                {
+                    diagnostics.Add(new(
+                        "GW-DECL-INDEX-005",
+                        $"Index '{declaredIndex.Name}' included column '{includedColumn}' is listed more than once.",
+                        $"indexes.{declaredIndex.Name}.includedColumns"));
+                }
+                if (!string.IsNullOrWhiteSpace(includedColumn) && seenIndexColumns.Contains(includedColumn))
+                {
+                    diagnostics.Add(new(
+                        "GW-DECL-INDEX-006",
+                        $"Index '{declaredIndex.Name}' column '{includedColumn}' cannot be both a key and an included column.",
+                        $"indexes.{declaredIndex.Name}.includedColumns"));
+                }
+            }
         }
 
         diagnostics.AddRange(StorageReferenceValidation.ValidateLocal(unit));

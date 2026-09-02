@@ -220,7 +220,8 @@ internal sealed class InMemoryUnitState
             index.Columns.Select(column => new ProviderIndexColumn(column.Column, column.Direction)).ToArray(),
             index.IsUnique,
             index.MissingValues,
-            index.SchemaVersion)));
+            index.SchemaVersion,
+            index.IncludedColumns.ToArray())));
 
         return clone;
     }
@@ -260,7 +261,8 @@ internal sealed class InMemoryProviderCatalog(InMemoryDatabase database) : IProv
                     index.Columns.Select(column => new ProviderIndexColumn(column.Column, column.Direction)).ToArray(),
                     index.IsUnique,
                     index.MissingValues,
-                    index.SchemaVersion))
+                    index.SchemaVersion,
+                    index.IncludedColumns.ToArray()))
                 .ToArray();
         }
     }
@@ -529,7 +531,8 @@ internal sealed class InMemoryPhysicalSchemaExecutor(InMemoryDatabase database)
         index.Columns.Select(column => new ProviderIndexColumn(column.Column, column.Direction)).ToArray(),
         index.IsUnique,
         index.MissingValues,
-        index.SchemaVersion);
+        index.SchemaVersion,
+        index.IncludedColumns ?? []);
 
     private sealed class ApplicationLock(object gate, PhysicalSchemaTargetIdentity target)
         : IPhysicalSchemaApplicationLock
@@ -644,7 +647,7 @@ internal class InMemoryStorageSession : IStorageSession, IProviderBoundStorageSe
             throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
         RefuseUnrenderedJoin(request);
         var suppliedOptions = options ?? QueryRenderOptions.Default;
-        var searchKeyColumns = SearchKeyQueryMappings.For(Unit);
+        var searchKeyColumns = SearchKeyQueryMappings.For(Unit, suppliedOptions.FindSelectedIndex()?.Name);
         var elementSearchKeyColumns = SearchKeyQueryMappings.ElementFor(Unit);
         var executionRequest = QueryElementSearchKeyRewriter.Rewrite(
             QuerySearchKeyRewriter.Rewrite(request, searchKeyColumns), elementSearchKeyColumns);
@@ -789,7 +792,7 @@ internal class InMemoryStorageSession : IStorageSession, IProviderBoundStorageSe
         try
         {
             var suppliedOptions = options ?? QueryRenderOptions.Default;
-            var searchKeyColumns = SearchKeyQueryMappings.For(Unit);
+            var searchKeyColumns = SearchKeyQueryMappings.For(Unit, suppliedOptions.FindSelectedIndex()?.Name);
             var elementSearchKeyColumns = SearchKeyQueryMappings.ElementFor(Unit);
             var executionRequest = QueryElementSearchKeyRewriter.Rewrite(
                 QuerySearchKeyRewriter.Rewrite(request, searchKeyColumns), elementSearchKeyColumns);

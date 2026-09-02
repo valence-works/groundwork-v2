@@ -490,7 +490,16 @@ public sealed record IndexDefinition
 {
     public required string Name { get; init; }
     public required IReadOnlyList<IndexColumn> Columns { get; init; }
+    /// <summary>
+    /// Columns stored with the index for covering reads but not used for key ordering or lookup.
+    /// Providers without native included columns may materialize these as trailing key columns.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? IncludedColumns { get; init; }
     public bool IsUnique { get; init; }
+    /// <summary>Whether ordinal-identity sources in this index may be retargeted for covering projected distinct.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool UseOrdinalIdentities { get; init; }
     public MissingValueBehavior MissingValues { get; init; } = MissingValueBehavior.Included;
     public int SchemaVersion { get; init; } = 1;
 

@@ -243,7 +243,10 @@ internal sealed class SqlServerProviderCatalog(SqlServerProviderConnection owner
                         .ToArray(),
                     item.metadata.IsUnique,
                     item.index.MissingValues,
-                    item.index.SchemaVersion))
+                    item.index.SchemaVersion,
+                    item.metadata.IncludedColumns
+                        .Where(column => column != SqlServerSchemaCoordinator.ScopeColumn)
+                        .ToArray()))
                 .ToArray();
         }
     }

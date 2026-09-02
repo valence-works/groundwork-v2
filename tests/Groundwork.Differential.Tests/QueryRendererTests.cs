@@ -1026,6 +1026,39 @@ public sealed class QueryRendererTests
     }
 
     [Fact]
+    public void Ordinal_identity_equality_uses_the_physical_key_across_native_renderers()
+    {
+        var request = new QueryRequest(
+            Table,
+            new Predicate.Equal(RequiredName, QueryConstant.Of(RequiredName, "run-42")),
+            [],
+            Projection.ColumnsOnly(Id),
+            Paging.None);
+        var options = ExactOrdinalIdentityOptions();
+        var commands = new RelationalQueryCommand[]
+        {
+            new SqliteQueryRenderer().Render(request, options),
+            new PostgreSqlQueryRenderer().Render(request, options),
+            new SqlServerQueryRenderer().Render(request, options),
+            new MySqlQueryRenderer().Render(request, options)
+        };
+
+        Assert.All(commands, command =>
+        {
+            Assert.Contains(NameOrdinalKey.Name, command.CommandText, StringComparison.Ordinal);
+            Assert.DoesNotContain(RequiredName.Name, command.CommandText, StringComparison.Ordinal);
+            Assert.Equal("00720075006E002D00340032", Assert.Single(command.Parameters).Value);
+        });
+
+        var mongo = new MongoQueryRenderer().Render(request, options);
+        var match = Assert.Single(mongo.Pipeline.Where(stage => stage.Names.Single() == "$match"));
+        var matchText = match.ToString();
+        Assert.Contains(NameOrdinalKey.Name, matchText, StringComparison.Ordinal);
+        Assert.Contains("00720075006E002D00340032", matchText, StringComparison.Ordinal);
+        Assert.DoesNotContain(RequiredName.Name, matchText, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void String_distinct_pages_keep_exact_ranked_shapes_for_sql_server_and_mysql()
     {
         var request = new QueryRequest(

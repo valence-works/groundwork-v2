@@ -104,6 +104,73 @@ public sealed class Q9SearchKeyQueryTests
         Assert.Equal("Al", range.Upper!.Value.Value);
     }
 
+    [Fact]
+    public void Ordinal_identity_exact_equality_rewrites_to_the_physical_key()
+    {
+        var workflowExecutionId = new ColumnRef(Table, "workflowExecutionId", QueryType.String, false, 32);
+        var request = new QueryRequest(
+            Table,
+            new Predicate.Equal(workflowExecutionId, QueryConstant.Of(workflowExecutionId, "run-42")),
+            [],
+            Projection.All,
+            Paging.None);
+        var mapping = new QuerySearchKeyColumn(
+            workflowExecutionId.Name,
+            "__groundwork_ordinal_workflowExecutionId",
+            QuerySearchKeyPolicy.Ordinal,
+            128,
+            orderByPhysicalColumn: true,
+            supportsPrefixPredicates: false,
+            preservesOrdinalIdentity: true);
+
+        var rewritten = QuerySearchKeyRewriter.Rewrite(
+            request,
+            new Dictionary<string, QuerySearchKeyColumn> { [workflowExecutionId.Name] = mapping });
+
+        var equality = Assert.IsType<Predicate.Equal>(rewritten.Where);
+        Assert.Equal(mapping.PhysicalColumn, equality.Column.Name);
+        Assert.Equal(QueryType.String, equality.Column.Type);
+        Assert.Equal("00720075006E002D00340032", equality.Value.Value);
+        Assert.True(PortableQuerySemantics.Evaluate(rewritten.Where, new Dictionary<string, object?>
+        {
+            [mapping.PhysicalColumn] = equality.Value.Value
+        }));
+        Assert.False(PortableQuerySemantics.Evaluate(rewritten.Where, new Dictionary<string, object?>
+        {
+            [mapping.PhysicalColumn] = "006F0074"
+        }));
+    }
+
+    [Fact]
+    public void Ordinal_identity_null_equality_remains_on_the_logical_column()
+    {
+        var workflowExecutionId = new ColumnRef(Table, "workflowExecutionId", QueryType.String, true, 32);
+        var request = new QueryRequest(
+            Table,
+            new Predicate.Equal(workflowExecutionId, QueryConstant.Of(workflowExecutionId, null)),
+            [],
+            Projection.All,
+            Paging.None);
+        var mapping = new QuerySearchKeyColumn(
+            workflowExecutionId.Name,
+            "__groundwork_ordinal_workflowExecutionId",
+            QuerySearchKeyPolicy.Ordinal,
+            128,
+            orderByPhysicalColumn: true,
+            supportsPrefixPredicates: false,
+            preservesOrdinalIdentity: true);
+
+        var rewritten = QuerySearchKeyRewriter.Rewrite(
+            request,
+            new Dictionary<string, QuerySearchKeyColumn> { [workflowExecutionId.Name] = mapping });
+
+        Assert.Same(request.Where, rewritten.Where);
+        Assert.True(PortableQuerySemantics.Evaluate(rewritten.Where, new Dictionary<string, object?>
+        {
+            [workflowExecutionId.Name] = null
+        }));
+    }
+
     [Theory]
     [InlineData(QueryStringComparisonPolicy.Ordinal, QuerySearchKeyPolicy.AsciiIgnoreCase)]
     [InlineData(QueryStringComparisonPolicy.CurrentCulture, QuerySearchKeyPolicy.AsciiIgnoreCase)]

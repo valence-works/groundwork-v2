@@ -22,6 +22,16 @@ public static class QuerySearchKeys
             : Groundwork.Kernel.PortableSearchKeyEncoding.Create(value, ToPortablePolicy(policy));
     }
 
+    /// <summary>Encodes a value for the persisted injective ordinal identity projection.</summary>
+    internal static string EncodeOrdinalIdentity(string value)
+    {
+        if (value == null) throw new ArgumentNullException(nameof(value));
+        ValidateOrdinal(value);
+        return Groundwork.Kernel.PortableSearchKeyEncoding.CreateComparisonKey(
+            value,
+            Groundwork.Kernel.PortableSearchKeyPolicy.Ordinal);
+    }
+
     public static string? Successor(string encoded, QuerySearchKeyPolicy policy)
     {
         if (encoded == null) throw new ArgumentNullException(nameof(encoded));
@@ -99,6 +109,27 @@ public static class QuerySearchKeyRewriter
     {
         switch (predicate)
         {
+            case Predicate.Equal equal:
+                if (equal.Column.Table != TableId.Empty && equal.Column.Table != table)
+                    return equal;
+                if (equal.Value.Kind == QueryConstantKind.Null ||
+                    equal.Column.Type != QueryType.String ||
+                    !mappings.TryGetValue(equal.Column.Name, out var equalityMapping) ||
+                    !equalityMapping.PreservesOrdinalIdentity ||
+                    !string.Equals(equalityMapping.SourceColumn, equal.Column.Name, StringComparison.Ordinal))
+                {
+                    return equal;
+                }
+
+                var identityPhysical = new ColumnRef(
+                    table,
+                    equalityMapping.PhysicalColumn,
+                    QueryType.String,
+                    equal.Column.IsNullable,
+                    equalityMapping.MaxLength);
+                return new Predicate.Equal(
+                    identityPhysical,
+                    QueryConstant.Of(identityPhysical, QuerySearchKeys.EncodeOrdinalIdentity((string)equal.Value.Value!)));
             case Predicate.StartsWith starts:
                 if (starts.Column.Table != TableId.Empty && starts.Column.Table != table)
                     return starts;

@@ -2348,7 +2348,7 @@ public sealed class SqliteProviderTests
             .Int32("id", column => column.Required())
             .String("name", 32, column => column.Required().OrdinalIdentity("__groundwork_ordinal_name"))
             .Key("id")
-            .Index("by_name", "name")
+            .Index("by_name", index => index.UseOrdinalIdentities().Column("name"))
             .Build();
         Assert.True(connection.Schema.Apply(unit).Applied);
         Assert.Equal(
@@ -2380,7 +2380,7 @@ public sealed class SqliteProviderTests
         var name = new ColumnRef(new TableId(unit.Name), "name", QueryType.String, false, 32);
         var mappedOptions = unit.CreateQueryRenderOptions("by_name") with
         {
-            SearchKeyColumns = SearchKeyQueryMappings.For(SearchKeyProjection.Expand(unit))
+            SearchKeyColumns = SearchKeyQueryMappings.For(SearchKeyProjection.Expand(unit), "by_name")
         };
         var executionRequest = QueryRequestExecution.ForPage(new QueryRequest(
             new TableId(unit.Name), Predicate.AlwaysTrue.Instance, [], Projection.ColumnsOnly(name),

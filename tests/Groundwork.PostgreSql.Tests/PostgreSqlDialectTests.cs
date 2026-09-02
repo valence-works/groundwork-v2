@@ -398,13 +398,15 @@ public sealed class PostgreSqlDialectTests
             [
                 new IndexColumn("name", SortDirection.Ascending),
                 new IndexColumn("createdAt", SortDirection.Descending)
-            ]
+            ],
+            IncludedColumns = ["payload"]
         };
 
         var sql = dialect.CreateIndexSql("customers", index, null);
 
         Assert.Contains("\"name\" ASC NULLS FIRST", sql, StringComparison.Ordinal);
         Assert.Contains("\"createdAt\" DESC NULLS LAST", sql, StringComparison.Ordinal);
+        Assert.Contains("INCLUDE (\"payload\")", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("INDEXED BY", sql, StringComparison.OrdinalIgnoreCase);
     }
 

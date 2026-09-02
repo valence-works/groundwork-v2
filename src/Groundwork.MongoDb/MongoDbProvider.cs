@@ -1005,7 +1005,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 .Concat(MongoSchemaTargets.PhysicalIndexNames(Unit)
                     .Where(pair => !suppliedOptions.PhysicalIndexNames.ContainsKey(pair.Key)))
                 .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
-            SearchKeyColumns = SearchKeyQueryMappings.For(Unit),
+            SearchKeyColumns = SearchKeyQueryMappings.For(Unit, suppliedOptions.FindSelectedIndex()?.Name),
             ElementSearchKeyColumns = SearchKeyQueryMappings.ElementFor(Unit)
         };
         var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);
@@ -3918,7 +3918,9 @@ internal static class SchemaIdentity
 
     private static string Index(IndexDefinition index) => string.Join("|",
         index.Name, index.IsUnique, index.MissingValues, index.SchemaVersion,
-        string.Join(",", index.Columns.Select(column => column.Column + ":" + column.Direction)));
+        index.UseOrdinalIdentities,
+        string.Join(",", index.Columns.Select(column => column.Column + ":" + column.Direction)),
+        string.Join(",", (index.IncludedColumns ?? []).OrderBy(column => column, StringComparer.Ordinal)));
 
     private static string AggregationProfile(AggregationProfile profile) =>
         AggregationProfileCanonicalization.Canonicalize(profile);
@@ -3937,7 +3939,8 @@ internal static class MongoDeclarationSnapshot
         DerivedColumns = unit.DerivedColumns.Select(column => column with { }).ToArray(),
         Indexes = unit.Indexes.Select(index => index with
         {
-            Columns = index.Columns.Select(column => column with { }).ToArray()
+            Columns = index.Columns.Select(column => column with { }).ToArray(),
+            IncludedColumns = index.IncludedColumns?.ToArray()
         }).ToArray(),
         AggregationProfiles = unit.AggregationProfiles.Select(AggregationProfileSnapshot.Capture).ToArray(),
         Retention = unit.Retention is null ? null : unit.Retention with

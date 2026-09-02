@@ -371,6 +371,15 @@ public static class PortabilityValidator
                     diagnostics,
                     allowKnownProviderOwnedColumn: true);
             }
+            var includedColumns = index.IncludedColumns ?? [];
+            for (var columnIndex = 0; columnIndex < includedColumns.Count; columnIndex++)
+            {
+                ValidateIdentifier(
+                    includedColumns[columnIndex],
+                    $"{indexPath}.includedColumns[{columnIndex}]",
+                    diagnostics,
+                    allowKnownProviderOwnedColumn: true);
+            }
         }
 
         foreach (var derived in (unit.DerivedColumns ?? []).Where(column => column is not null))
@@ -520,17 +529,22 @@ public static class PortabilityValidator
             IsUnique = index.IsUnique;
             MissingValues = index.MissingValues;
             Columns = (index.Columns ?? []).ToArray();
+            IncludedColumns = (index.IncludedColumns ?? [])
+                .OrderBy(column => column, StringComparer.Ordinal)
+                .ToArray();
         }
 
         private bool IsUnique { get; }
         private MissingValueBehavior MissingValues { get; }
         private IReadOnlyList<IndexColumn> Columns { get; }
+        private IReadOnlyList<string> IncludedColumns { get; }
 
         public bool Equals(PhysicalIndexSignature? other) =>
             other is not null &&
             IsUnique == other.IsUnique &&
             MissingValues == other.MissingValues &&
-            Columns.SequenceEqual(other.Columns);
+            Columns.SequenceEqual(other.Columns) &&
+            IncludedColumns.SequenceEqual(other.IncludedColumns, StringComparer.Ordinal);
 
         public override bool Equals(object? obj) => Equals(obj as PhysicalIndexSignature);
 
@@ -539,6 +553,8 @@ public static class PortabilityValidator
             var hash = HashCode.Combine(IsUnique, MissingValues);
             foreach (var column in Columns)
                 hash = HashCode.Combine(hash, column?.Column, column?.Direction);
+            foreach (var column in IncludedColumns)
+                hash = HashCode.Combine(hash, column);
             return hash;
         }
     }

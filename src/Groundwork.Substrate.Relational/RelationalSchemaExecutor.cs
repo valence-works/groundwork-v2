@@ -827,6 +827,7 @@ public sealed class RelationalSchemaExecutor
                 .Select(column => new RelationalIndexColumnMetadata(column.Column, column.Direction))
                 .ToArray();
             if (!IndexColumnsMatch(actual.Columns, expectedColumns) ||
+                !IndexIncludedColumnsMatch(actual.IncludedColumns, expectedIndex.IncludedColumns ?? []) ||
                 !string.Equals(
                     NormalizeIndexFilter(actual.Filter),
                     NormalizeIndexFilter(dialect.IndexFilter(expectedIndex)),
@@ -926,6 +927,12 @@ public sealed class RelationalSchemaExecutor
         }
         return true;
     }
+
+    private static bool IndexIncludedColumnsMatch(
+        IReadOnlyList<string> actual,
+        IReadOnlyList<string> expected) =>
+        actual.Count == expected.Count &&
+        actual.ToHashSet(StringComparer.Ordinal).SetEquals(expected);
 
     private static string ProjectionAlgorithmId(DerivedColumnDefinition definition) => definition.AlgorithmId ?? definition.Projection switch
     {

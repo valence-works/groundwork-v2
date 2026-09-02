@@ -91,10 +91,14 @@ public sealed class RelationalSessionPolicyTests
             .Int32("id", column => column.Required())
             .String("name", 32, column => column.Required().OrdinalIdentity("__groundwork_ordinal_name"))
             .Key("id")
+            .Index("by_name", index => index.UseOrdinalIdentities().Column("name"))
+            .Index("by_name_order", index => index.Column("name").Column("id"))
             .Build();
         var unit = SearchKeyProjection.Expand(logical);
         var name = new ColumnRef(new TableId(unit.Name), "name", QueryType.String, false, 32);
-        var options = QueryRenderOptions.Default with
+        var options = new QueryRenderOptions(
+            [new QueryIndexDeclaration("by_name", ["name"])],
+            selectedIndex: "by_name") with
         {
             SearchKeyColumns = new Dictionary<string, QuerySearchKeyColumn>
             {
@@ -115,6 +119,24 @@ public sealed class RelationalSessionPolicyTests
         Assert.Equal("__groundwork_ordinal_name", mapping.PhysicalColumn);
         Assert.True(mapping.PreservesOrdinalIdentity);
         Assert.Equal(QuerySearchKeyPolicy.Ordinal, mapping.Policy);
+        Assert.True(
+            new[] { "__groundwork_ordinal_name" }.SequenceEqual(
+                prepared.RenderOptions.Indexes.Single(index => index.Name == "by_name").Columns));
+
+        var ordinaryOptions = new QueryRenderOptions(
+            [new QueryIndexDeclaration("by_name_order", ["name", "id"])],
+            selectedIndex: "by_name_order");
+        var ordinary = RelationalSessionPolicy.PrepareQuery(
+            unit,
+            StorageAccess.Global,
+            new QueryRequest(new TableId(unit.Name), Predicate.AlwaysTrue.Instance, [], Projection.ColumnsOnly(name), Paging.None),
+            ordinaryOptions,
+            new Dictionary<string, string>());
+
+        var ordinaryMapping = ordinary.RenderOptions.SearchKeyColumns["name"];
+        Assert.Equal("name", ordinaryMapping.PhysicalColumn);
+        Assert.False(ordinaryMapping.PreservesOrdinalIdentity);
+        Assert.True(new[] { "name", "id" }.SequenceEqual(ordinary.RenderOptions.Indexes.Single().Columns));
     }
 
     [Fact]
