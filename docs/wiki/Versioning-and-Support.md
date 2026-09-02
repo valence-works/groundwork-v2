@@ -182,6 +182,18 @@ schema action. The page and count statements share the caller's transaction
 and its isolation semantics; this does not provide snapshot isolation. See the
 complete [0.4.0-preview.7 release notes](../v2/releases/0.4.0-preview.7.md).
 
+### `0.4.0-preview.8` — Schema-authoritative projected distinct identities
+
+This patch preview adds the opt-in `ColumnBuilder.OrdinalIdentity` declaration.
+Groundwork persists and backfills a provider-owned ordinal identity, derives it
+on every write, and synthesizes the hidden physical projection for native
+projected-distinct execution. Projected tie-break extension remains limited to
+portable ordinal strings and decimal `(18,4)` columns.
+
+Existing preview.7 catalogs remain compatible when the declaration is not used.
+Using it is an additive schema change applied through the normal catalog path.
+See the complete [0.4.0-preview.8 release notes](../v2/releases/0.4.0-preview.8.md).
+
 ---
 
 ## Provider support matrix

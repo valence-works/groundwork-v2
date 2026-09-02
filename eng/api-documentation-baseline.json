@@ -37,12 +37,12 @@
       "publicApiMembers": 97
     },
     "Groundwork.Kernel|lib/net10.0/Groundwork.Kernel.dll": {
-      "maximumUndocumentedMembers": 1607,
-      "publicApiMembers": 1929
+      "maximumUndocumentedMembers": 1618,
+      "publicApiMembers": 1946
     },
     "Groundwork.Kernel|lib/net8.0/Groundwork.Kernel.dll": {
-      "maximumUndocumentedMembers": 1607,
-      "publicApiMembers": 1929
+      "maximumUndocumentedMembers": 1618,
+      "publicApiMembers": 1946
     },
     "Groundwork.MongoDb|lib/net10.0/Groundwork.MongoDb.dll": {
       "maximumUndocumentedMembers": 183,
@@ -90,7 +90,7 @@
     },
     "Groundwork.Query.Model|lib/netstandard2.0/Groundwork.Query.Model.dll": {
       "maximumUndocumentedMembers": 740,
-      "publicApiMembers": 796
+      "publicApiMembers": 797
     },
     "Groundwork.Query.Planning|lib/netstandard2.0/Groundwork.Query.Planning.dll": {
       "maximumUndocumentedMembers": 132,
@@ -141,12 +141,12 @@
       "publicApiMembers": 31
     },
     "Groundwork.Store|lib/net10.0/Groundwork.Store.dll": {
-      "maximumUndocumentedMembers": 546,
-      "publicApiMembers": 687
+      "maximumUndocumentedMembers": 547,
+      "publicApiMembers": 690
     },
     "Groundwork.Store|lib/net8.0/Groundwork.Store.dll": {
-      "maximumUndocumentedMembers": 546,
-      "publicApiMembers": 687
+      "maximumUndocumentedMembers": 547,
+      "publicApiMembers": 690
     },
     "Groundwork.Substrate.Mongo|lib/net10.0/Groundwork.Substrate.Mongo.dll": {
       "maximumUndocumentedMembers": 30,
@@ -157,12 +157,12 @@
       "publicApiMembers": 33
     },
     "Groundwork.Substrate.Relational|lib/net10.0/Groundwork.Substrate.Relational.dll": {
-      "maximumUndocumentedMembers": 444,
-      "publicApiMembers": 550
+      "maximumUndocumentedMembers": 445,
+      "publicApiMembers": 552
     },
     "Groundwork.Substrate.Relational|lib/net8.0/Groundwork.Substrate.Relational.dll": {
-      "maximumUndocumentedMembers": 444,
-      "publicApiMembers": 550
+      "maximumUndocumentedMembers": 445,
+      "publicApiMembers": 552
     },
     "Groundwork.Testing|lib/net10.0/Groundwork.Testing.dll": {
       "maximumUndocumentedMembers": 196,
@@ -182,8 +182,8 @@
     }
   },
   "publicApiSnapshots": {
-    "net10.0": "59b58b3659423535378f41c53bda48d2a1f7fad0d04ab4ce62da85df6cb2d4a0",
-    "net8.0": "8f4f7cd1fa9e417d736d9e1bc64ce7f5d7f36d666e2bdb52531baa31aee0ae17"
+    "net10.0": "a0f73e01cf956dc8db8ae05d2c94d7874d5282ab6f9af1b9c18993cbea54a4aa",
+    "net8.0": "6a3c3b3bfbc69837cd50e666b9b69073b3bc084543588d81d4f8112e30297814"
   },
   "schemaVersion": 1
 }

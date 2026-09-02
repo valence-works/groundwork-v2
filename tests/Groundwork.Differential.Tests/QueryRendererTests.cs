@@ -19,6 +19,8 @@ public sealed class QueryRendererTests
     private static readonly ColumnRef Id = new(Table, "id", QueryType.Int64, isNullable: false);
     private static readonly ColumnRef Name = new(Table, "name", QueryType.String, isNullable: true, maxLength: 100);
     private static readonly ColumnRef Amount = new(Table, "amount", QueryType.Int32, isNullable: true);
+    private static readonly ColumnRef RequiredName = new(Table, "requiredName", QueryType.String, isNullable: false, maxLength: 100);
+    private static readonly ColumnRef NameOrdinalKey = new(Table, "nameOrdinalKey", QueryType.String, isNullable: false, maxLength: 500);
 
     [Fact]
     public void All_native_renderers_emit_the_declared_inner_join()
@@ -865,7 +867,7 @@ public sealed class QueryRendererTests
             distinct: true);
         var options = new QueryRenderOptions(tieBreakColumns: [Id]);
         var token = QueryContinuationToken.Encode(tokenRequest, options,
-            [QueryConstant.Of(Name, "Alice"), QueryConstant.Of(Id, 42L)]);
+            [QueryConstant.Of(Name, "Alice")]);
         var countedRequest = new QueryRequest(
             tokenRequest.Table,
             tokenRequest.Where,
@@ -953,6 +955,233 @@ public sealed class QueryRendererTests
             .index;
         Assert.InRange(distinctSortIndex, distinctGroupIndex + 1, distinctSkipIndex - 1);
     }
+
+    [Fact]
+    public void Columns_only_distinct_effective_order_uses_the_complete_projected_tuple()
+    {
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(Name, OrderDirection.Descending, NullOrder.Last)],
+            Projection.ColumnsOnly(Name, Amount),
+            Paging.Keyset(2),
+            distinct: true);
+        var options = new QueryRenderOptions(tieBreakColumns: [Id]);
+
+        var order = options.GetEffectiveOrder(request);
+
+        Assert.Equal([Name, Amount], order.Select(term => term.Column));
+        Assert.Equal([OrderDirection.Descending, OrderDirection.Ascending], order.Select(term => term.Direction));
+        Assert.DoesNotContain(order, term => term.Column.Equals(Id));
+    }
+
+    [Fact]
+    public void Non_orderable_distinct_projection_retains_the_physical_row_tie_break()
+    {
+        var payload = new ColumnRef(Table, "payload", QueryType.Binary, isNullable: false);
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.ColumnsOnly(payload),
+            Paging.Keyset(2),
+            distinct: true);
+
+        var order = new QueryRenderOptions(tieBreakColumns: [Id]).GetEffectiveOrder(request);
+
+        Assert.Equal([Id], order.Select(term => term.Column));
+    }
+
+    [Fact]
+    public void Ordinal_identity_keyed_distinct_pages_use_native_select_distinct_without_ranking()
+    {
+        var publicRequest = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(RequiredName, OrderDirection.Ascending, NullOrder.Last)],
+            Projection.ColumnsOnly(RequiredName),
+            Paging.OffsetLimit(0, 2),
+            distinct: true);
+        var options = ExactOrdinalIdentityOptions();
+        var request = QueryRequestExecution.ForProviderPage(publicRequest, options);
+        Assert.Equal(
+            [RequiredName.Name, NameOrdinalKey.Name],
+            request.Projection.Columns.Select(column => column.Name));
+        var commands = new RelationalQueryCommand[]
+        {
+            new SqliteQueryRenderer().Render(request, options),
+            new PostgreSqlQueryRenderer().Render(request, options),
+            new SqlServerQueryRenderer().Render(request, options),
+            new MySqlQueryRenderer().Render(request, options)
+        };
+
+        Assert.All(commands, command =>
+        {
+            Assert.Equal(new[] { "nameOrdinalKey" }, command.AppliedOrder.ToArray());
+            Assert.Contains("SELECT DISTINCT", command.CommandText, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("ROW_NUMBER", command.CommandText, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("__groundwork_distinct_ranked", command.CommandText, StringComparison.OrdinalIgnoreCase);
+        });
+        Assert.DoesNotContain("DATALENGTH", commands[2].CommandText, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Ordinal_identity_equality_uses_the_physical_key_across_native_renderers()
+    {
+        var request = new QueryRequest(
+            Table,
+            new Predicate.Equal(RequiredName, QueryConstant.Of(RequiredName, "run-42")),
+            [],
+            Projection.ColumnsOnly(Id),
+            Paging.None);
+        var options = ExactOrdinalIdentityOptions();
+        var commands = new RelationalQueryCommand[]
+        {
+            new SqliteQueryRenderer().Render(request, options),
+            new PostgreSqlQueryRenderer().Render(request, options),
+            new SqlServerQueryRenderer().Render(request, options),
+            new MySqlQueryRenderer().Render(request, options)
+        };
+
+        Assert.All(commands, command =>
+        {
+            Assert.Contains(NameOrdinalKey.Name, command.CommandText, StringComparison.Ordinal);
+            Assert.DoesNotContain(RequiredName.Name, command.CommandText, StringComparison.Ordinal);
+            Assert.Equal("00720075006E002D00340032", Assert.Single(command.Parameters).Value);
+        });
+
+        var mongo = new MongoQueryRenderer().Render(request, options);
+        var match = Assert.Single(mongo.Pipeline.Where(stage => stage.Names.Single() == "$match"));
+        var matchText = match.ToString();
+        Assert.Contains(NameOrdinalKey.Name, matchText, StringComparison.Ordinal);
+        Assert.Contains("00720075006E002D00340032", matchText, StringComparison.Ordinal);
+        Assert.DoesNotContain(RequiredName.Name, matchText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void String_distinct_pages_keep_exact_ranked_shapes_for_sql_server_and_mysql()
+    {
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(Name, OrderDirection.Ascending, NullOrder.Last)],
+            Projection.ColumnsOnly(Name),
+            Paging.OffsetLimit(0, 2),
+            distinct: true);
+
+        var sqlServer = new SqlServerQueryRenderer().Render(request);
+        var mySql = new MySqlQueryRenderer().Render(request);
+
+        Assert.Contains("ROW_NUMBER", sqlServer.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("CONVERT(varbinary(max)", sqlServer.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("DATALENGTH", sqlServer.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("ROW_NUMBER", mySql.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("HEX(CONVERT", mySql.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("SELECT DISTINCT", sqlServer.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("SELECT DISTINCT", mySql.CommandText, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Physical_order_keys_do_not_enable_native_distinct_without_an_ordinal_identity_claim()
+    {
+        var publicRequest = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(RequiredName, OrderDirection.Ascending, NullOrder.Last)],
+            Projection.ColumnsOnly(RequiredName),
+            Paging.OffsetLimit(0, 2),
+            distinct: true);
+        var options = ExactOrdinalIdentityOptions() with
+        {
+            SearchKeyColumns = new Dictionary<string, QuerySearchKeyColumn>(StringComparer.Ordinal)
+            {
+                [RequiredName.Name] = new(
+                    RequiredName.Name,
+                    NameOrdinalKey.Name,
+                    QuerySearchKeyPolicy.Ordinal,
+                    NameOrdinalKey.MaxLength,
+                    orderByPhysicalColumn: true,
+                    supportsPrefixPredicates: false)
+            }
+        };
+
+        var request = QueryRequestExecution.ForProviderPage(publicRequest, options);
+        var command = new SqlServerQueryRenderer().Render(request, options);
+
+        Assert.Contains("ROW_NUMBER", command.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("SELECT DISTINCT", command.CommandText, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Ordinal_identity_keyed_distinct_continuation_uses_the_projected_identity_without_ranking()
+    {
+        var options = ExactOrdinalIdentityOptions();
+        var firstPage = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.ColumnsOnly(RequiredName),
+            Paging.Keyset(1),
+            distinct: true);
+        var page = QueryResultMaterializer.Materialize(
+            firstPage,
+            options,
+            [
+                new Dictionary<string, object?> { [RequiredName.Name] = "A", [NameOrdinalKey.Name] = "0041" },
+                new Dictionary<string, object?> { [RequiredName.Name] = "B", [NameOrdinalKey.Name] = "0042" }
+            ],
+            sourceIncludesDistinct: true);
+        var token = Assert.IsType<string>(page.NextContinuationToken);
+        Assert.Equal("A", page.Rows.Single()[RequiredName.Name]);
+        Assert.DoesNotContain(NameOrdinalKey.Name, page.Rows.Single().Keys);
+        var nextPage = new QueryRequest(
+            firstPage.Table,
+            firstPage.Where,
+            firstPage.Order,
+            firstPage.Projection,
+            Paging.Continuation(token, 1),
+            firstPage.Result,
+            distinct: true);
+
+        var execution = QueryRequestExecution.ForProviderPage(nextPage, options);
+        var commands = new RelationalQueryCommand[]
+        {
+            new SqliteQueryRenderer().Render(execution, options),
+            new PostgreSqlQueryRenderer().Render(execution, options),
+            new SqlServerQueryRenderer().Render(execution, options),
+            new MySqlQueryRenderer().Render(execution, options)
+        };
+
+        Assert.All(commands, command =>
+        {
+            Assert.Equal(new[] { "nameOrdinalKey" }, command.AppliedOrder.ToArray());
+            Assert.Contains("SELECT DISTINCT", command.CommandText, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("ORDER BY", command.CommandText, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("ROW_NUMBER", command.CommandText, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("__groundwork_distinct_ranked", command.CommandText, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("id", command.CommandText, StringComparison.OrdinalIgnoreCase);
+        });
+
+        Assert.Equal(
+            "0041",
+            Assert.IsType<string>(Assert.Single(QueryContinuationToken.Decode(token, execution, options)).Value));
+    }
+
+    private static QueryRenderOptions ExactOrdinalIdentityOptions() =>
+        new QueryRenderOptions(tieBreakColumns: [Id])
+        {
+            SearchKeyColumns = new Dictionary<string, QuerySearchKeyColumn>(StringComparer.Ordinal)
+            {
+                [RequiredName.Name] = new(
+                    RequiredName.Name,
+                    NameOrdinalKey.Name,
+                    QuerySearchKeyPolicy.Ordinal,
+                    NameOrdinalKey.MaxLength,
+                    orderByPhysicalColumn: true,
+                    supportsPrefixPredicates: false,
+                    preservesOrdinalIdentity: true)
+            }
+        };
 
     [Fact]
     public void All_four_renderers_preserve_the_normalized_result_shape_and_order()

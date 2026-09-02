@@ -500,7 +500,7 @@ internal static class StorageUnitCoverage
     {
         var nullable = unit.Columns.ToDictionary(column => column.Name, column => column.IsNullable, StringComparer.Ordinal);
         var logicalByPhysical = unit.DerivedColumns
-            .Where(column => column.Projection is PortableProjection.BoundarySearchKey ||
+            .Where(column => column.Projection is PortableProjection.BoundarySearchKey or PortableProjection.OrdinalIdentity ||
                              (includeLocaleSortKeys && column.Projection is PortableProjection.LocaleSortKey))
             .ToDictionary(column => column.Name, column => column.SourceColumn, StringComparer.Ordinal);
         return unit.Indexes
@@ -525,7 +525,13 @@ internal static class StorageUnitCoverage
                                 ? OrderDirection.Descending
                                 : OrderDirection.Ascending,
                             !nullable.TryGetValue(logical, out var isNullable) || isNullable);
-                    });
+                    })
+                    // Marked covering declarations contain an ordinal identity followed by its
+                    // logical source column. Once the physical identity is mapped back to the
+                    // logical coverage shape, collapse that duplicate so the source equality is
+                    // recognized as the index prefix rather than as a skipped suffix.
+                    .GroupBy(column => column.Column, StringComparer.Ordinal)
+                    .Select(group => group.First());
                 return (index, columns: columns.ToArray());
             })
             .Where(item => item.columns.Length != 0)

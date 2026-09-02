@@ -151,18 +151,28 @@ public sealed record QuerySearchKeyColumn
         QuerySearchKeyPolicy policy,
         int? maxLength = null,
         bool orderByPhysicalColumn = false,
-        bool supportsPrefixPredicates = true)
+        bool supportsPrefixPredicates = true,
+        bool preservesOrdinalIdentity = false)
     {
         if (string.IsNullOrWhiteSpace(sourceColumn))
             throw new ArgumentException("A source column is required.", nameof(sourceColumn));
         if (string.IsNullOrWhiteSpace(physicalColumn))
             throw new ArgumentException("A physical column is required.", nameof(physicalColumn));
+        if (preservesOrdinalIdentity && policy != QuerySearchKeyPolicy.Ordinal)
+            throw new ArgumentException(
+                "An ordinal identity representation must use the Ordinal search-key policy.",
+                nameof(preservesOrdinalIdentity));
+        if (preservesOrdinalIdentity && string.Equals(sourceColumn, physicalColumn, StringComparison.Ordinal))
+            throw new ArgumentException(
+                "An ordinal identity representation must use a separate physical column.",
+                nameof(preservesOrdinalIdentity));
         SourceColumn = sourceColumn;
         PhysicalColumn = physicalColumn;
         Policy = policy;
         MaxLength = maxLength;
         OrderByPhysicalColumn = orderByPhysicalColumn;
         SupportsPrefixPredicates = supportsPrefixPredicates;
+        PreservesOrdinalIdentity = preservesOrdinalIdentity;
     }
 
     public string SourceColumn { get; }
@@ -173,6 +183,8 @@ public sealed record QuerySearchKeyColumn
     public bool OrderByPhysicalColumn { get; }
     /// <summary>Whether prefix predicates may be lowered through this mapping.</summary>
     public bool SupportsPrefixPredicates { get; }
+    /// <summary>Whether the physical value is an injective ordinal representation of the source value.</summary>
+    public bool PreservesOrdinalIdentity { get; }
 }
 
 /// <summary>Maps a logical JSON string-array to its positional physical search-key array.</summary>
@@ -347,6 +359,30 @@ public sealed record QueryRenderOptions
             return terms.ToImmutableArray();
         }
 
+        // A projected Distinct tuple is already the identity of the public result. Preserve any
+        // caller order first, then use the remaining projected columns as deterministic keyset
+        // tie-breaks; a source-row identity would split equal projected values back into rows.
+        if (request.Distinct &&
+            !request.Projection.AllColumns &&
+            request.Projection.Columns.All(IsPortableProjectedOrderColumn))
+        {
+            foreach (var column in request.Projection.Columns)
+            {
+                var orderedByProjectedValue = terms.Any(term => ColumnRefIdentity.SameName(term.Column, column)) ||
+                    SearchKeyColumns.TryGetValue(column.Name, out var mapping) &&
+                    string.Equals(mapping.SourceColumn, column.Name, StringComparison.Ordinal) &&
+                    mapping.OrderByPhysicalColumn &&
+                    terms.Any(term => string.Equals(
+                        term.Column.Name,
+                        mapping.PhysicalColumn,
+                        StringComparison.Ordinal));
+                if (orderedByProjectedValue)
+                    continue;
+                terms.Add(new OrderTerm(column, OrderDirection.Ascending, NullOrder.First));
+            }
+            return terms.ToImmutableArray();
+        }
+
         foreach (var tieBreak in TieBreakColumns)
         {
             if (terms.Any(term => ColumnRefIdentity.SameName(term.Column, tieBreak)))
@@ -355,6 +391,14 @@ public sealed record QueryRenderOptions
         }
         return terms.ToImmutableArray();
     }
+
+    private static bool IsPortableProjectedOrderColumn(ColumnRef column) => column.Type switch
+    {
+        QueryType.Int32 or QueryType.Int64 or QueryType.DateTimeOffset or QueryType.Guid => true,
+        QueryType.Decimal => column.DecimalPrecision == 18 && column.DecimalScale == 4,
+        QueryType.String => column.StringComparison == QueryStringComparisonPolicy.Ordinal,
+        _ => false
+    };
 
     public QueryIndexDeclaration? FindPinnedIndex()
     {

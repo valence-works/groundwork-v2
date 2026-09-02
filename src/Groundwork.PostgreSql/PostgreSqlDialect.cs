@@ -158,6 +158,9 @@ public sealed class PostgreSqlDialect : RelationalDialect
             $"{QuoteIdentifier(column.Column)} " +
             (column.Direction == SortDirection.Descending ? "DESC NULLS LAST" : "ASC NULLS FIRST")));
         var sql = $"CREATE {unique}INDEX IF NOT EXISTS {QuoteIdentifier(PhysicalIndexName(table, index.Name))} ON {QuoteIdentifier(table)} ({columns})" +
+            (index.IncludedColumns is { Count: > 0 }
+                ? $" INCLUDE ({string.Join(", ", index.IncludedColumns.Select(QuoteIdentifier))})"
+                : string.Empty) +
             (filter is null ? ";" : $" WHERE {filter};");
         return sql;
     }
@@ -662,8 +665,9 @@ public sealed class PostgreSqlDialect : RelationalDialect
         using var command = Command(connection, transaction, """
             SELECT i.indisunique,
                    a.attname,
-                   (i.indoption[s.ordinality - 1] & 1) <> 0,
-                   (i.indoption[s.ordinality - 1] & 2) <> 0,
+                   CASE WHEN s.ordinality <= i.indnkeyatts THEN (i.indoption[s.ordinality - 1] & 1) <> 0 ELSE false END,
+                   CASE WHEN s.ordinality <= i.indnkeyatts THEN (i.indoption[s.ordinality - 1] & 2) <> 0 ELSE false END,
+                   s.ordinality > i.indnkeyatts,
                    pg_get_expr(i.indpred, i.indrelid)
             FROM pg_catalog.pg_class t
             JOIN pg_catalog.pg_namespace n ON n.oid=t.relnamespace
@@ -678,6 +682,7 @@ public sealed class PostgreSqlDialect : RelationalDialect
         Add(command, "index", index);
         using var reader = command.ExecuteReader();
         var columns = new List<RelationalIndexColumnMetadata>();
+        var included = new List<string>();
         var found = false;
         var unique = false;
         string? filter = null;
@@ -686,14 +691,19 @@ public sealed class PostgreSqlDialect : RelationalDialect
             found = true;
             unique = reader.GetBoolean(0);
             if (!reader.IsDBNull(1))
-                columns.Add(new(
-                    reader.GetString(1),
-                    reader.GetBoolean(2) ? SortDirection.Descending : SortDirection.Ascending,
-                    reader.GetBoolean(3)));
-            if (!reader.IsDBNull(4))
-                filter = reader.GetString(4);
+            {
+                if (reader.GetBoolean(4))
+                    included.Add(reader.GetString(1));
+                else
+                    columns.Add(new(
+                        reader.GetString(1),
+                        reader.GetBoolean(2) ? SortDirection.Descending : SortDirection.Ascending,
+                        reader.GetBoolean(3)));
+            }
+            if (!reader.IsDBNull(5))
+                filter = reader.GetString(5);
         }
-        return found ? new RelationalIndexMetadata(unique, columns, filter) : null;
+        return found ? new RelationalIndexMetadata(unique, columns, filter, included) : null;
     }
 
     public override string? BackfillColumnSql(string table, ColumnDefinition column) =>

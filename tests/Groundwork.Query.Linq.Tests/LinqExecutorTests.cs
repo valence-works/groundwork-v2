@@ -350,6 +350,60 @@ public sealed class LinqExecutorTests
         Assert.Contains("Add: [GwIndex(", refusal.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Scoped_linq_coverage_uses_an_ordinal_identity_index_for_exact_equality()
+    {
+        var connection = new InMemoryProviderFactory().Create("memory://ordinal-scoped-" + Guid.NewGuid().ToString("N"));
+        using (connection)
+        {
+            var unit = new StorageUnit
+            {
+                Id = new StorageUnitId("ordinal-scoped"),
+                Name = "ordinal_scoped",
+                Columns =
+                [
+                    new() { Name = "id", Type = PortableType.String, IsNullable = false, MaxLength = 32 },
+                    new()
+                    {
+                        Name = "execution_id",
+                        Type = PortableType.String,
+                        IsNullable = false,
+                        MaxLength = 32,
+                        OrdinalIdentity = new OrdinalIdentityDefinition
+                        {
+                            PhysicalColumn = "__groundwork_ordinal_execution_id"
+                        }
+                    }
+                ],
+                Key = new KeyDefinition { Columns = ["id"] },
+                Indexes = [new IndexDefinition
+                {
+                    Name = "ix_execution_id",
+                    Columns = [new IndexColumn("execution_id")],
+                    MissingValues = MissingValueBehavior.Excluded
+                }],
+                Scope = ScopePolicy.Scoped
+            };
+            Assert.True(connection.Schema.Apply(unit).Applied);
+            var session = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("tenant-a")));
+            Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(new StorageValues(
+                new Dictionary<string, object?> { ["id"] = "a", ["execution_id"] = "run-42" })).Status);
+
+            var executor = new GwLinqExecutor(session, connection);
+            var table = new GwQueryDatabase(executor).Table<Ticket>(new GwTableModel<Ticket>(unit.Name,
+            [
+                new GwColumn<Ticket>(nameof(Ticket.Id), "id", QueryType.String, false, 32),
+                new GwColumn<Ticket>(nameof(Ticket.Status), "execution_id", QueryType.String, false, 32)
+            ]));
+
+            var rows = await table.Query
+                .Where(ticket => ticket.Status == "run-42")
+                .ToListAsync(executor);
+
+            Assert.Equal("a", Assert.Single(rows).Id);
+        }
+    }
+
     /// <summary>
     /// The unit declares an index on <c>status</c> only, so nothing but the declared key can admit
     /// a read filtered on <c>id</c>.

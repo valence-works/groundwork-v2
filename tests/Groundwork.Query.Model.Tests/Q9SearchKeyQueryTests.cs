@@ -9,6 +9,23 @@ public sealed class Q9SearchKeyQueryTests
     private static readonly TableId Table = new("tickets");
     private static readonly ColumnRef Status = new(Table, "status", QueryType.String, true, 32, stringComparison: QueryStringComparisonPolicy.AsciiIgnoreCase);
 
+    [Theory]
+    [InlineData("name", "name", QuerySearchKeyPolicy.Ordinal)]
+    [InlineData("name", "nameKey", QuerySearchKeyPolicy.AsciiIgnoreCase)]
+    public void Ordinal_identity_claim_requires_a_separate_ordinal_key(
+        string source,
+        string physical,
+        QuerySearchKeyPolicy policy)
+    {
+        var failure = Assert.Throws<ArgumentException>(() => new QuerySearchKeyColumn(
+            source,
+            physical,
+            policy,
+            preservesOrdinalIdentity: true));
+
+        Assert.Equal("preservesOrdinalIdentity", failure.ParamName);
+    }
+
     [Fact]
     public void Locale_mapping_retargets_order_and_continuation_to_the_hidden_text_key()
     {
@@ -87,6 +104,149 @@ public sealed class Q9SearchKeyQueryTests
         Assert.Equal("Al", range.Upper!.Value.Value);
     }
 
+    [Fact]
+    public void Ordinal_identity_exact_equality_rewrites_to_the_physical_key()
+    {
+        var workflowExecutionId = new ColumnRef(Table, "workflowExecutionId", QueryType.String, false, 32);
+        var request = new QueryRequest(
+            Table,
+            new Predicate.Equal(workflowExecutionId, QueryConstant.Of(workflowExecutionId, "run-42")),
+            [],
+            Projection.All,
+            Paging.None);
+        var mapping = new QuerySearchKeyColumn(
+            workflowExecutionId.Name,
+            "__groundwork_ordinal_workflowExecutionId",
+            QuerySearchKeyPolicy.Ordinal,
+            128,
+            orderByPhysicalColumn: true,
+            supportsPrefixPredicates: false,
+            preservesOrdinalIdentity: true);
+
+        var rewritten = QuerySearchKeyRewriter.Rewrite(
+            request,
+            new Dictionary<string, QuerySearchKeyColumn> { [workflowExecutionId.Name] = mapping });
+
+        var equality = Assert.IsType<Predicate.Equal>(rewritten.Where);
+        Assert.Equal(mapping.PhysicalColumn, equality.Column.Name);
+        Assert.Equal(QueryType.String, equality.Column.Type);
+        Assert.Equal("00720075006E002D00340032", equality.Value.Value);
+        Assert.True(PortableQuerySemantics.Evaluate(rewritten.Where, new Dictionary<string, object?>
+        {
+            [mapping.PhysicalColumn] = equality.Value.Value
+        }));
+        Assert.False(PortableQuerySemantics.Evaluate(rewritten.Where, new Dictionary<string, object?>
+        {
+            [mapping.PhysicalColumn] = "006F0074"
+        }));
+    }
+
+    [Theory]
+    [InlineData(QueryStringComparisonPolicy.AsciiIgnoreCase)]
+    [InlineData(QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase)]
+    public void Ordinal_identity_equality_does_not_rewrite_non_ordinal_comparison(
+        QueryStringComparisonPolicy policy)
+    {
+        var workflowExecutionId = new ColumnRef(
+            Table,
+            "workflowExecutionId",
+            QueryType.String,
+            false,
+            32,
+            stringComparison: policy);
+        var request = new QueryRequest(
+            Table,
+            new Predicate.Equal(workflowExecutionId, QueryConstant.Of(workflowExecutionId, "run-42")),
+            [],
+            Projection.All,
+            Paging.None);
+        var mapping = new QuerySearchKeyColumn(
+            workflowExecutionId.Name,
+            "__groundwork_ordinal_workflowExecutionId",
+            QuerySearchKeyPolicy.Ordinal,
+            128,
+            orderByPhysicalColumn: true,
+            supportsPrefixPredicates: false,
+            preservesOrdinalIdentity: true);
+
+        var rewritten = QuerySearchKeyRewriter.Rewrite(
+            request,
+            new Dictionary<string, QuerySearchKeyColumn> { [workflowExecutionId.Name] = mapping });
+
+        Assert.Same(request.Where, rewritten.Where);
+        Assert.Contains(
+            PortableQuerySemantics.Validate(rewritten).Refusals,
+            refusal => refusal.Code == "GW-SEM-TEXT-001");
+    }
+
+    [Theory]
+    [InlineData(QueryStringComparisonPolicy.AsciiIgnoreCase)]
+    [InlineData(QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase)]
+    public void Ordinal_identity_order_does_not_rewrite_non_ordinal_comparison(
+        QueryStringComparisonPolicy policy)
+    {
+        var workflowExecutionId = new ColumnRef(
+            Table,
+            "workflowExecutionId",
+            QueryType.String,
+            false,
+            32,
+            stringComparison: policy);
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(workflowExecutionId, OrderDirection.Ascending, NullOrder.Last)],
+            Projection.All,
+            Paging.None);
+        var mapping = new QuerySearchKeyColumn(
+            workflowExecutionId.Name,
+            "__groundwork_ordinal_workflowExecutionId",
+            QuerySearchKeyPolicy.Ordinal,
+            128,
+            orderByPhysicalColumn: true,
+            supportsPrefixPredicates: false,
+            preservesOrdinalIdentity: true);
+
+        var rewritten = QuerySearchKeyRewriter.Rewrite(
+            request,
+            new Dictionary<string, QuerySearchKeyColumn> { [workflowExecutionId.Name] = mapping });
+
+        Assert.Equal(request.Order, rewritten.Order);
+        Assert.Contains(
+            PortableQuerySemantics.Validate(rewritten).Refusals,
+            refusal => refusal.Code == "GW-SEM-TEXT-001");
+    }
+
+    [Fact]
+    public void Ordinal_identity_null_equality_remains_on_the_logical_column()
+    {
+        var workflowExecutionId = new ColumnRef(Table, "workflowExecutionId", QueryType.String, true, 32);
+        var request = new QueryRequest(
+            Table,
+            new Predicate.Equal(workflowExecutionId, QueryConstant.Of(workflowExecutionId, null)),
+            [],
+            Projection.All,
+            Paging.None);
+        var mapping = new QuerySearchKeyColumn(
+            workflowExecutionId.Name,
+            "__groundwork_ordinal_workflowExecutionId",
+            QuerySearchKeyPolicy.Ordinal,
+            128,
+            orderByPhysicalColumn: true,
+            supportsPrefixPredicates: false,
+            preservesOrdinalIdentity: true);
+
+        var rewritten = QuerySearchKeyRewriter.Rewrite(
+            request,
+            new Dictionary<string, QuerySearchKeyColumn> { [workflowExecutionId.Name] = mapping });
+
+        Assert.Same(request.Where, rewritten.Where);
+        Assert.True(PortableQuerySemantics.Evaluate(rewritten.Where, new Dictionary<string, object?>
+        {
+            [workflowExecutionId.Name] = null
+        }));
+    }
+
     [Theory]
     [InlineData(QueryStringComparisonPolicy.Ordinal, QuerySearchKeyPolicy.AsciiIgnoreCase)]
     [InlineData(QueryStringComparisonPolicy.CurrentCulture, QuerySearchKeyPolicy.AsciiIgnoreCase)]
@@ -154,6 +314,101 @@ public sealed class Q9SearchKeyQueryTests
 
         Assert.True(rewritten.Distinct);
         Assert.True(PortableQuerySemantics.Validate(rewritten).IsPortable);
+    }
+
+    [Fact]
+    public void Projected_distinct_does_not_order_by_non_ordinal_string_projection()
+    {
+        var name = new ColumnRef(Table, "name", QueryType.String, true, 64,
+            stringComparison: QueryStringComparisonPolicy.CurrentCulture);
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.ColumnsOnly(name),
+            Paging.OffsetLimit(0, 10),
+            distinct: true);
+
+        Assert.Empty(QueryRenderOptions.Default.GetEffectiveOrder(request));
+    }
+
+    [Fact]
+    public void Projected_distinct_does_not_order_by_non_portable_decimal_shape()
+    {
+        var amount = new ColumnRef(Table, "amount", QueryType.Decimal, true,
+            decimalPrecision: 19, decimalScale: 4);
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.ColumnsOnly(amount),
+            Paging.OffsetLimit(0, 10),
+            distinct: true);
+
+        Assert.Empty(QueryRenderOptions.Default.GetEffectiveOrder(request));
+    }
+
+    [Fact]
+    public void Projected_distinct_rewrites_every_declared_ordinal_identity_in_projection_order()
+    {
+        var first = new ColumnRef(Table, "first", QueryType.String, false, 16);
+        var second = new ColumnRef(Table, "second", QueryType.String, false, 16);
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.ColumnsOnly(first, second),
+            Paging.OffsetLimit(0, 10),
+            distinct: true);
+        var options = QueryRenderOptions.Default with
+        {
+            SearchKeyColumns = new Dictionary<string, QuerySearchKeyColumn>
+            {
+                ["second"] = new("second", "__groundwork_ordinal_second", QuerySearchKeyPolicy.Ordinal, 64,
+                    orderByPhysicalColumn: true, supportsPrefixPredicates: false, preservesOrdinalIdentity: true),
+                ["first"] = new("first", "__groundwork_ordinal_first", QuerySearchKeyPolicy.Ordinal, 64,
+                    orderByPhysicalColumn: true, supportsPrefixPredicates: false, preservesOrdinalIdentity: true)
+            }
+        };
+
+        var execution = QueryRequestExecution.ForPage(request, options);
+
+        Assert.Equal(
+            ["__groundwork_ordinal_first", "__groundwork_ordinal_second"],
+            execution.Order.Select(term => term.Column.Name));
+        Assert.Equal(
+            ["first", "second", "__groundwork_ordinal_second", "__groundwork_ordinal_first"],
+            execution.Projection.Columns.Select(column => column.Name));
+    }
+
+    [Fact]
+    public void Projected_distinct_partial_order_keeps_the_complete_tuple_after_identity_rewrite()
+    {
+        var first = new ColumnRef(Table, "first", QueryType.String, false, 16);
+        var second = new ColumnRef(Table, "second", QueryType.String, false, 16);
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(first, OrderDirection.Descending, NullOrder.Last)],
+            Projection.ColumnsOnly(first, second),
+            Paging.OffsetLimit(0, 10),
+            distinct: true);
+        var options = QueryRenderOptions.Default with
+        {
+            SearchKeyColumns = new Dictionary<string, QuerySearchKeyColumn>
+            {
+                [first.Name] = new(first.Name, "__groundwork_ordinal_first", QuerySearchKeyPolicy.Ordinal, 64,
+                    orderByPhysicalColumn: true, supportsPrefixPredicates: false, preservesOrdinalIdentity: true),
+                [second.Name] = new(second.Name, "__groundwork_ordinal_second", QuerySearchKeyPolicy.Ordinal, 64,
+                    orderByPhysicalColumn: true, supportsPrefixPredicates: false, preservesOrdinalIdentity: true)
+            }
+        };
+
+        var execution = QueryRequestExecution.ForProviderPage(request, options);
+
+        Assert.Equal(
+            ["__groundwork_ordinal_first", "__groundwork_ordinal_second"],
+            execution.Order.Select(term => term.Column.Name));
     }
 
     [Fact]

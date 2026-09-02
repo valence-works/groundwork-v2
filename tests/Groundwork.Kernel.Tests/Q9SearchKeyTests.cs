@@ -178,6 +178,100 @@ public sealed class Q9SearchKeyTests
         Assert.Equal(PortableCollation.OrdinalIgnoreCase, physical.Columns.Single(column => column.Name == "status").LogicalCollation);
     }
 
+    [Fact]
+    public void Ordinal_identity_expansion_declares_a_provider_owned_persisted_projection()
+    {
+        var logical = StorageUnit.Declare("people", "people")
+            .Int32("id", column => column.Required())
+            .String("name", 32, column => column.Required().OrdinalIdentity("__groundwork_ordinal_name"))
+            .Key("id")
+            .Build();
+
+        var physical = SearchKeyProjection.Expand(logical);
+        var identity = Assert.Single(physical.Columns, column => column.Name == "__groundwork_ordinal_name");
+        Assert.Equal(PortableType.String, identity.Type);
+        Assert.False(identity.IsNullable);
+        Assert.Equal(128, identity.MaxLength);
+        Assert.Equal(PortableCollation.Ordinal, identity.Collation);
+        var derived = Assert.Single(physical.DerivedColumns);
+        Assert.Equal("name", derived.SourceColumn);
+        Assert.Equal(PortableProjection.OrdinalIdentity, derived.Projection);
+        Assert.Equal(PortableStringComparison.OrdinalAlgorithmId, derived.AlgorithmId);
+    }
+
+    [Fact]
+    public void Ordinal_identity_singleton_indexes_retain_the_logical_source_as_a_cover()
+    {
+        var logical = StorageUnit.Declare("people", "people")
+            .String("name", 512, column => column.Required().OrdinalIdentity("__groundwork_ordinal_name"))
+            .Key("name")
+            .Index("by_name", index => index.UseOrdinalIdentities().Column("name"))
+            .Build();
+
+        var physical = SearchKeyProjection.Expand(logical);
+        var index = Assert.Single(physical.Indexes);
+
+        Assert.Equal(["__groundwork_ordinal_name"], index.Columns.Select(column => column.Column));
+        Assert.Equal(["name"], index.IncludedColumns);
+    }
+
+    [Fact]
+    public void Ordinal_identity_composite_indexes_do_not_duplicate_the_bounded_logical_source()
+    {
+        var logical = StorageUnit.Declare("events", "events")
+            .String("scope", 64, column => column.Required())
+            .String("executionId", 512, column => column.Required().OrdinalIdentity("__groundwork_ordinal_executionId"))
+            .String("order", 64, column => column.Required())
+            .String("tie", 64, column => column.Required())
+            .Key("scope", "executionId")
+            .Index("by_execution", "scope", "executionId", "order", "tie")
+            .Build();
+
+        var physical = SearchKeyProjection.Expand(logical);
+        var index = Assert.Single(physical.Indexes);
+
+        Assert.Equal(["scope", "executionId", "order", "tie"], index.Columns.Select(column => column.Column));
+    }
+
+    [Fact]
+    public void Ordinal_identity_requires_its_dedicated_provider_owned_namespace()
+    {
+        var logical = StorageUnit.Declare("people", "people")
+            .Int32("id", column => column.Required())
+            .String("name", 32, column => column.Required().OrdinalIdentity("__groundwork_search_name"))
+            .Key("id")
+            .Build();
+
+        var failure = Assert.Throws<InvalidOperationException>(() => SearchKeyProjection.Expand(logical));
+
+        Assert.Contains(SearchKeyProjection.OrdinalIdentityPrefix, failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Ordinal_identity_writes_are_derived_and_provider_owned()
+    {
+        var logical = StorageUnit.Declare("people", "people")
+            .Int32("id", column => column.Required())
+            .String("name", 32, column => column.Required().OrdinalIdentity("__groundwork_ordinal_name"))
+            .Key("id")
+            .Build();
+        var physical = SearchKeyProjection.Expand(logical);
+
+        var values = SearchKeyProjection.Populate(physical, new Dictionary<string, object?>
+        {
+            ["id"] = 1,
+            ["name"] = "Ada"
+        });
+        Assert.Equal(PortableStringComparison.CreateOrdinal("Ada"), values["__groundwork_ordinal_name"]);
+
+        Assert.Throws<ArgumentException>(() => SearchKeyProjection.Populate(physical, new Dictionary<string, object?>
+        {
+            ["id"] = 1,
+            ["name"] = "Ada",
+            ["__groundwork_ordinal_name"] = "spoofed"
+        }));
+    }
+
     [Theory]
     [InlineData("A", "|0061")]
     [InlineData("Turkish I", "|0074|0075|0072|006B|0069|0073|0068|0020|0069")]

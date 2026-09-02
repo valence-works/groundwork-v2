@@ -170,7 +170,10 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
                     portability.Refusals.Select(refusal =>
                         $"{refusal.Code} at {refusal.Path}: {refusal.Message}")));
         }
-        return ProviderOwnedColumns.Physicalize(source, ColumnPolicy);
+        var physical = ProviderOwnedColumns.Physicalize(source, ColumnPolicy);
+        // SQLite has no INCLUDE clause. Keep the declared lookup key as the prefix and lower
+        // covering columns to trailing key columns so the planner can still use a covering index.
+        return SearchKeyProjection.LowerIncludedColumnsToKey(physical);
     }
 
     private static void EnsurePhysicalIndexNames(StorageUnit source)

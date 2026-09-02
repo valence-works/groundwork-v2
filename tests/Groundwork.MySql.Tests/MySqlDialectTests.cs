@@ -91,6 +91,39 @@ public sealed class MySqlDialectTests
     }
 
     [Fact]
+    public void Lowers_covering_columns_to_trailing_key_columns_before_mysql_ddl()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("mysql-covering-index"),
+            Name = "events",
+            Columns =
+            [
+                Column(PortableType.Int64, name: "id", nullable: false),
+                Column(PortableType.String, name: "name", nullable: false, maxLength: 120),
+                Column(PortableType.String, name: "payload", maxLength: 120)
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Indexes =
+            [
+                new IndexDefinition
+                {
+                    Name = "by_name",
+                    Columns = [new IndexColumn("name")],
+                    IncludedColumns = ["payload"]
+                }
+            ]
+        };
+
+        var physical = MySqlSchemaCoordinator.Physicalize(unit);
+        var index = Assert.Single(physical.Indexes);
+
+        Assert.Equal(["name", "payload"], index.Columns.Select(column => column.Column));
+        Assert.Null(index.IncludedColumns);
+        Assert.DoesNotContain("INCLUDE", dialect.CreateIndexSql("events", index, null), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Maps_logical_indexes_to_their_collision_safe_physical_names()
     {
         var unit = new StorageUnit

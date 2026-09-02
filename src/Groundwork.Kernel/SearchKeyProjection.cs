@@ -9,9 +9,11 @@ namespace Groundwork.Kernel;
 public static class SearchKeyProjection
 {
     public const string Prefix = "__groundwork_search_";
+    public const string OrdinalIdentityPrefix = "__groundwork_ordinal_";
 
     public static bool IsProviderOwnedColumn(string columnName) =>
-        columnName?.StartsWith(Prefix, StringComparison.Ordinal) == true;
+        columnName?.StartsWith(Prefix, StringComparison.Ordinal) == true ||
+        columnName?.StartsWith(OrdinalIdentityPrefix, StringComparison.Ordinal) == true;
 
     public static IReadOnlyDictionary<string, object?> PublicValues(IReadOnlyDictionary<string, object?> values)
     {
@@ -67,6 +69,8 @@ public static class SearchKeyProjection
 
     internal static void ValidateAlgorithmId(string? algorithmId)
     {
+        if (string.Equals(algorithmId, PortableStringComparison.OrdinalAlgorithmId, StringComparison.Ordinal))
+            return;
         if (algorithmId?.StartsWith(PortableLocaleOrdering.AlgorithmName + ":", StringComparison.Ordinal) == true)
             _ = PortableLocaleOrdering.ParseAlgorithmId(algorithmId);
         else if (algorithmId?.StartsWith(PortableElementSearchKeyAlgorithm.Name + "+", StringComparison.Ordinal) == true)
@@ -121,8 +125,8 @@ public static class SearchKeyProjection
     /// <summary>
     /// Adds one provider-owned key for each folded, locale-ordered, or element-projected source.
     /// Scalar keys are nullable ASCII text and retarget declared physical indexes; element keys are
-    /// positional JSON arrays and remain bounded-scan-only. Ordinal scalar columns deliberately
-    /// remain base-column only.
+    /// positional JSON arrays and remain bounded-scan-only. Ordinal scalar columns are retargeted
+    /// only by indexes that explicitly opt into ordinal identity covering.
     /// </summary>
     public static StorageUnit Expand(StorageUnit source)
     {
@@ -138,6 +142,8 @@ public static class SearchKeyProjection
         }
         var projectedSources = (source.Columns ?? []).Where(IsProjected).ToArray();
         var elementProjectedSources = (source.Columns ?? []).Where(IsElementProjected).ToArray();
+        var ordinalIdentitySources = (source.Columns ?? []).Where(column => column.OrdinalIdentity is not null).ToArray();
+        ValidateOrdinalIdentityIndexes(source, ordinalIdentitySources);
 
         var columns = (source.Columns ?? []).Select(column =>
             IsProjected(column)
@@ -235,15 +241,88 @@ public static class SearchKeyProjection
             }
         }
 
-        var indexes = source.Indexes.Select(index => index with
+        foreach (var column in ordinalIdentitySources)
         {
-            Columns = index.Columns.Select(column =>
+            var declaration = column.OrdinalIdentity!;
+            if (column.Type != PortableType.String || column.IsNullable ||
+                string.IsNullOrWhiteSpace(declaration.PhysicalColumn) ||
+                !declaration.PhysicalColumn.StartsWith(OrdinalIdentityPrefix, StringComparison.Ordinal) ||
+                string.Equals(declaration.PhysicalColumn, column.Name, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"Ordinal identity column '{column.Name}' requires a distinct non-null physical string column in the " +
+                    $"'{OrdinalIdentityPrefix}' provider-owned namespace and a non-null source.");
+            }
+
+            var name = declaration.PhysicalColumn;
+            var existing = columns.FirstOrDefault(item => item.Name == name);
+            var expected = new ColumnDefinition
+            {
+                Name = name,
+                Type = PortableType.String,
+                IsNullable = false,
+                MaxLength = column.MaxLength is int length ? checked(length * 4) : null,
+                Collation = PortableCollation.Ordinal
+            };
+            if (existing is null)
+                columns.Add(expected);
+            else if (existing.Type != expected.Type || existing.IsNullable != expected.IsNullable ||
+                     existing.MaxLength != expected.MaxLength || existing.Collation != expected.Collation)
+            {
+                throw new InvalidOperationException($"Ordinal identity column '{name}' has incompatible physical metadata.");
+            }
+
+            var existingDerived = derived.FirstOrDefault(item => item.Name == name);
+            if (existingDerived is null)
+            {
+                derived.Add(new DerivedColumnDefinition
+                {
+                    Name = name,
+                    SourceColumn = column.Name,
+                    Projection = PortableProjection.OrdinalIdentity,
+                    AlgorithmId = PortableStringComparison.OrdinalAlgorithmId
+                });
+            }
+            else if (existingDerived.SourceColumn != column.Name ||
+                     existingDerived.Projection != PortableProjection.OrdinalIdentity ||
+                     !string.Equals(existingDerived.AlgorithmId, PortableStringComparison.OrdinalAlgorithmId, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException($"Ordinal identity declaration '{name}' does not match source '{column.Name}'.");
+            }
+        }
+
+        var indexes = source.Indexes.Select(index =>
+        {
+            var physicalColumns = index.Columns.Select(column =>
             {
                 var sourceColumn = (source.Columns ?? []).FirstOrDefault(item => item.Name == column.Column);
-                return sourceColumn is not null && IsProjected(sourceColumn)
-                    ? column with { Column = ColumnName(column.Column) }
-                    : column with { };
-            }).ToArray()
+                if (sourceColumn is not null && IsProjected(sourceColumn))
+                    return column with { Column = ColumnName(column.Column) };
+                if (index.UseOrdinalIdentities && sourceColumn?.OrdinalIdentity is { } identity)
+                    return column with { Column = identity.PhysicalColumn };
+                return column with { };
+            }).ToList();
+
+            // Only an explicitly marked index is the covering shape used by projected DISTINCT:
+            // retain each logical source as an included column after its injective physical key.
+            // Providers without native included columns can lower this metadata to trailing keys.
+            var includedColumns = (index.IncludedColumns ?? []).ToList();
+            if (index.UseOrdinalIdentities)
+            {
+                foreach (var ordinalSource in index.Columns
+                             .Where(column => (source.Columns ?? []).FirstOrDefault(item => item.Name == column.Column)?.OrdinalIdentity is not null)
+                             .Select(column => column.Column))
+                {
+                    if (!includedColumns.Contains(ordinalSource, StringComparer.Ordinal))
+                        includedColumns.Add(ordinalSource);
+                }
+            }
+
+            return index with
+            {
+                Columns = physicalColumns.ToArray(),
+                IncludedColumns = includedColumns.Count == 0 ? null : includedColumns.ToArray()
+            };
         }).ToArray();
 
         return source with
@@ -252,6 +331,74 @@ public static class SearchKeyProjection
             DerivedColumns = new ReadOnlyCollection<DerivedColumnDefinition>(derived),
             Indexes = indexes
         };
+    }
+
+    /// <summary>
+    /// Lowers covering metadata to trailing key columns for providers that have no native INCLUDE
+    /// clause. The declared key remains the prefix, so the index keeps its lookup ordering while
+    /// still being physically covering.
+    /// </summary>
+    internal static StorageUnit LowerIncludedColumnsToKey(StorageUnit physical)
+    {
+        ArgumentNullException.ThrowIfNull(physical);
+        return physical with
+        {
+            Indexes = physical.Indexes.Select(index =>
+            {
+                if (index.IncludedColumns is not { Count: > 0 })
+                    return index;
+
+                return index with
+                {
+                    Columns = [
+                        .. index.Columns,
+                        .. index.IncludedColumns.Select(column => new IndexColumn(column))
+                    ],
+                    IncludedColumns = null
+                };
+            }).ToArray()
+        };
+    }
+
+    private static void ValidateOrdinalIdentityIndexes(
+        StorageUnit source,
+        IReadOnlyList<ColumnDefinition> ordinalIdentitySources)
+    {
+        var ordinalNames = ordinalIdentitySources
+            .Select(column => column.Name)
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (var index in source.Indexes ?? [])
+        {
+            var explicitlyIncludedColumns = index.IncludedColumns ?? [];
+            if (index.IsUnique && explicitlyIncludedColumns.Count > 0 &&
+                (!index.UseOrdinalIdentities || explicitlyIncludedColumns.Any(column => !ordinalNames.Contains(column))))
+            {
+                throw new InvalidOperationException(
+                    $"Unique index '{index.Name}' cannot declare portable included columns unless every included column " +
+                    "is the ordinal identity source of this index; providers without native INCLUDE clauses lower " +
+                    "included columns into the unique key.");
+            }
+
+            if (!index.UseOrdinalIdentities)
+                continue;
+
+            var identityColumns = index.Columns
+                .Where(column => ordinalNames.Contains(column.Column))
+                .Select(column => column.Column)
+                .ToArray();
+            if (identityColumns.Length == 0)
+            {
+                throw new InvalidOperationException(
+                    $"Index '{index.Name}' opts into ordinal identity covering but does not include an ordinal identity source.");
+            }
+
+            if (identityColumns.Any(column => IsProjected(
+                    ordinalIdentitySources.First(sourceColumn => sourceColumn.Name == column))))
+            {
+                throw new InvalidOperationException(
+                    $"Index '{index.Name}' cannot opt into ordinal identity covering for a source that also declares a folded or locale projection.");
+            }
+        }
     }
 
     /// <summary>Validates the optional JSON string-array search-key declaration on one column.</summary>
@@ -280,7 +427,7 @@ public static class SearchKeyProjection
             ValidateElementSearchKey(column);
         var result = values.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
         var declarations = unit.DerivedColumns
-            .Where(column => column.Projection is PortableProjection.BoundarySearchKey or PortableProjection.LocaleSortKey or PortableProjection.ElementBoundarySearchKey)
+            .Where(column => column.Projection is PortableProjection.BoundarySearchKey or PortableProjection.LocaleSortKey or PortableProjection.ElementBoundarySearchKey or PortableProjection.OrdinalIdentity)
             .ToArray();
         if (declarations.Length == 0)
         {
@@ -335,6 +482,7 @@ public static class SearchKeyProjection
             PortableProjection.BoundarySearchKey => PortableStringComparison.CreateSearchKey(
                 value,
                 PortableSearchKeyAlgorithmIdentity.Parse(declaration.AlgorithmId).Policy),
+            PortableProjection.OrdinalIdentity => PortableStringComparison.CreateOrdinal(value),
             PortableProjection.LocaleSortKey => PortableLocaleOrdering.CreateSortKey(
                 value,
                 PortableLocaleOrdering.ParseAlgorithmId(declaration.AlgorithmId).CultureName),

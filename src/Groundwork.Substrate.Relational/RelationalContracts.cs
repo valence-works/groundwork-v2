@@ -766,11 +766,21 @@ public sealed record RelationalIndexMetadata
         bool isUnique,
         IEnumerable<RelationalIndexColumnMetadata> columns,
         string? filter)
+        : this(isUnique, columns, filter, includedColumns: null)
+    {
+    }
+
+    public RelationalIndexMetadata(
+        bool isUnique,
+        IEnumerable<RelationalIndexColumnMetadata> columns,
+        string? filter,
+        IEnumerable<string>? includedColumns)
     {
         IsUnique = isUnique;
         Columns = new ReadOnlyCollection<RelationalIndexColumnMetadata>(
             (columns ?? throw new ArgumentNullException(nameof(columns))).ToArray());
         Filter = filter;
+        IncludedColumns = new ReadOnlyCollection<string>((includedColumns ?? []).ToArray());
     }
 
     public bool IsUnique { get; }
@@ -778,6 +788,9 @@ public sealed record RelationalIndexMetadata
     public IReadOnlyList<RelationalIndexColumnMetadata> Columns { get; }
 
     public string? Filter { get; }
+
+    /// <summary>Columns stored with the index but not participating in key ordering.</summary>
+    public IReadOnlyList<string> IncludedColumns { get; }
 }
 
 public enum RelationalConstraintKind

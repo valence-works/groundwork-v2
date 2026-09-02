@@ -139,6 +139,7 @@ internal static class RelationalSessionPolicy
             .Select(column => column!);
         if (crossScope)
             identity = new[] { scopeToken }.Concat(identity);
+        var selectedIndex = suppliedOptions.FindSelectedIndex()?.Name;
 
         return suppliedOptions.WithIdentityTieBreaks(identity) with
         {
@@ -151,7 +152,7 @@ internal static class RelationalSessionPolicy
             PhysicalIndexNames = suppliedOptions.PhysicalIndexNames
                 .Concat(physicalIndexNames.Where(pair => !suppliedOptions.PhysicalIndexNames.ContainsKey(pair.Key)))
                 .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
-            SearchKeyColumns = SearchKeyQueryMappings.For(unit),
+            SearchKeyColumns = SearchKeyQueryMappings.For(unit, selectedIndex),
             ElementSearchKeyColumns = SearchKeyQueryMappings.ElementFor(unit),
             LatestPartitionColumns = crossScope ? [scopeToken] : suppliedOptions.LatestPartitionColumns
         };

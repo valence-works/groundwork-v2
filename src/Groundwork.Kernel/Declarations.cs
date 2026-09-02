@@ -69,7 +69,8 @@ public enum PortableProjection
     BoundarySearchKey,
     LocaleSortKey,
     Sha256,
-    ElementBoundarySearchKey
+    ElementBoundarySearchKey,
+    OrdinalIdentity
 }
 
 public enum SortDirection
@@ -369,6 +370,16 @@ public sealed record LocaleSortKeyDefinition
 }
 
 /// <summary>
+/// Declares a provider-owned persisted column containing the source string's injective ordinal
+/// identity. The provider derives this value from the source on every write and backfill; callers
+/// cannot supply or override the physical value.
+/// </summary>
+public sealed record OrdinalIdentityDefinition
+{
+    public required string PhysicalColumn { get; init; }
+}
+
+/// <summary>
 /// Declares a provider-owned parallel JSON array containing one boundary-delimited search key for
 /// each string member of a JSON array column. Non-string members retain their slot as JSON null.
 /// </summary>
@@ -396,6 +407,8 @@ public sealed record ColumnDefinition
     public PortableCollation? LogicalCollation { get; init; }
     /// <summary>Optional locale-aware ordering implemented by a provider-owned ICU sort key.</summary>
     public LocaleSortKeyDefinition? LocaleSortKey { get; init; }
+    /// <summary>Optional provider-owned persisted injective ordinal identity column.</summary>
+    public OrdinalIdentityDefinition? OrdinalIdentity { get; init; }
     public ElementSearchKeyDefinition? ElementSearchKey { get; init; }
     public PortableDefault? Default { get; init; }
     public ColumnGeneration Generation { get; init; } = ColumnGeneration.Supplied;
@@ -477,7 +490,16 @@ public sealed record IndexDefinition
 {
     public required string Name { get; init; }
     public required IReadOnlyList<IndexColumn> Columns { get; init; }
+    /// <summary>
+    /// Columns stored with the index for covering reads but not used for key ordering or lookup.
+    /// Providers without native included columns may materialize these as trailing key columns.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? IncludedColumns { get; init; }
     public bool IsUnique { get; init; }
+    /// <summary>Whether ordinal-identity sources in this index may be retargeted for covering projected distinct.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool UseOrdinalIdentities { get; init; }
     public MissingValueBehavior MissingValues { get; init; } = MissingValueBehavior.Included;
     public int SchemaVersion { get; init; } = 1;
 

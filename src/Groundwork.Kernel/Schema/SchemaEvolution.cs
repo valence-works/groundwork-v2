@@ -164,7 +164,14 @@ internal sealed class SchemaEvolutionAnalysis
         var rebuiltIndexes = new HashSet<string>(StringComparer.Ordinal);
         PlanPrimaryStorageRename(target, applied, appliedSubject, operations);
         PlanColumnEvolution(target, appliedSubject, appliedColumns, desiredColumns, operations, refusals, rebuiltIndexes);
-        PlanRemovals(target, appliedSubject, desiredColumns, supersessions.WithheldColumns, operations, refusals);
+        PlanRemovals(
+            target,
+            appliedSubject,
+            desiredColumns,
+            supersessions.WithheldColumns,
+            operations,
+            refusals,
+            rebuiltIndexes);
 
         MarkSatisfied(appliedSubject, target.Subject, desired, desiredColumnIds, operations, satisfied);
         var removableProviderSlots = applied.Snapshot.ProviderDefinitions
@@ -339,7 +346,10 @@ internal sealed class SchemaEvolutionAnalysis
         {
             if (!index.Columns.Any(column =>
                     string.Equals(column.Column, declaredName, StringComparison.Ordinal) ||
-                    string.Equals(column.Column, appliedName, StringComparison.Ordinal)))
+                    string.Equals(column.Column, appliedName, StringComparison.Ordinal)) &&
+                !(index.IncludedColumns ?? []).Any(column =>
+                    string.Equals(column, declaredName, StringComparison.Ordinal) ||
+                    string.Equals(column, appliedName, StringComparison.Ordinal)))
             {
                 continue;
             }
@@ -355,8 +365,10 @@ internal sealed class SchemaEvolutionAnalysis
         IReadOnlyDictionary<string, ColumnDefinition> desiredColumns,
         IReadOnlySet<string> withheldColumns,
         List<PhysicalSchemaOperation> operations,
-        List<SchemaRefusal> refusals)
+        List<SchemaRefusal> refusals,
+        HashSet<string> rebuiltIndexes)
     {
+        var desiredIndexes = target.Subject.Indexes.Select(index => index.Name).ToHashSet(StringComparer.Ordinal);
         foreach (var column in appliedSubject.Columns.OrderBy(column => column.Name, StringComparer.Ordinal))
         {
             if (desiredColumns.ContainsKey(column.LogicalId))
@@ -375,10 +387,19 @@ internal sealed class SchemaEvolutionAnalysis
                     $"schema.key.{column.Name}"));
                 continue;
             }
+            foreach (var index in appliedSubject.Indexes
+                         .Where(index => desiredIndexes.Contains(index.Name))
+                         .Where(index => index.Columns.Any(term =>
+                                 string.Equals(term.Column, column.Name, StringComparison.Ordinal)) ||
+                             (index.IncludedColumns ?? []).Contains(column.Name, StringComparer.Ordinal))
+                         .OrderBy(index => index.Name, StringComparer.Ordinal))
+            {
+                if (rebuiltIndexes.Add(index.Name))
+                    operations.Add(new DropPhysicalIndexOperation(target.Subject, index, rebuild: true));
+            }
             operations.Add(new DropColumnOperation(target.Subject, column));
         }
 
-        var desiredIndexes = target.Subject.Indexes.Select(index => index.Name).ToHashSet(StringComparer.Ordinal);
         foreach (var index in appliedSubject.Indexes.OrderBy(index => index.Name, StringComparer.Ordinal))
         {
             if (!desiredIndexes.Contains(index.Name))

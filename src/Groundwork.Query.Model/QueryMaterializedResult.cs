@@ -1,5 +1,6 @@
 using System.Collections;
 using System.Collections.ObjectModel;
+using System.Collections.Immutable;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
@@ -65,9 +66,7 @@ public static class QueryResultMaterializer
         if (request is null) throw new ArgumentNullException(nameof(request));
         if (options is null) throw new ArgumentNullException(nameof(options));
         if (source is null) throw new ArgumentNullException(nameof(source));
-        var executionRequest = QueryElementSearchKeyRewriter.Rewrite(
-            QuerySearchKeyRewriter.Rewrite(request, options.SearchKeyColumns),
-            options.ElementSearchKeyColumns);
+        var executionRequest = QueryRequestExecution.ForProviderPage(request, options);
         var requireQualifiedContinuationFields = executionRequest.Join is not null;
 
         var effectiveSource = source
@@ -508,10 +507,54 @@ public static class QueryRequestExecution
             return request;
 
         var order = options.GetEffectiveOrder(request);
+        // A columns-only DISTINCT result is ordered by its complete projected tuple. Keep that
+        // effective order while replacing any marked source terms with their hidden identities;
+        // starting from request.Order would drop projected tie-breaks when the caller supplied a
+        // partial order.
+        var executionOrder = request.Distinct && !request.Projection.AllColumns
+            ? order
+            : request.Order;
         var projection = request.Projection;
         if (!projection.AllColumns)
         {
             var columns = projection.Columns.ToList();
+            if (request.Distinct)
+            {
+                // An explicitly persisted ordinal identity is an execution detail. Synthesize its
+                // physical projection and order term here so callers continue to request only the
+                // logical tuple while native DISTINCT can use the injective physical key.
+                foreach (var mapping in options.SearchKeyColumns.Values.Where(mapping =>
+                             mapping.PreservesOrdinalIdentity &&
+                             mapping.OrderByPhysicalColumn &&
+                             !string.Equals(mapping.SourceColumn, mapping.PhysicalColumn, StringComparison.Ordinal)))
+                {
+                    var source = projection.Columns.FirstOrDefault(column =>
+                        column.Type == QueryType.String &&
+                        !column.IsNullable &&
+                        column.StringComparison == QueryStringComparisonPolicy.Ordinal &&
+                        string.Equals(column.Name, mapping.SourceColumn, StringComparison.Ordinal));
+                    if (source is null)
+                        continue;
+
+                    var physical = new ColumnRef(
+                        request.Table,
+                        mapping.PhysicalColumn,
+                        QueryType.String,
+                        isNullable: false,
+                        mapping.MaxLength);
+                    if (!columns.Any(column => string.Equals(column.Name, physical.Name, StringComparison.Ordinal)))
+                        columns.Add(physical);
+
+                    if (!executionOrder.Any(term => string.Equals(term.Column.Name, physical.Name, StringComparison.Ordinal)))
+                    {
+                        executionOrder = (executionOrder.Length == 0 ? order : executionOrder)
+                            .Select(term => string.Equals(term.Column.Name, source.Name, StringComparison.Ordinal)
+                                ? new OrderTerm(physical, term.Direction, term.NullOrder)
+                                : term)
+                            .ToImmutableArray();
+                    }
+                }
+            }
             foreach (var term in order.Where(term => !request.Distinct ||
                          options.SearchKeyColumns.Values.Any(mapping =>
                              !string.Equals(mapping.SourceColumn, mapping.PhysicalColumn, StringComparison.Ordinal) &&
@@ -531,7 +574,7 @@ public static class QueryRequestExecution
         {
             var expandedLimit = request.Result.MaxRows is int maxRows
                 ? Math.Min(limit, maxRows)
-                : checked(limit + 1);
+                : limit == int.MaxValue ? limit : limit + 1;
             paging = request.Paging.ContinuationToken is { } token
                 ? Paging.Continuation(token, expandedLimit)
                 : request.Paging.Offset is int offset
@@ -544,9 +587,10 @@ public static class QueryRequestExecution
                 ? Paging.Continuation(token, maxRows)
                 : Paging.OffsetLimit(request.Paging.Offset ?? 0, maxRows);
         }
-        return ReferenceEquals(projection, request.Projection) && ReferenceEquals(paging, request.Paging)
+        return ReferenceEquals(projection, request.Projection) && ReferenceEquals(paging, request.Paging) &&
+               executionOrder.Equals(request.Order)
             ? request
-            : new QueryRequest(request.Table, request.Where, request.Order, projection, paging, request.Result, request.LatestPerKey, request.AcceptedScan, request.Distinct, request.Join)
+            : new QueryRequest(request.Table, request.Where, executionOrder, projection, paging, request.Result, request.LatestPerKey, request.AcceptedScan, request.Distinct, request.Join)
             {
                 // The extra projected tie-break fields are an execution detail, not a new
                 // continuation identity. Keep the token bound to the caller's projection.

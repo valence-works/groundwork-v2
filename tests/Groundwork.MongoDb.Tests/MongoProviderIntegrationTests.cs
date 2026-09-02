@@ -772,6 +772,60 @@ public sealed class MongoProviderIntegrationTests
     }
 
     [Fact]
+    public void Declaration_fingerprint_and_snapshot_preserve_index_execution_metadata()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("mongo-index-execution-metadata"),
+            Name = "mongo_index_execution_metadata",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new() { Name = "name", Type = PortableType.String, IsNullable = false, MaxLength = 32 },
+                new() { Name = "__groundwork_ordinal_name", Type = PortableType.String, IsNullable = false, MaxLength = 128 }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Indexes =
+            [
+                new IndexDefinition
+                {
+                    Name = "by_name",
+                    Columns = [new IndexColumn("__groundwork_ordinal_name")]
+                }
+            ]
+        };
+        var marked = unit with
+        {
+            Indexes =
+            [
+                unit.Indexes[0] with
+                {
+                    UseOrdinalIdentities = true,
+                    IncludedColumns = ["name", "id"]
+                }
+            ]
+        };
+        var markerOnly = marked with
+        {
+            Indexes = [marked.Indexes[0] with { IncludedColumns = null }]
+        };
+
+        Assert.NotEqual(SchemaIdentity.Fingerprint(unit), SchemaIdentity.Fingerprint(markerOnly));
+        Assert.NotEqual(SchemaIdentity.Fingerprint(markerOnly), SchemaIdentity.Fingerprint(marked));
+        Assert.Equal(
+            SchemaIdentity.Fingerprint(marked),
+            SchemaIdentity.Fingerprint(marked with
+            {
+                Indexes = [marked.Indexes[0] with { IncludedColumns = ["id", "name"] }]
+            }));
+
+        var snapshot = MongoDeclarationSnapshot.Clone(marked);
+        var index = Assert.Single(snapshot.Indexes);
+        Assert.True(index.UseOrdinalIdentities);
+        Assert.Equal(["name", "id"], index.IncludedColumns);
+    }
+
+    [Fact]
     public void Aggregation_fingerprint_is_injective_for_delimited_identifiers()
     {
         var baseUnit = new StorageUnit
