@@ -20,8 +20,8 @@ same exact package closure on nuget.org, dispatch the NuGet workflow against the
 repeat the exact version in both inputs:
 
 ```bash
-gh workflow run publish-nuget.yml --ref v0.4.0-preview.6 \
-  -f version=0.4.0-preview.6 -f publish=true -f confirm=0.4.0-preview.6
+gh workflow run publish-nuget.yml --ref v0.4.0-preview.7 \
+  -f version=0.4.0-preview.7 -f publish=true -f confirm=0.4.0-preview.7
 ```
 
 The workflow still requires the full package/test proof, package layout and integrity manifests,
@@ -62,8 +62,8 @@ Pin an **exact** version. Preview numbers are immutable and a published package 
 so an exact pin is reproducible.
 
 ```bash
-dotnet add package Groundwork.Sqlite --version 0.4.0-preview.6
-dotnet add package Groundwork.Records.Store --version 0.4.0-preview.6
+dotnet add package Groundwork.Sqlite --version 0.4.0-preview.7
+dotnet add package Groundwork.Records.Store --version 0.4.0-preview.7
 ```
 
 A typical application references:
@@ -145,7 +145,7 @@ If this runs, your feed, versions, and target framework are correct.
 ## Installing the schema tool
 
 ```bash
-dotnet tool install --global Groundwork.Tool --version 0.4.0-preview.6 \
+dotnet tool install --global Groundwork.Tool --version 0.4.0-preview.7 \
   --add-source https://f.feedz.io/valence-works/groundwork/nuget/index.json
 ```
 

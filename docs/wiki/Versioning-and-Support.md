@@ -168,6 +168,20 @@ schema change from preview.5. Existing catalogs remain compatible and require
 no schema apply or recreation. See the complete
 [0.4.0-preview.6 release notes](../v2/releases/0.4.0-preview.6.md).
 
+### `0.4.0-preview.7` — Counted relational index-order preservation
+
+This patch preview preserves the declared index order for relational pages
+that also request `TotalCount`. SQLite, PostgreSQL, and SQL Server execute the
+ordered page and filtered count as two statements in one provider command, so
+the count/page envelope cannot add a final sort to an index-served page. The
+public result, continuation, and count semantics remain unchanged.
+
+There is no public runtime API, diagnostic, provider catalog, or persisted
+schema change. Existing preview.6 catalogs remain compatible and require no
+schema action. The page and count statements share the caller's transaction
+and its isolation semantics; this does not provide snapshot isolation. See the
+complete [0.4.0-preview.7 release notes](../v2/releases/0.4.0-preview.7.md).
+
 ---
 
 ## Provider support matrix
