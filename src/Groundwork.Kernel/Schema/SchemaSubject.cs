@@ -478,6 +478,7 @@ public sealed class SchemaSubject
         Collation = source.Collation,
         LogicalCollation = source.LogicalCollation,
         LocaleSortKey = source.LocaleSortKey is null ? null : source.LocaleSortKey with { },
+        OrdinalIdentity = source.OrdinalIdentity is null ? null : source.OrdinalIdentity with { },
         ElementSearchKey = source.ElementSearchKey is null ? null : source.ElementSearchKey with { },
         Default = source.Default is null ? null : new PortableDefault(SchemaValue.Snapshot(source.Default.Value, source.Type)),
         Generation = source.Generation,
@@ -498,6 +499,7 @@ public sealed class SchemaSubject
             column.Generation.ToString(),
             column.Default is null ? null : SchemaValue.Canonicalize(column.Default.Value, column.Type),
             .. LocaleSortKeyIdentity(column),
+            .. OrdinalIdentityIdentity(column),
             .. ElementSearchKeyIdentity(column),
             .. LogicalIdentity(column)
         ]);
@@ -519,6 +521,11 @@ public sealed class SchemaSubject
                 column.ElementSearchKey.Collation.ToString(),
                 column.ElementSearchKey.MaximumElementCodeUnits?.ToString(CultureInfo.InvariantCulture)
             ];
+
+    internal static string?[] OrdinalIdentityIdentity(ColumnDefinition column) =>
+        column.OrdinalIdentity is null
+            ? []
+            : [column.OrdinalIdentity.PhysicalColumn];
 
     /// <summary>
     /// A column that has never been renamed is planned under its own name, so its logical id

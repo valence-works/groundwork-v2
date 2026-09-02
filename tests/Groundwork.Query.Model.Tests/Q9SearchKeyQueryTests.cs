@@ -174,6 +174,71 @@ public sealed class Q9SearchKeyQueryTests
     }
 
     [Fact]
+    public void Projected_distinct_does_not_order_by_non_ordinal_string_projection()
+    {
+        var name = new ColumnRef(Table, "name", QueryType.String, true, 64,
+            stringComparison: QueryStringComparisonPolicy.CurrentCulture);
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.ColumnsOnly(name),
+            Paging.OffsetLimit(0, 10),
+            distinct: true);
+
+        Assert.Empty(QueryRenderOptions.Default.GetEffectiveOrder(request));
+    }
+
+    [Fact]
+    public void Projected_distinct_does_not_order_by_non_portable_decimal_shape()
+    {
+        var amount = new ColumnRef(Table, "amount", QueryType.Decimal, true,
+            decimalPrecision: 19, decimalScale: 4);
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.ColumnsOnly(amount),
+            Paging.OffsetLimit(0, 10),
+            distinct: true);
+
+        Assert.Empty(QueryRenderOptions.Default.GetEffectiveOrder(request));
+    }
+
+    [Fact]
+    public void Projected_distinct_rewrites_every_declared_ordinal_identity_in_projection_order()
+    {
+        var first = new ColumnRef(Table, "first", QueryType.String, false, 16);
+        var second = new ColumnRef(Table, "second", QueryType.String, false, 16);
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.ColumnsOnly(first, second),
+            Paging.OffsetLimit(0, 10),
+            distinct: true);
+        var options = QueryRenderOptions.Default with
+        {
+            SearchKeyColumns = new Dictionary<string, QuerySearchKeyColumn>
+            {
+                ["second"] = new("second", "__groundwork_ordinal_second", QuerySearchKeyPolicy.Ordinal, 64,
+                    orderByPhysicalColumn: true, supportsPrefixPredicates: false, preservesOrdinalIdentity: true),
+                ["first"] = new("first", "__groundwork_ordinal_first", QuerySearchKeyPolicy.Ordinal, 64,
+                    orderByPhysicalColumn: true, supportsPrefixPredicates: false, preservesOrdinalIdentity: true)
+            }
+        };
+
+        var execution = QueryRequestExecution.ForPage(request, options);
+
+        Assert.Equal(
+            ["__groundwork_ordinal_first", "__groundwork_ordinal_second"],
+            execution.Order.Select(term => term.Column.Name));
+        Assert.Equal(
+            ["first", "second", "__groundwork_ordinal_second", "__groundwork_ordinal_first"],
+            execution.Projection.Columns.Select(column => column.Name));
+    }
+
+    [Fact]
     public void Empty_prefix_rewrites_to_a_non_null_guard_and_max_boundary_has_no_upper_bound()
     {
         var request = new QueryRequest(Table, new Predicate.StartsWith(Status, ""), [], Projection.All, Paging.None);

@@ -69,7 +69,8 @@ public enum PortableProjection
     BoundarySearchKey,
     LocaleSortKey,
     Sha256,
-    ElementBoundarySearchKey
+    ElementBoundarySearchKey,
+    OrdinalIdentity
 }
 
 public enum SortDirection
@@ -369,6 +370,16 @@ public sealed record LocaleSortKeyDefinition
 }
 
 /// <summary>
+/// Declares a provider-owned persisted column containing the source string's injective ordinal
+/// identity. The provider derives this value from the source on every write and backfill; callers
+/// cannot supply or override the physical value.
+/// </summary>
+public sealed record OrdinalIdentityDefinition
+{
+    public required string PhysicalColumn { get; init; }
+}
+
+/// <summary>
 /// Declares a provider-owned parallel JSON array containing one boundary-delimited search key for
 /// each string member of a JSON array column. Non-string members retain their slot as JSON null.
 /// </summary>
@@ -396,6 +407,8 @@ public sealed record ColumnDefinition
     public PortableCollation? LogicalCollation { get; init; }
     /// <summary>Optional locale-aware ordering implemented by a provider-owned ICU sort key.</summary>
     public LocaleSortKeyDefinition? LocaleSortKey { get; init; }
+    /// <summary>Optional provider-owned persisted injective ordinal identity column.</summary>
+    public OrdinalIdentityDefinition? OrdinalIdentity { get; init; }
     public ElementSearchKeyDefinition? ElementSearchKey { get; init; }
     public PortableDefault? Default { get; init; }
     public ColumnGeneration Generation { get; init; } = ColumnGeneration.Supplied;

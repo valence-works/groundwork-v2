@@ -12,12 +12,35 @@ public static class SearchKeyQueryMappings
         var derived = unit.DerivedColumns
             .Where(column => column.Projection is PortableProjection.BoundarySearchKey or PortableProjection.LocaleSortKey)
             .ToDictionary(column => column.SourceColumn, StringComparer.Ordinal);
+        var ordinalIdentities = unit.Columns
+            .Where(column => column.OrdinalIdentity is not null)
+            .ToDictionary(column => column.Name, StringComparer.Ordinal);
         return unit.Columns
-            .Where(column => column.Type == PortableType.String && !column.Name.StartsWith(SearchKeyProjection.Prefix, StringComparison.Ordinal))
+            .Where(column => column.Type == PortableType.String && !SearchKeyProjection.IsProviderOwnedColumn(column.Name))
             .ToDictionary(
                 column => column.Name,
                 column =>
                 {
+                    if (ordinalIdentities.TryGetValue(column.Name, out var ordinal))
+                    {
+                        var declaration = ordinal.OrdinalIdentity!;
+                        var ordinalPhysical = unit.Columns.FirstOrDefault(item => item.Name == declaration.PhysicalColumn);
+                        if (ordinalPhysical is null || ordinalPhysical.Type != PortableType.String ||
+                            string.Equals(ordinalPhysical.Name, column.Name, StringComparison.Ordinal) ||
+                            !ordinalPhysical.Name.StartsWith(SearchKeyProjection.OrdinalIdentityPrefix, StringComparison.Ordinal))
+                        {
+                            throw new InvalidOperationException(
+                                $"Ordinal identity mapping '{column.Name}' must name a distinct provider-owned string column.");
+                        }
+                        return new QuerySearchKeyColumn(
+                            column.Name,
+                            ordinalPhysical.Name,
+                            QuerySearchKeyPolicy.Ordinal,
+                            ordinalPhysical.MaxLength,
+                            orderByPhysicalColumn: true,
+                            supportsPrefixPredicates: false,
+                            preservesOrdinalIdentity: true);
+                    }
                     if (!derived.TryGetValue(column.Name, out var physical))
                         return new QuerySearchKeyColumn(column.Name, column.Name, QuerySearchKeyPolicy.Ordinal, column.MaxLength);
                     var physicalColumn = unit.Columns.FirstOrDefault(item => item.Name == physical.Name);

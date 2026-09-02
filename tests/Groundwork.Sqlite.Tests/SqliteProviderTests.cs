@@ -2340,6 +2340,89 @@ public sealed class SqliteProviderTests
     }
 
     [Fact]
+    public void Ordinal_identity_schema_mapping_backfills_writes_and_streams_projected_distinct()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = StorageUnit.Declare("ordinal-identity", "ordinal_identity")
+            .Int32("id", column => column.Required())
+            .String("name", 32, column => column.Required().OrdinalIdentity("__groundwork_ordinal_name"))
+            .Key("id")
+            .Index("by_name", "name")
+            .Build();
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        Assert.Equal(
+            ["__groundwork_ordinal_name", "name"],
+            Assert.Single(connection.Catalog.ReadIndexes(unit.Id), index => index.Name == "by_name").Columns.Select(column => column.Column));
+
+        var observer = new ProviderCommandObserver();
+        var session = connection.OpenSession(unit, StorageAccess.Global, observer);
+        Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = 1,
+            ["name"] = "Ada"
+        })).Status);
+        Assert.Throws<ArgumentException>(() => session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = 2,
+            ["name"] = "Grace",
+            ["__groundwork_ordinal_name"] = "spoofed"
+        })));
+
+        using (var raw = new SqliteConnection(store.ConnectionString))
+        {
+            raw.Open();
+            using var command = raw.CreateCommand();
+            command.CommandText = "SELECT \"__groundwork_ordinal_name\" FROM \"ordinal_identity\" WHERE \"id\"=1;";
+            Assert.Equal(PortableStringComparison.CreateOrdinal("Ada"), command.ExecuteScalar());
+        }
+
+        var name = new ColumnRef(new TableId(unit.Name), "name", QueryType.String, false, 32);
+        var mappedOptions = unit.CreateQueryRenderOptions("by_name") with
+        {
+            SearchKeyColumns = SearchKeyQueryMappings.For(SearchKeyProjection.Expand(unit))
+        };
+        var executionRequest = QueryRequestExecution.ForPage(new QueryRequest(
+            new TableId(unit.Name), Predicate.AlwaysTrue.Instance, [], Projection.ColumnsOnly(name),
+            Paging.OffsetLimit(0, 10), distinct: true), mappedOptions);
+        Assert.Single(mappedOptions.GetEffectiveOrder(new QueryRequest(
+            new TableId(unit.Name), Predicate.AlwaysTrue.Instance, [], Projection.ColumnsOnly(name),
+            Paging.OffsetLimit(0, 10), distinct: true)));
+        Assert.Equal("__groundwork_ordinal_name", executionRequest.Order.Single().Column.Name);
+        Assert.Contains(executionRequest.Projection.Columns, column => column.Name == "__groundwork_ordinal_name");
+        var result = session.Query(new QueryRequest(
+            new TableId(unit.Name),
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.ColumnsOnly(name),
+            Paging.OffsetLimit(0, 10),
+            distinct: true),
+            unit.CreateQueryRenderOptions("by_name"));
+
+        Assert.Equal(["Ada"], result.Rows.Select(row => Assert.IsType<string>(row["name"])));
+        var queryText = Assert.Single(observer.OfKind(ProviderCommandKind.Read)
+            .Where(command => command.Operation == "sqlite.query")).CommandText!;
+        Assert.Contains("SELECT DISTINCT", queryText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("__groundwork_ordinal_name", queryText, StringComparison.Ordinal);
+        using (var raw = new SqliteConnection(store.ConnectionString))
+        {
+            raw.Open();
+            raw.CreateCollation("GROUNDWORK_UTF16_ORDINAL", static (left, right) => string.CompareOrdinal(left, right));
+            using var explain = raw.CreateCommand();
+            explain.CommandText = "EXPLAIN QUERY PLAN " + queryText.TrimEnd().TrimEnd(';');
+            explain.Parameters.AddWithValue("@p0", 10);
+            explain.Parameters.AddWithValue("@p1", 0);
+            using var reader = explain.ExecuteReader();
+            var details = new List<string>();
+            while (reader.Read())
+                details.Add(string.Join('\t', Enumerable.Range(0, reader.FieldCount).Select(index => reader.GetValue(index))));
+            var plan = string.Join(Environment.NewLine, details);
+            Assert.Contains("USING COVERING INDEX", plan, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("TEMP B-TREE", plan, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    [Fact]
     public void Selected_non_nullable_order_index_is_used_without_a_temporary_sort()
     {
         using var connection = new SqliteConnection("Data Source=:memory:");

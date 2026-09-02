@@ -238,7 +238,7 @@ public sealed class RelationalSchemaExecutor
                 // Derived keys for non-null source columns are added as a nullable staging
                 // column, populated by the provider-neutral algorithm, then finalized below.
                 // Fresh CREATE TABLE plans still materialize the target nullability directly.
-                var stagedColumn = add.Column.Name.StartsWith(SearchKeyProjection.Prefix, StringComparison.Ordinal) &&
+                var stagedColumn = SearchKeyProjection.IsProviderOwnedColumn(add.Column.Name) &&
                                    !add.Column.IsNullable
                     ? add.Column with { IsNullable = true }
                     : add.Column;
@@ -935,6 +935,7 @@ public sealed class RelationalSchemaExecutor
             $"Locale sort-key projection '{definition.Name}' requires an explicit algorithm identity."),
         PortableProjection.ElementBoundarySearchKey => throw new InvalidOperationException(
             $"Element search-key projection '{definition.Name}' requires an explicit algorithm identity."),
+        PortableProjection.OrdinalIdentity => PortableStringComparison.OrdinalAlgorithmId,
         PortableProjection.Sha256 => PortableStringComparison.LookupHashAlgorithmId,
         _ => throw new ArgumentOutOfRangeException(nameof(definition), definition.Projection, null)
     };

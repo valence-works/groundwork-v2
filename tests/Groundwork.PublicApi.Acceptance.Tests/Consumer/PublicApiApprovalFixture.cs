@@ -35,6 +35,7 @@ internal static class PublicApiApprovalFixture
         _ = typeof(EfCoreModelImporter);
         _ = typeof(PortableType);
         _ = typeof(LocaleSortKeyDefinition);
+        _ = typeof(OrdinalIdentityDefinition);
         _ = typeof(ElementSearchKeyDefinition);
         _ = typeof(PortableLocaleOrdering);
         _ = typeof(MissingValueBehavior);
@@ -70,6 +71,7 @@ internal static class PublicApiApprovalFixture
         _ = typeof(IRecordAggregationStore);
         _ = typeof(Groundwork.Records.StorageDeclarationBuilder);
         _ = typeof(ProviderOwnedColumns);
+        _ = PortableProjection.OrdinalIdentity;
         _ = typeof(QueryRequest);
         _ = typeof(Predicate.ElementSubstring);
         _ = typeof(QueryElementSearchKeyColumn);
@@ -175,6 +177,9 @@ internal static class PublicApiApprovalFixture
         _ = new Func<Groundwork.Kernel.StorageDeclarationBuilder, Groundwork.Kernel.StorageDeclarationBuilder>(builder =>
             builder.Check("ck_quantity", "quantity", CheckConstraintOperator.GreaterThan, 0));
         _ = new Func<ColumnBuilder, ColumnBuilder>(column => column.LocaleOrder("sv-SE", 12));
+        _ = new Func<ColumnBuilder, ColumnBuilder>(column =>
+            column.OrdinalIdentity("__groundwork_ordinal_name"));
+        _ = new OrdinalIdentityDefinition { PhysicalColumn = "__groundwork_ordinal_name" };
         _ = new Func<ColumnBuilder, ColumnBuilder>(column =>
             column.ElementSearchKey(PortableCollation.UnicodeOrdinalIgnoreCase, 450));
         _ = new ElementSearchKeyDefinition

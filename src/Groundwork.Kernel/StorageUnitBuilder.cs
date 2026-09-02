@@ -286,6 +286,7 @@ public sealed class ColumnBuilder
     private int? scale;
     private PortableCollation? collation;
     private LocaleSortKeyDefinition? localeSortKey;
+    private OrdinalIdentityDefinition? ordinalIdentity;
     private ElementSearchKeyDefinition? elementSearchKey;
     private object? defaultValue;
     private bool hasDefault;
@@ -318,6 +319,17 @@ public sealed class ColumnBuilder
             CultureName = cultureName,
             MaximumExpansionFactor = maximumExpansionFactor
         };
+        return this;
+    }
+
+    /// <summary>
+    /// Declares a provider-owned persisted column containing an injective ordinal identity for
+    /// this string. Groundwork derives the physical value from the source on every write and
+    /// backfill; callers cannot supply or override it.
+    /// </summary>
+    public ColumnBuilder OrdinalIdentity(string physicalColumn)
+    {
+        ordinalIdentity = new OrdinalIdentityDefinition { PhysicalColumn = physicalColumn };
         return this;
     }
 
@@ -370,6 +382,7 @@ public sealed class ColumnBuilder
         Scale = scale,
         Collation = collation,
         LocaleSortKey = localeSortKey,
+        OrdinalIdentity = ordinalIdentity,
         ElementSearchKey = elementSearchKey,
         Default = hasDefault ? new PortableDefault(DefaultValueSnapshot.Create(defaultValue, type)) : null,
         Generation = generation,

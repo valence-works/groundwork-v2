@@ -109,8 +109,8 @@ workflow. To publish an exact version to nuget.org, dispatch
 `publish: true`, and provide that exact version in both `version` and `confirm`:
 
 ```bash
-gh workflow run publish-nuget.yml --ref v0.4.0-preview.7 \
-  -f version=0.4.0-preview.7 -f publish=true -f confirm=0.4.0-preview.7
+gh workflow run publish-nuget.yml --ref v0.4.0-preview.8 \
+  -f version=0.4.0-preview.8 -f publish=true -f confirm=0.4.0-preview.8
 ```
 
 The run remains behind a protected environment and a credential that is a

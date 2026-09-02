@@ -205,6 +205,7 @@ public sealed class AddColumnOperation : PhysicalSchemaOperation
         Collation = column.Collation,
         LogicalCollation = column.LogicalCollation,
         LocaleSortKey = column.LocaleSortKey is null ? null : column.LocaleSortKey with { },
+        OrdinalIdentity = column.OrdinalIdentity is null ? null : column.OrdinalIdentity with { },
         ElementSearchKey = column.ElementSearchKey is null ? null : column.ElementSearchKey with { },
         Default = column.Default is null ? null : new PortableDefault(SchemaValue.Snapshot(column.Default.Value, column.Type)),
         Generation = column.Generation,

@@ -364,9 +364,7 @@ public sealed record QueryRenderOptions
         // tie-breaks; a source-row identity would split equal projected values back into rows.
         if (request.Distinct &&
             !request.Projection.AllColumns &&
-            request.Projection.Columns.All(column => column.Type is
-                QueryType.Int32 or QueryType.Int64 or QueryType.Decimal or QueryType.String or
-                QueryType.DateTimeOffset or QueryType.Guid))
+            request.Projection.Columns.All(IsPortableProjectedOrderColumn))
         {
             foreach (var column in request.Projection.Columns)
             {
@@ -393,6 +391,14 @@ public sealed record QueryRenderOptions
         }
         return terms.ToImmutableArray();
     }
+
+    private static bool IsPortableProjectedOrderColumn(ColumnRef column) => column.Type switch
+    {
+        QueryType.Int32 or QueryType.Int64 or QueryType.DateTimeOffset or QueryType.Guid => true,
+        QueryType.Decimal => column.DecimalPrecision == 18 && column.DecimalScale == 4,
+        QueryType.String => column.StringComparison == QueryStringComparisonPolicy.Ordinal,
+        _ => false
+    };
 
     public QueryIndexDeclaration? FindPinnedIndex()
     {

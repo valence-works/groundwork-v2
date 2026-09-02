@@ -85,6 +85,39 @@ public sealed class RelationalSessionPolicyTests
     }
 
     [Fact]
+    public void Query_session_uses_the_schema_ordinal_identity_mapping_over_caller_options()
+    {
+        var logical = StorageUnit.Declare("policy-ordinal", "policy_ordinal")
+            .Int32("id", column => column.Required())
+            .String("name", 32, column => column.Required().OrdinalIdentity("__groundwork_ordinal_name"))
+            .Key("id")
+            .Build();
+        var unit = SearchKeyProjection.Expand(logical);
+        var name = new ColumnRef(new TableId(unit.Name), "name", QueryType.String, false, 32);
+        var options = QueryRenderOptions.Default with
+        {
+            SearchKeyColumns = new Dictionary<string, QuerySearchKeyColumn>
+            {
+                ["name"] = new("name", "spoofed_identity", QuerySearchKeyPolicy.Ordinal, 32,
+                    orderByPhysicalColumn: true, supportsPrefixPredicates: false,
+                    preservesOrdinalIdentity: true)
+            }
+        };
+
+        var prepared = RelationalSessionPolicy.PrepareQuery(
+            unit,
+            StorageAccess.Global,
+            new QueryRequest(new TableId(unit.Name), Predicate.AlwaysTrue.Instance, [], Projection.ColumnsOnly(name), Paging.None),
+            options,
+            new Dictionary<string, string>());
+
+        var mapping = Assert.Single(prepared.RenderOptions.SearchKeyColumns).Value;
+        Assert.Equal("__groundwork_ordinal_name", mapping.PhysicalColumn);
+        Assert.True(mapping.PreservesOrdinalIdentity);
+        Assert.Equal(QuerySearchKeyPolicy.Ordinal, mapping.Policy);
+    }
+
+    [Fact]
     public void Secondary_unique_detection_distinguishes_the_primary_key()
     {
         var unit = Unit(scoped: false);
