@@ -1119,7 +1119,7 @@ public sealed class QueryRendererTests
         var firstPage = new QueryRequest(
             Table,
             Predicate.AlwaysTrue.Instance,
-            [new OrderTerm(RequiredName, OrderDirection.Ascending, NullOrder.Last)],
+            [],
             Projection.ColumnsOnly(RequiredName),
             Paging.Keyset(1),
             distinct: true);

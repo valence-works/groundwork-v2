@@ -66,9 +66,7 @@ public static class QueryResultMaterializer
         if (request is null) throw new ArgumentNullException(nameof(request));
         if (options is null) throw new ArgumentNullException(nameof(options));
         if (source is null) throw new ArgumentNullException(nameof(source));
-        var executionRequest = QueryElementSearchKeyRewriter.Rewrite(
-            QuerySearchKeyRewriter.Rewrite(request, options.SearchKeyColumns),
-            options.ElementSearchKeyColumns);
+        var executionRequest = QueryRequestExecution.ForProviderPage(request, options);
         var requireQualifiedContinuationFields = executionRequest.Join is not null;
 
         var effectiveSource = source
