@@ -1,0 +1,300 @@
+name: Documentation evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Optional exact release version (must equal GroundworkCurrentRelease)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: documentation-evidence-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "true"
+  FEEDZ_NUGET_SOURCE: https://f.feedz.io/valence-works/groundwork/nuget/index.json
+
+jobs:
+  portal-product:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Resolve and pin the published release
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          expected=$(sed -n 's:.*<GroundworkCurrentRelease>\(.*\)</GroundworkCurrentRelease>.*:\1:p' Directory.Build.props)
+          version="${INPUT_VERSION:-$expected}"
+          test -n "$expected" && test "$version" = "$expected"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Verify the published portal product
+        run: |
+          python3 eng/verify-published-portal.py \
+            https://github.com/valence-works/groundwork-v2/wiki \
+            "${{ steps.version.outputs.version }}" \
+            artifacts/docs-evidence/portal/report.md
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: groundwork-documentation-portal-${{ github.run_id }}
+          path: artifacts/docs-evidence/portal/**
+          if-no-files-found: warn
+          retention-days: 7
+
+  sample-provider-matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17.6-alpine3.22
+        env:
+          POSTGRES_PASSWORD: groundwork
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-CU21-ubuntu-22.04
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_SA_PASSWORD: Groundwork!2026
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P 'Groundwork!2026' -Q 'SELECT 1'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
+      mysql:
+        image: mysql:8.4.6
+        env:
+          MYSQL_ROOT_PASSWORD: groundwork
+          MYSQL_ROOT_HOST: "%"
+          MYSQL_DATABASE: groundwork_sample
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pgroundwork --silent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - name: Start MongoDB replica set
+        run: |
+          set -euo pipefail
+          docker run --detach --name groundwork-docs-mongo --publish 27017:27017 \
+            mongo:7.0.24 --replSet docsrs --bind_ip_all
+          for attempt in $(seq 1 30); do
+            if docker exec groundwork-docs-mongo mongosh --quiet --eval \
+              'rs.initiate({_id:"docsrs",members:[{_id:0,host:"localhost:27017"}]})' 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec groundwork-docs-mongo mongosh --quiet --eval 'rs.status().ok' | grep -qx 1
+      - run: dotnet restore tests/Groundwork.Samples.Api.Tests/Groundwork.Samples.Api.Tests.csproj
+      - name: Execute the public sample against every supported provider path
+        env:
+          POSTGRES: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
+          SQLSERVER: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
+          MONGODB: mongodb://localhost:27017/groundwork_sample?replicaSet=docsrs&directConnection=true
+          MYSQL: Server=127.0.0.1;Port=3306;Database=groundwork_sample;User ID=root;Password=groundwork;SslMode=None;Pooling=false
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/docs-evidence/providers
+          providers=(sqlite postgresql sqlserver mongodb mysql inmemory)
+          connections=(
+            "Data Source=${RUNNER_TEMP}/groundwork-sample.db"
+            "$POSTGRES"
+            "$SQLSERVER"
+            "$MONGODB"
+            "$MYSQL"
+            "groundwork-documentation-evidence"
+          )
+          for index in "${!providers[@]}"; do
+            provider="${providers[$index]}"
+            GROUNDWORK_SAMPLE_PROVIDER="$provider" \
+            GROUNDWORK_SAMPLE_CONNECTION="${connections[$index]}" \
+              dotnet test tests/Groundwork.Samples.Api.Tests/Groundwork.Samples.Api.Tests.csproj \
+                --no-restore --configuration Release --framework net10.0 \
+                --logger "trx;LogFileName=$provider.trx" \
+                --results-directory "artifacts/docs-evidence/providers/$provider"
+          done
+      - name: Refuse missing or skipped provider evidence
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from xml.etree import ElementTree
+
+          providers = ("sqlite", "postgresql", "sqlserver", "mongodb", "mysql", "inmemory")
+          lines = ["# Groundwork public-sample provider evidence", "", "| Provider | Passed | Failed | Skipped |", "| --- | ---: | ---: | ---: |"]
+          for provider in providers:
+              path = Path("artifacts/docs-evidence/providers") / provider / f"{provider}.trx"
+              root = ElementTree.parse(path).getroot()
+              outcomes = [node.attrib["outcome"] for node in root.iter() if node.tag.endswith("UnitTestResult")]
+              passed = outcomes.count("Passed")
+              failed = outcomes.count("Failed")
+              skipped = len(outcomes) - passed - failed
+              lines.append(f"| {provider} | {passed} | {failed} | {skipped} |")
+              if not outcomes or failed or skipped:
+                  raise SystemExit(f"{provider}: expected executed passing tests only, got {outcomes}")
+          report = Path("artifacts/docs-evidence/providers/evidence-manifest.md")
+          report.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: groundwork-documentation-providers-${{ github.run_id }}
+          path: artifacts/docs-evidence/providers/**
+          if-no-files-found: warn
+          retention-days: 7
+
+  feedz-clean-room:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - name: Start evidence clock
+        id: evidence
+        run: |
+          echo "started_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+          echo "started_epoch=$(date +%s)" >> "$GITHUB_OUTPUT"
+      - name: Resolve and pin the published release
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          expected=$(sed -n 's:.*<GroundworkCurrentRelease>\(.*\)</GroundworkCurrentRelease>.*:\1:p' Directory.Build.props)
+          version="${INPUT_VERSION:-$expected}"
+          test -n "$expected" && test "$version" = "$expected"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Verify every package from Feedz without local artifacts
+        id: package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          eng/verify-published-packages.sh "$FEEDZ_NUGET_SOURCE" "$VERSION"
+      - name: Run the package-only public API journey from Feedz
+        id: clean-room
+        if: always() && steps.version.outcome == 'success'
+        env:
+          GROUNDWORK_PUBLIC_API_FEEDZ_SOURCE: ${{ env.FEEDZ_NUGET_SOURCE }}
+          GROUNDWORK_PUBLIC_API_REMOTE_ONLY: "true"
+          GROUNDWORK_PUBLIC_API_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          tests/Groundwork.PublicApi.Acceptance.Tests/verify-clean-room.sh
+      - name: Write the publication-safe Feedz evidence manifest
+        if: always()
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          STARTED_AT: ${{ steps.evidence.outputs.started_at }}
+          STARTED_EPOCH: ${{ steps.evidence.outputs.started_epoch }}
+          PACKAGE_OUTCOME: ${{ steps.package.outcome }}
+          CLEAN_ROOM_OUTCOME: ${{ steps.clean-room.outcome }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/docs-evidence/feedz
+          finished_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+          elapsed=$(( $(date +%s) - ${STARTED_EPOCH:-$(date +%s)} ))
+          cat > artifacts/docs-evidence/feedz/evidence-manifest.md <<EOF
+          # Groundwork documentation Feedz evidence
+
+          - Feed source: \`$FEEDZ_NUGET_SOURCE\`
+          - GroundworkCurrentRelease: \`${VERSION:-unresolved}\`
+          - Source ref: \`${GITHUB_REF}\`
+          - Checkout SHA: \`${GITHUB_SHA}\`
+          - Started (UTC): \`${STARTED_AT:-unavailable}\`
+          - Finished (UTC): \`$finished_at\`
+          - Elapsed seconds: \`$elapsed\`
+          - Runner OS: \`${RUNNER_OS}\`
+          - .NET SDK: \`$(dotnet --version)\`
+
+          ## Evidence steps
+
+          | Step | Outcome |
+          | --- | --- |
+          | All public packages and Groundwork.Tool restored from Feedz | ${PACKAGE_OUTCOME:-not-run} |
+          | Public API clean-room consumer restored and run from Feedz | ${CLEAN_ROOM_OUTCOME:-not-run} |
+
+          Commands:
+
+          - \`eng/verify-published-packages.sh "$FEEDZ_NUGET_SOURCE" "$VERSION"\`
+          - \`tests/Groundwork.PublicApi.Acceptance.Tests/verify-clean-room.sh\` with remote-only Feedz mode
+
+          Raw restore/build output is intentionally not retained in this publication-safe manifest.
+          EOF
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: groundwork-documentation-feedz-${{ github.run_id }}
+          path: artifacts/docs-evidence/feedz/**
+          if-no-files-found: warn
+          retention-days: 7
+
+  newcomer-sqlite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - name: Resolve and pin the published release
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          expected=$(sed -n 's:.*<GroundworkCurrentRelease>\(.*\)</GroundworkCurrentRelease>.*:\1:p' Directory.Build.props)
+          version="${INPUT_VERSION:-$expected}"
+          test -n "$expected" && test "$version" = "$expected"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Run the publication-safe newcomer SQLite journey
+        if: always()
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version="${VERSION:-${INPUT_VERSION:-}}"
+          if [[ -z "$version" ]]; then
+            version=$(sed -n 's:.*<GroundworkCurrentRelease>\(.*\)</GroundworkCurrentRelease>.*:\1:p' Directory.Build.props)
+          fi
+          version="${version:-unresolved}"
+          mkdir -p artifacts/docs-evidence/newcomer
+          eng/verify-newcomer-sqlite.sh "$FEEDZ_NUGET_SOURCE" "$version" \
+            artifacts/docs-evidence/newcomer/report.md \
+            https://github.com/valence-works/groundwork-v2/wiki
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: groundwork-documentation-newcomer-${{ github.run_id }}
+          path: artifacts/docs-evidence/newcomer/**
+          if-no-files-found: warn
+          retention-days: 7

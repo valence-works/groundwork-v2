@@ -1,5 +1,7 @@
 # Groundwork.Query.Linq
 
+[Groundwork v2 documentation portal](https://github.com/valence-works/groundwork-v2/wiki) contains the full consumer documentation.
+
 A **closed** LINQ front-end: `IGwQueryable<T>`, with `Table<T>()`, `Where`, `WhereIf`, ordering,
 `Skip`/`Take`, mapped-column `Select`, `Distinct`, one explicitly activated declared-reference
 `Join`, and the `ToList`/`ToListAsync`,
@@ -31,7 +33,7 @@ resolve the `.Reference(...)` source declaration; compiled or otherwise opaque d
 fail-closed rather than being admitted as source-only coverage.
 
 Execution needs an adapter — see
-[`Groundwork.Query.Linq.Sqlite`](https://www.nuget.org/packages/Groundwork.Query.Linq.Sqlite).
+`Groundwork.Query.Linq.Sqlite`.
 
 ## Referencing it
 

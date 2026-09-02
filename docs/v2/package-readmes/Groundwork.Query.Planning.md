@@ -1,5 +1,7 @@
 # Groundwork.Query.Planning
 
+[Groundwork v2 documentation portal](https://github.com/valence-works/groundwork-v2/wiki) contains the full consumer documentation.
+
 Query coverage checking. `QueryCoverageChecker` decides whether a query shape is served by a
 declared index; `RuntimeCoverageGate` refuses an uncovered query at runtime with
 `QueryCoverageException` rather than letting it become a table scan in production.

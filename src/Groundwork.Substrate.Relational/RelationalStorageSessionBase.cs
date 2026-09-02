@@ -517,6 +517,8 @@ public abstract class RelationalStorageSessionAdapter :
     /// <paramref name="connection"/>. Omit it only when this adapter has exclusive ownership of
     /// the connection.
     /// </param>
+    /// <param name="connection">The provider connection used by this session.</param>
+    /// <param name="dialect">The relational command dialect.</param>
     protected RelationalStorageSessionAdapter(
         DbConnection connection,
         RelationalDialect dialect,

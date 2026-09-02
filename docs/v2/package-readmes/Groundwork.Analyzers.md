@@ -1,5 +1,7 @@
 # Groundwork.Analyzers
 
+[Groundwork v2 documentation portal](https://github.com/valence-works/groundwork-v2/wiki) contains the full consumer documentation.
+
 The Roslyn analyzer: uncovered queries and portability problems reported **in the editor and at
 build**, not at the first production write.
 

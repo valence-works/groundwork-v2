@@ -1,5 +1,7 @@
 # Groundwork.Substrate.Relational
 
+[Groundwork v2 documentation portal](https://github.com/valence-works/groundwork-v2/wiki) contains the full consumer documentation.
+
 The shared relational schema, runtime-admission, rendering, materialization, and ADO.NET execution
 seam. Schema connection ownership, dispatch, application locks, fencing, and operation transactions
 are written once instead of once per SQL provider.

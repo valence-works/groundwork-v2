@@ -1,5 +1,7 @@
 # Groundwork.Schema.Generator
 
+[Groundwork v2 documentation portal](https://github.com/valence-works/groundwork-v2/wiki) contains the full consumer documentation.
+
 A Roslyn source generator. It reads the `Groundwork.Schema` attributes in your assembly and emits
 the canonical schema document plus its fingerprint as an assembly attribute, so the schema your code
 declares and the schema your deployment applies cannot drift apart. When the application also

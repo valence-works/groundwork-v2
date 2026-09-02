@@ -187,7 +187,7 @@ public static class StorageAccessValidation
     /// <summary>
     /// Records a privileged-query attempt and returns the lifecycle handle a provider must complete
     /// with <see cref="StorageAccessAuditOperation.Success"/> or
-    /// <see cref="StorageAccessAuditOperation.Failure"/>.
+    /// <see cref="StorageAccessAuditOperation.Failure(Exception)"/>.
     /// </summary>
     public static StorageAccessAuditOperation BeginPrivilegedQuery(StorageAccess access, StorageUnit unit)
     {
@@ -1248,6 +1248,8 @@ public interface IStorageProviderConnection : IDisposable
     /// performs — reads, writes, probes and retention — because the session is what issues them. Schema work
     /// is not included: it runs through <see cref="Schema"/> on the connection, not through a session.
     /// </param>
+    /// <param name="unit">The compiled storage declaration this session admits.</param>
+    /// <param name="access">The caller's scope and privileged-access evidence.</param>
     IStorageSession OpenSession(StorageUnit unit, StorageAccess access, IProviderCommandObserver? observer = null);
 
     /// <summary>

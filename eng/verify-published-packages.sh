@@ -6,17 +6,29 @@ feed="${1:-}"
 version="${2:-}"
 expected_packages="${3:-}"
 test -n "$feed" || {
-  echo "Usage: $0 <feed-service-index> <exact-version> <expected-package-directory>" >&2
+  echo "Usage: $0 <feed-service-index> <exact-version> [expected-package-directory]" >&2
   exit 2
 }
 test -n "$version" || {
-  echo "Usage: $0 <feed-service-index> <exact-version> <expected-package-directory>" >&2
+  echo "Usage: $0 <feed-service-index> <exact-version> [expected-package-directory]" >&2
   exit 2
 }
-test -d "$expected_packages" || {
+[[ "$expected_packages" == "-" ]] && expected_packages=""
+if [[ -n "$expected_packages" ]] && ! test -d "$expected_packages"; then
   echo "Expected package directory '$expected_packages' does not exist." >&2
   exit 2
-}
+fi
+if [[ -z "$expected_packages" ]]; then
+  current_release="$(sed -n 's:.*<GroundworkCurrentRelease>\(.*\)</GroundworkCurrentRelease>.*:\1:p' "$repo_root/Directory.Build.props")"
+  test -n "$current_release" || {
+    echo "Could not determine GroundworkCurrentRelease from Directory.Build.props." >&2
+    exit 1
+  }
+  [[ "$version" == "$current_release" ]] || {
+    echo "Remote package verification version '$version' is not GroundworkCurrentRelease '$current_release'." >&2
+    exit 1
+  }
+fi
 
 probe_root="$(mktemp -d)"
 package_cache="$(mktemp -d)"
@@ -39,22 +51,24 @@ done < "$repo_root/eng/public-packages.txt"
 verify_artifact_hash() {
   local package_id="$1"
   local cache_id="${package_id,,}"
-  local expected="$expected_packages/$package_id.$version.nupkg"
   local restored_hash="$package_cache/$cache_id/$version/$cache_id.$version.nupkg.sha512"
   local restored_package=""
   if [[ "$package_id" == "Groundwork.Tool" ]]; then
     restored_package="$probe_root/tool/.store/$cache_id/$version/$cache_id/$version/$package_id.nupkg"
   fi
-  test -f "$expected" || {
-    echo "Expected artifact is missing: $expected" >&2
-    exit 1
-  }
   [[ -n "$restored_package" ]] || test -f "$restored_hash" || {
     echo "Restored package hash is missing: $restored_hash" >&2
     exit 1
   }
   [[ -z "$restored_package" ]] || test -f "$restored_package" || {
     echo "Restored tool package is missing: $restored_package" >&2
+    exit 1
+  }
+  [[ -n "$expected_packages" ]] || return 0
+
+  local expected="$expected_packages/$package_id.$version.nupkg"
+  test -f "$expected" || {
+    echo "Expected artifact is missing: $expected" >&2
     exit 1
   }
 

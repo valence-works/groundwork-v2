@@ -14,6 +14,8 @@ namespace Groundwork.Packaging.Tests;
 /// </summary>
 public sealed class PackedArtifactTests(PublicPackageSet packages) : IClassFixture<PublicPackageSet>
 {
+    private const string DocumentationPortalUrl = "https://github.com/valence-works/groundwork-v2/wiki";
+
     /// <summary>The custom debug information kind that carries the Source Link document map.</summary>
     private static readonly Guid SourceLinkDebugInformation = new("CC110556-A091-4D38-9FEC-25AB9A351A6A");
 
@@ -41,6 +43,7 @@ public sealed class PackedArtifactTests(PublicPackageSet packages) : IClassFixtu
             shipped);
         // A listing that opens with another package's name is a listing nobody can act on.
         Assert.StartsWith($"# {packageId}\n", shipped.ReplaceLineEndings("\n"), StringComparison.Ordinal);
+        Assert.Contains(DocumentationPortalUrl, shipped, StringComparison.Ordinal);
     }
 
     [Fact]

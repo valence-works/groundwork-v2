@@ -84,9 +84,9 @@ existing applied declaration in place.
 - [.NET `DateTimeOffset` uses 100-nanosecond ticks](https://learn.microsoft.com/en-us/dotnet/api/system.datetimeoffset.addticks?view=net-10.0).
 - [PostgreSQL timestamps have microsecond resolution and accept precision 0-6](https://www.postgresql.org/docs/current/datatype-datetime.html).
 - [SQL Server `datetimeoffset` supports precision 0-7 and years 0001-9999](https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql?view=sql-server-ver17).
-- [MySQL temporal fractional precision is 0-6 and lower precision rounds by default](https://dev.mysql.com/doc/refman/8.4/en/fractional-seconds.html).
+- [MySQL temporal fractional precision is 0-6 and lower precision rounds by default](https://docs.oracle.com/cd/E17952_01/mysql-8.4-en/fractional-seconds.html).
 - [MariaDB temporal microseconds and precision coercion are separately configurable](https://mariadb.com/docs/server/reference/sql-functions/date-time-functions/microseconds-in-mariadb).
-- [MySQL `DATETIME` has a supported range beginning at year 1000](https://dev.mysql.com/doc/refman/8.4/en/datetime.html).
+- [MySQL `DATETIME` has a supported range beginning at year 1000](https://docs.oracle.com/cd/E17952_01/mysql-8.4-en/datetime.html).
 - [SQLite has no date/time storage class](https://www.sqlite.org/datatype3.html#date_and_time_datatype), and [its date/time functions retain only the first three fractional digits](https://www.sqlite.org/lang_datefunc.html#time_values).
 - [BSON Date stores milliseconds since the Unix epoch](https://www.mongodb.com/docs/manual/reference/bson-types/#date).
 

@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "snippets": [
+    {
+      "id": "newcomer-sqlite",
+      "source": "docs/v2/newcomer-sqlite/Program.cs",
+      "runner": "eng/verify-newcomer-sqlite.sh",
+      "workflow": ".github/workflows/documentation-evidence.yml",
+      "workflow_job": "newcomer-sqlite",
+      "mode": "feedz",
+      "language": "csharp"
+    }
+  ]
+}

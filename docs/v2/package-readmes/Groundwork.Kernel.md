@@ -1,5 +1,7 @@
 # Groundwork.Kernel
 
+[Groundwork v2 documentation portal](https://github.com/valence-works/groundwork-v2/wiki) contains the full consumer documentation.
+
 The declaration layer. `StorageUnit`, `ColumnDefinition`, `PortableType`, `KeyDefinition`,
 `IndexDefinition`, `ConcurrencyDeclaration`, `RetentionDeclaration`, `AggregationProfile`,
 `PortabilityValidator`, the capability registry, and the schema subject and fingerprint model that

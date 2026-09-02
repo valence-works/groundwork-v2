@@ -23,7 +23,7 @@ corresponding rendering capability.
 
 ### Can I store a `double`?
 
-Yes — `PortableType.Double` is storable on all four providers and round-trips bit-for-bit. You cannot
+Yes — `PortableType.Double` is storable on all five database providers and round-trips bit-for-bit. You cannot
 *compare* one. Binary floating-point comparison, rounding, and index behavior differ across stores, so
 an index seek and a scan can disagree about the same row; predicates and ordering are refused
 (`GW-SEM-TYPE-006`), and a key, index, or grouping column is refused at declaration

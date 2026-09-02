@@ -151,7 +151,7 @@ public interface IRecordStore
 /// <remarks>
 /// This capability is separate from <see cref="IRecordStore"/> so existing custom record stores
 /// remain source-compatible. The shipped Records.Store adapter implements it by forwarding to the
-/// existing <see cref="IStorageSession.Aggregate"/> contract; it does not implement provider logic.
+/// existing <c>IStorageAggregationSession.Aggregate</c> contract; it does not implement provider logic.
 /// </remarks>
 public interface IRecordAggregationStore
 {

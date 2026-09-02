@@ -533,6 +533,8 @@ public sealed class StorageProviderConcurrencyFactory : IConcurrencyProviderFact
     /// Stages each write into a unit of work and commits it instead of writing straight through the
     /// session, so a commit path is proven under the same contention as a direct write.
     /// </param>
+    /// <param name="providerName">The provider identity reported by the conformance case.</param>
+    /// <param name="provider">The provider factory under test.</param>
     public StorageProviderConcurrencyFactory(
         string providerName,
         IStorageProviderFactory provider,

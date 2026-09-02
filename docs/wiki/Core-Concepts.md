@@ -48,7 +48,7 @@ new() { Name = "buyer", Id = "customer", Type = PortableType.String, MaxLength =
 ```
 
 Renames are **authorized** work, not automatic: the deployment tool needs the plan fingerprint plus
-`--allow-semantic rename-column:orders.buyer`. All four providers honor them there; MongoDB's
+`--allow-semantic rename-column:orders.buyer`. All five database providers honor them there; MongoDB's
 in-process `Schema.Apply` now reads the same applied ledger and uses the same rename plan.
 See **[Schema Management](Schema-Management)**.
 

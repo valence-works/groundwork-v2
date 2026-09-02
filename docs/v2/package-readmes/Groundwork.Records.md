@@ -1,5 +1,7 @@
 # Groundwork.Records
 
+[Groundwork v2 documentation portal](https://github.com/valence-works/groundwork-v2/wiki) contains the full consumer documentation.
+
 Typed rows. `RecordTable<T>` maps a CLR type to a kernel `StorageUnit` — key, columns, indexes,
 concurrency, scope — and exposes the `IRecordStore` seam. It also binds typed
 `AggregationRow` selectors to declared aggregation profiles; the binding preserves the profile's
@@ -25,7 +27,7 @@ provider-neutral, leaving the choice of database to whoever consumes it.
 ## Referencing it
 
 If you are writing an application, you almost certainly want
-**[`Groundwork.Records.Store`](https://www.nuget.org/packages/Groundwork.Records.Store)** instead —
+**`Groundwork.Records.Store`** instead —
 it adds the production bridge and brings this package along. Reference `Groundwork.Records` on its
 own only from a library that declares storage without picking a provider.
 

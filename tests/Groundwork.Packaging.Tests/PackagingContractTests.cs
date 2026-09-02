@@ -88,6 +88,9 @@ public sealed class PackagingContractTests
         var targets = File.ReadAllText(Path.Combine(root, "Directory.Build.targets"));
         Assert.Contains("Microsoft.SourceLink.GitHub", targets, StringComparison.Ordinal);
         Assert.Contains("docs/v2/package-readmes/$(PackageId).md", targets, StringComparison.Ordinal);
+        Assert.Contains("<GenerateDocumentationFile>true</GenerateDocumentationFile>", targets, StringComparison.Ordinal);
+        Assert.Contains("GroundworkPackApiDocumentation", targets, StringComparison.Ordinal);
+        Assert.Contains("$(DocumentationFile)", targets, StringComparison.Ordinal);
 
         Assert.True(File.Exists(Path.Combine(root, "docs/v2/versioning.md")));
         Assert.True(File.Exists(Path.Combine(root, "docs/v2/support-matrix.md")));
@@ -263,6 +266,148 @@ public sealed class PackagingContractTests
     }
 
     [Fact]
+    public void Documentation_evidence_workflow_is_manual_independent_and_bounded()
+    {
+        var workflow = File.ReadAllText(Path.Combine(
+            RepositoryRoot.Find(), ".github/workflows/documentation-evidence.yml"));
+        var triggers = workflow[workflow.IndexOf("\non:", StringComparison.Ordinal)..
+                               workflow.IndexOf("\npermissions:", StringComparison.Ordinal)];
+
+        Assert.Contains("workflow_dispatch:", triggers, StringComparison.Ordinal);
+        Assert.DoesNotContain("push:", triggers, StringComparison.Ordinal);
+        Assert.DoesNotContain("pull_request:", triggers, StringComparison.Ordinal);
+        Assert.DoesNotContain("release:", triggers, StringComparison.Ordinal);
+        Assert.DoesNotContain("actions/checkout@v4", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("actions/setup-dotnet@v4", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("actions/upload-artifact@v4", workflow, StringComparison.Ordinal);
+        Assert.Equal(4, Regex.Matches(workflow,
+            "actions/checkout@11d5960a326750d5838078e36cf38b85af677262").Count);
+        Assert.Equal(3, Regex.Matches(workflow,
+            "actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9").Count);
+        Assert.Equal(4, Regex.Matches(workflow,
+            "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02").Count);
+        Assert.Contains("GroundworkCurrentRelease", workflow, StringComparison.Ordinal);
+        Assert.Contains("portal-product:", workflow, StringComparison.Ordinal);
+        Assert.Contains("sample-provider-matrix:", workflow, StringComparison.Ordinal);
+        Assert.Contains("feedz-clean-room:", workflow, StringComparison.Ordinal);
+        Assert.Contains("newcomer-sqlite:", workflow, StringComparison.Ordinal);
+        foreach (var provider in new[] { "sqlite", "postgresql", "sqlserver", "mongodb", "mysql", "inmemory" })
+            Assert.Contains(provider, workflow, StringComparison.Ordinal);
+        Assert.Contains("expected executed passing tests only", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("needs: feedz-clean-room", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("needs: newcomer-sqlite", workflow, StringComparison.Ordinal);
+        Assert.True(Regex.Matches(workflow, "if: always\\(\\)").Count >= 2);
+        Assert.Equal(4, Regex.Matches(workflow, "retention-days: 7").Count);
+        Assert.Contains("verify-published-portal.py", workflow, StringComparison.Ordinal);
+        Assert.Contains("verify-published-packages.sh \"$FEEDZ_NUGET_SOURCE\" \"$VERSION\"", workflow, StringComparison.Ordinal);
+        Assert.Contains("GROUNDWORK_PUBLIC_API_REMOTE_ONLY: \"true\"", workflow, StringComparison.Ordinal);
+        Assert.Contains("verify-newcomer-sqlite.sh \"$FEEDZ_NUGET_SOURCE\" \"$version\"", workflow, StringComparison.Ordinal);
+        Assert.Contains("if: always()\n        env:\n          VERSION: ${{ steps.version.outputs.version }}\n          INPUT_VERSION: ${{ inputs.version }}", workflow, StringComparison.Ordinal);
+        Assert.Contains("evidence-manifest.md", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("package-verification.log", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("clean-room.log", workflow, StringComparison.Ordinal);
+        Assert.Contains("artifacts/docs-evidence/newcomer/report.md", workflow, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Documentation_evidence_scripts_preserve_local_hash_mode_and_support_remote_mode()
+    {
+        var root = RepositoryRoot.Find();
+        var published = File.ReadAllText(Path.Combine(root, "eng/verify-published-packages.sh"));
+        Assert.Contains("[expected-package-directory]", published, StringComparison.Ordinal);
+        Assert.Contains("[[ \"$expected_packages\" == \"-\" ]] && expected_packages=\"\"", published, StringComparison.Ordinal);
+        Assert.Contains("[[ -n \"$expected_packages\" ]] || return 0", published, StringComparison.Ordinal);
+        Assert.Contains("Artifact hash mismatch", published, StringComparison.Ordinal);
+
+        var cleanRoom = File.ReadAllText(Path.Combine(
+            root, "tests/Groundwork.PublicApi.Acceptance.Tests/verify-clean-room.sh"));
+        Assert.Contains("GROUNDWORK_PUBLIC_API_REMOTE_ONLY", cleanRoom, StringComparison.Ordinal);
+        Assert.Contains("GROUNDWORK_PUBLIC_API_FEEDZ_SOURCE", cleanRoom, StringComparison.Ordinal);
+        Assert.Contains("GroundworkCurrentRelease", cleanRoom, StringComparison.Ordinal);
+        Assert.Contains("Remote clean-room version", cleanRoom, StringComparison.Ordinal);
+        Assert.Contains("groundwork-local|value=", cleanRoom, StringComparison.Ordinal);
+
+        var newcomer = File.ReadAllText(Path.Combine(root, "eng/verify-newcomer-sqlite.sh"));
+        Assert.Contains("GroundworkCurrentRelease", newcomer, StringComparison.Ordinal);
+        Assert.Contains("index-covered customer query", newcomer, StringComparison.Ordinal);
+        Assert.Contains("declared customer aggregation", newcomer, StringComparison.Ordinal);
+        Assert.Contains("Groundwork newcomer SQLite evidence", newcomer, StringComparison.Ordinal);
+        Assert.Contains("groundwork-feedz", newcomer, StringComparison.Ordinal);
+        Assert.Contains("Published portal snapshot SHA-256", newcomer, StringComparison.Ordinal);
+        Assert.Contains("raw.githubusercontent.com/valence-works/groundwork-v2/$source_sha", newcomer, StringComparison.Ordinal);
+        Assert.Contains("## Commands", newcomer, StringComparison.Ordinal);
+        Assert.Contains("Started (UTC)", newcomer, StringComparison.Ordinal);
+        Assert.Contains("Checkout SHA", newcomer, StringComparison.Ordinal);
+        Assert.Contains("raw command output are intentionally not retained", newcomer, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Publication_workflows_gate_and_retain_the_exact_package_api_reference()
+    {
+        var root = RepositoryRoot.Find();
+        foreach (var workflowName in new[] { "publish-feedz.yml", "publish-nuget.yml" })
+        {
+            var workflow = File.ReadAllText(Path.Combine(root, ".github/workflows", workflowName));
+            var layout = workflow.IndexOf("verify-package-layout.sh", StringComparison.Ordinal);
+            var apiReference = workflow.IndexOf("verify-api-reference.py", StringComparison.Ordinal);
+            Assert.True(layout >= 0 && apiReference > layout, $"{workflowName} must validate package layout before API references.");
+            Assert.Contains("artifacts/packages \"$PACKAGE_VERSION\" artifacts/api-reference", workflow, StringComparison.Ordinal);
+            Assert.Contains("api-reference", workflow, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void Documentation_verification_is_path_scoped_and_does_not_run_solution_lanes()
+    {
+        var root = RepositoryRoot.Find();
+        var workflow = File.ReadAllText(Path.Combine(root, ".github/workflows/documentation-verification.yml"));
+        var triggers = workflow[workflow.IndexOf("\non:", StringComparison.Ordinal)..
+                               workflow.IndexOf("\npermissions:", StringComparison.Ordinal)];
+
+        Assert.Contains("push:", triggers, StringComparison.Ordinal);
+        Assert.Contains("pull_request:", triggers, StringComparison.Ordinal);
+        foreach (var path in new[]
+        {
+            "README.md", "docs/**", "samples/**", "eng/verify-documentation.py",
+            "eng/generate-provider-matrices.sh", "eng/provider-matrix/**", "eng/verify-api-reference.py",
+            "eng/api-documentation-baseline.json",
+            ".github/workflows/documentation-evidence.yml"
+        })
+            Assert.Contains(path, triggers, StringComparison.Ordinal);
+        Assert.Contains("python3 eng/verify-documentation.py", workflow, StringComparison.Ordinal);
+        Assert.Contains("bash eng/generate-provider-matrices.sh check", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("dotnet test", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("Groundwork.slnx", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("concurrency.yml", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("performance.yml", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("actions/checkout@v4", workflow, StringComparison.Ordinal);
+        Assert.Contains("actions/checkout@11d5960a326750d5838078e36cf38b85af677262", workflow, StringComparison.Ordinal);
+        Assert.Contains("actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9", workflow, StringComparison.Ordinal);
+        Assert.Contains("dotnet-version: |", workflow, StringComparison.Ordinal);
+        Assert.Contains("8.0.x", workflow, StringComparison.Ordinal);
+        Assert.Contains("10.0.x", workflow, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Executable_snippet_manifest_wires_the_first_public_fixture()
+    {
+        var root = RepositoryRoot.Find();
+        var manifest = File.ReadAllText(Path.Combine(root, "docs/v2/executable-snippets.json"));
+
+        Assert.Contains("\"id\": \"newcomer-sqlite\"", manifest, StringComparison.Ordinal);
+        Assert.Contains("\"source\": \"docs/v2/newcomer-sqlite/Program.cs\"", manifest, StringComparison.Ordinal);
+        Assert.Contains("\"runner\": \"eng/verify-newcomer-sqlite.sh\"", manifest, StringComparison.Ordinal);
+        Assert.Contains("\"mode\": \"feedz\"", manifest, StringComparison.Ordinal);
+        Assert.Contains("\"language\": \"csharp\"", manifest, StringComparison.Ordinal);
+        Assert.Contains("executable-snippets.json", File.ReadAllText(Path.Combine(root, "eng/verify-documentation.py")), StringComparison.Ordinal);
+        var verifier = File.ReadAllText(Path.Combine(root, "eng/verify-documentation.py"));
+        Assert.Contains("urlopen", verifier, StringComparison.Ordinal);
+        Assert.Contains("GET_ONLY_HOSTS", verifier, StringComparison.Ordinal);
+        Assert.Contains("RETRYABLE_STATUS_CODES", verifier, StringComparison.Ordinal);
+        Assert.Contains("--offline", verifier, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Nuget_publication_workflow_pins_actions_and_gates_credentials_on_the_package_manifest()
     {
         var root = RepositoryRoot.Find();
@@ -281,9 +426,9 @@ public sealed class PackagingContractTests
         Assert.Equal(2, Regex.Matches(
             workflow,
             "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093").Count);
-        Assert.Single(Regex.Matches(
+        Assert.Equal(2, Regex.Matches(
             workflow,
-            "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"));
+            "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02").Count);
         Assert.Contains("# v4.3.1", workflow, StringComparison.Ordinal);
         Assert.Contains("# v4.3.0", workflow, StringComparison.Ordinal);
         Assert.Contains("# v4.4.0", workflow, StringComparison.Ordinal);

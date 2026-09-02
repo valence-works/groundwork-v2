@@ -1,11 +1,13 @@
 # Groundwork.Schema
 
+[Groundwork v2 documentation portal](https://github.com/valence-works/groundwork-v2/wiki) contains the full consumer documentation.
+
 The declaration attributes and the canonical schema model: `[GwTable]`, `[GwColumn]`, `[GwKey]`,
 `[GwIndex]`, `[GwRetention]`, `[GwAppendIdempotency]`, `[GwRetentionIdempotency]`, `[GwAggregate]`.
 
 Attributes on your types are the input; the canonical schema document is the output, and it is what
 the `groundwork` CLI plans and applies from. Pair this with
-[`Groundwork.Schema.Generator`](https://www.nuget.org/packages/Groundwork.Schema.Generator), which
+`Groundwork.Schema.Generator`, which
 emits the canonical schema and its fingerprint as an assembly attribute at compile time.
 
 Targets `netstandard2.0` so the generator and the runtime read the same model.

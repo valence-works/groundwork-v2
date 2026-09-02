@@ -1,5 +1,7 @@
 # Groundwork.Documents
 
+[Groundwork v2 documentation portal](https://github.com/valence-works/groundwork-v2/wiki) contains the full consumer documentation.
+
 Typed JSON documents with schema versioning, composed over `Groundwork.Records` and the
 provider-neutral `Groundwork.Store` contracts.
 

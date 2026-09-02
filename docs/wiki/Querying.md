@@ -75,7 +75,7 @@ QueryRequest request = query.ToQueryRequest();
 ### Executing a query
 
 The async terminals run through `GwLinqExecutor` (package `Groundwork.Query.Linq.Execution`) — one
-adapter for **all four providers**, because everything an executor does is provider-neutral:
+adapter for **all five database providers**, because everything an executor does is provider-neutral:
 
 ```csharp
 var executor = new GwLinqExecutor(session, connection);

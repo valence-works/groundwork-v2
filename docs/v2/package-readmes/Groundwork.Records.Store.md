@@ -1,5 +1,7 @@
 # Groundwork.Records.Store
 
+[Groundwork v2 documentation portal](https://github.com/valence-works/groundwork-v2/wiki) contains the full consumer documentation.
+
 The production bridge between typed rows and a real database. Adds `table.Open(connection)` and the
 `IRecordStore` implementation over `Groundwork.Store`, so a `RecordTable<T>` becomes something you
 can insert into, read from, query, and execute typed declared aggregation bindings against.

@@ -1,5 +1,7 @@
 # Groundwork.SchemaTool.MSBuild
 
+[Groundwork v2 documentation portal](https://github.com/valence-works/groundwork-v2/wiki) contains the full consumer documentation.
+
 Build-time verification. The `GroundworkVerify` task fails the build on a portability refusal or an
 uncovered query, so a schema or query problem surfaces at compile time rather than at the first
 production write.

@@ -1,5 +1,7 @@
 # Groundwork.Diagnostics
 
+[Groundwork v2 documentation portal](https://github.com/valence-works/groundwork-v2/wiki) contains the full consumer documentation.
+
 Opt-in native explain-plan assertions. With `GW_EXPLAIN_ASSERT` set, a provider captures the
 database's own query plan and asserts that the query used the index it was declared to use — so
 "this query is covered" is checked against the optimizer rather than against a model of it.

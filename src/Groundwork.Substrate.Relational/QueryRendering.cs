@@ -975,7 +975,7 @@ public abstract class RelationalQueryRenderer
     /// <summary>
     /// Renders <c>UPDATE &lt;table&gt; SET &lt;assignments&gt; WHERE &lt;predicate&gt;</c>.
     /// </summary>
-    /// <param name="assignments">
+    /// <param name="assignmentColumns">
     /// Already-physical values, encoded by the provider's own write encoder rather than adapted
     /// here, so a set-based update writes the byte-for-byte representation a keyed update writes.
     /// </param>
@@ -983,6 +983,9 @@ public abstract class RelationalQueryRenderer
     /// The optimistic token column, incremented in the same statement exactly as a keyed update
     /// increments it. Null for a unit that declares no token.
     /// </param>
+    /// <param name="table">The physical table name.</param>
+    /// <param name="where">The admitted portable predicate.</param>
+    /// <param name="inValueLimit">The provider's maximum values per rendered membership predicate.</param>
     public RelationalSetMutationCommand RenderUpdateWhere(
         string table,
         Predicate where,

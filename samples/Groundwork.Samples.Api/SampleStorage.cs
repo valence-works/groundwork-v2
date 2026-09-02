@@ -1,10 +1,12 @@
 using Groundwork.Kernel;
 using Groundwork.MongoDb;
+using Groundwork.MySql;
 using Groundwork.PostgreSql;
 using Groundwork.Records;
 using Groundwork.SqlServer;
 using Groundwork.Sqlite;
 using Groundwork.Store;
+using Groundwork.Testing;
 using KernelStorageUnit = Groundwork.Kernel.StorageUnit;
 
 namespace Groundwork.Samples.Api;
@@ -26,7 +28,8 @@ public sealed class Order
 
 /// <summary>
 /// The whole declaration for this application, in one place, with no provider knowledge in it.
-/// The same objects are handed to SQLite, PostgreSQL, SQL Server, and MongoDB unchanged.
+/// The same objects are handed to SQLite, PostgreSQL, SQL Server, MongoDB, MySQL, and the
+/// deterministic in-memory reference provider unchanged.
 /// </summary>
 public static class SampleStorage
 {
@@ -63,7 +66,10 @@ public static class SampleStorage
         "postgresql" => new PostgreSqlProviderFactory(),
         "sqlserver" => new SqlServerProviderFactory(),
         "mongodb" => new MongoProviderFactory(),
+        "mysql" => new MySqlProviderFactory(),
+        "inmemory" => new InMemoryProviderFactory(),
         _ => throw new ArgumentOutOfRangeException(
-            nameof(alias), alias, "Groundwork:Provider must be sqlite, postgresql, sqlserver, or mongodb.")
+            nameof(alias), alias,
+            "Groundwork:Provider must be sqlite, postgresql, sqlserver, mongodb, mysql, or inmemory.")
     };
 }

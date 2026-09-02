@@ -1,0 +1,677 @@
+{
+  "Packages": [
+    {
+      "Id": "Groundwork.Analyzers",
+      "Project": "src/Groundwork.Analyzers/Groundwork.Analyzers.csproj"
+    },
+    {
+      "Id": "Groundwork.Diagnostics",
+      "Project": "src/Groundwork.Diagnostics/Groundwork.Diagnostics.csproj"
+    },
+    {
+      "Id": "Groundwork.Documents",
+      "Project": "src/Groundwork.Documents/Groundwork.Documents.csproj"
+    },
+    {
+      "Id": "Groundwork.EntityFrameworkCore",
+      "Project": "src/Groundwork.EntityFrameworkCore/Groundwork.EntityFrameworkCore.csproj"
+    },
+    {
+      "Id": "Groundwork.Extensions.DependencyInjection",
+      "Project": "src/Groundwork.Extensions.DependencyInjection/Groundwork.Extensions.DependencyInjection.csproj"
+    },
+    {
+      "Id": "Groundwork.Kernel",
+      "Project": "src/Groundwork.Kernel/Groundwork.Kernel.csproj"
+    },
+    {
+      "Id": "Groundwork.MongoDb",
+      "Project": "src/Groundwork.MongoDb/Groundwork.MongoDb.csproj"
+    },
+    {
+      "Id": "Groundwork.MySql",
+      "Project": "src/Groundwork.MySql/Groundwork.MySql.csproj"
+    },
+    {
+      "Id": "Groundwork.PostgreSql",
+      "Project": "src/Groundwork.PostgreSql/Groundwork.PostgreSql.csproj"
+    },
+    {
+      "Id": "Groundwork.Query.Linq",
+      "Project": "src/Groundwork.Query.Linq/Groundwork.Query.Linq.csproj"
+    },
+    {
+      "Id": "Groundwork.Query.Linq.Execution",
+      "Project": "src/Groundwork.Query.Linq.Execution/Groundwork.Query.Linq.Execution.csproj"
+    },
+    {
+      "Id": "Groundwork.Query.Linq.Sqlite",
+      "Project": "src/Groundwork.Query.Linq.Sqlite/Groundwork.Query.Linq.Sqlite.csproj"
+    },
+    {
+      "Id": "Groundwork.Query.Model",
+      "Project": "src/Groundwork.Query.Model/Groundwork.Query.Model.csproj"
+    },
+    {
+      "Id": "Groundwork.Query.Planning",
+      "Project": "src/Groundwork.Query.Planning/Groundwork.Query.Planning.csproj"
+    },
+    {
+      "Id": "Groundwork.Records",
+      "Project": "src/Groundwork.Records/Groundwork.Records.csproj"
+    },
+    {
+      "Id": "Groundwork.Records.Store",
+      "Project": "src/Groundwork.Records.Store/Groundwork.Records.Store.csproj"
+    },
+    {
+      "Id": "Groundwork.Schema",
+      "Project": "src/Groundwork.Schema/Groundwork.Schema.csproj"
+    },
+    {
+      "Id": "Groundwork.Schema.Generator",
+      "Project": "src/Groundwork.Schema.Generator/Groundwork.Schema.Generator.csproj"
+    },
+    {
+      "Id": "Groundwork.Tool",
+      "Project": "src/Groundwork.SchemaTool/Groundwork.SchemaTool.csproj"
+    },
+    {
+      "Id": "Groundwork.SchemaTool.MSBuild",
+      "Project": "src/Groundwork.SchemaTool.MSBuild/Groundwork.SchemaTool.MSBuild.csproj"
+    },
+    {
+      "Id": "Groundwork.SqlServer",
+      "Project": "src/Groundwork.SqlServer/Groundwork.SqlServer.csproj"
+    },
+    {
+      "Id": "Groundwork.Sqlite",
+      "Project": "src/Groundwork.Sqlite/Groundwork.Sqlite.csproj"
+    },
+    {
+      "Id": "Groundwork.Store",
+      "Project": "src/Groundwork.Store/Groundwork.Store.csproj"
+    },
+    {
+      "Id": "Groundwork.Substrate.Mongo",
+      "Project": "src/Groundwork.Substrate.Mongo/Groundwork.Substrate.Mongo.csproj"
+    },
+    {
+      "Id": "Groundwork.Substrate.Relational",
+      "Project": "src/Groundwork.Substrate.Relational/Groundwork.Substrate.Relational.csproj"
+    },
+    {
+      "Id": "Groundwork.Testing",
+      "Project": "src/Groundwork.Testing/Groundwork.Testing.csproj"
+    }
+  ],
+  "Providers": [
+    {
+      "Id": "sqlite",
+      "DisplayName": "SQLite",
+      "Lane": "SQLite provider conformance",
+      "Capabilities": [
+        {
+          "Id": "groundwork.column.provider-sequence",
+          "DisplayName": "Provider-assigned monotonic sequence",
+          "Description": "SQLite monotonically allocates a durable Int64 key in the insert command; concurrent commit order may differ and no additional provider command is required.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.operational.atomic-commit",
+          "DisplayName": "Atomic commit",
+          "Description": "Commits all staged writes across declared SQLite storage units in one provider transaction.",
+          "EvidenceGated": true,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.schema.enforced-constraints",
+          "DisplayName": "Enforced physical constraints",
+          "Description": "The deployment enforces declared physical foreign keys and portable check constraints in its native catalog.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.append-idempotency",
+          "DisplayName": "Idempotent append",
+          "Description": "Provides durable idempotent appends on SQLite; ledger and payload are committed atomically.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.batched-native",
+          "DisplayName": "Native batched writes",
+          "Description": "Executes grouped writes through the provider\u0027s native multi-row command or bulk-write primitive.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.batched-outcomes",
+          "DisplayName": "Batched per-row outcomes",
+          "Description": "Returns one outcome per staged row for SQLite; exact evidence cost: one RETURNING result per native batch.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.batched-unit-of-work",
+          "DisplayName": "Batched unit of work",
+          "Description": "Stages and coalesces writes for SQLite; uses variable-limit-aware multi-row INSERT/UPSERT commands; secondary unique declarations use the row-attributed fallback.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.compare-and-delete",
+          "DisplayName": "Atomic compare-and-delete",
+          "Description": "Deletes one identified row on SQLite only when every declared equality value matches in one provider-owned atomic decision/transaction; zero-row outcomes distinguish absence from comparison mismatch.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.durable-high-water-inspection",
+          "DisplayName": "Durable scoped sequence high-water inspection",
+          "Description": "Returns the committed scoped ProviderSequence high-water on SQLite; the value survives retention and provider/session restart.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.exact-append-outcomes",
+          "DisplayName": "Replay-stable exact append outcomes",
+          "Description": "Returns replay-stable exact generated outcomes on SQLite; result evidence is stored in the idempotency ledger.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.exact-retention",
+          "DisplayName": "Replay-stable exact retention",
+          "Description": "Replays operation-identified retention results on SQLite; the operation ledger and cleanup are durable.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.exact-retention-affected-keys",
+          "DisplayName": "Bounded affected retention keys",
+          "Description": "Returns complete, distinct, deterministically ordered affected projection values on SQLite; the finite bound is checked before row mutation and the values are persisted for replay.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.set-mutation",
+          "DisplayName": "Set-based mutation",
+          "Description": "Updates or deletes every row matching an index-covered portable predicate on SQLite in one UPDATE/DELETE statement; the statement is atomic and reports its affected-row count.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        }
+      ]
+    },
+    {
+      "Id": "postgresql",
+      "DisplayName": "PostgreSQL",
+      "Lane": "PostgreSQL differential lane",
+      "Capabilities": [
+        {
+          "Id": "groundwork.column.provider-sequence",
+          "DisplayName": "Provider-assigned monotonic sequence",
+          "Description": "PostgreSQL monotonically allocates a durable Int64 key in the insert command; concurrent commit order may differ and no additional provider command is required.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.operational.atomic-commit",
+          "DisplayName": "Atomic commit",
+          "Description": "Commits all staged writes across declared PostgreSQL storage units in one provider transaction.",
+          "EvidenceGated": true,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.schema.enforced-constraints",
+          "DisplayName": "Enforced physical constraints",
+          "Description": "The deployment enforces declared physical foreign keys and portable check constraints in its native catalog.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.append-idempotency",
+          "DisplayName": "Idempotent append",
+          "Description": "Provides durable idempotent appends on PostgreSQL; ledger and payload are committed atomically.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.batched-native",
+          "DisplayName": "Native batched writes",
+          "Description": "Executes grouped writes through the provider\u0027s native multi-row command or bulk-write primitive.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.batched-outcomes",
+          "DisplayName": "Batched per-row outcomes",
+          "Description": "Returns one outcome per staged row for PostgreSQL; exact evidence cost: one RETURNING result per native batch.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.batched-unit-of-work",
+          "DisplayName": "Batched unit of work",
+          "Description": "Stages and coalesces writes for PostgreSQL; uses multi-row INSERT/ON CONFLICT with a 32,000-parameter safety limit; secondary unique declarations use the row-attributed fallback.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.compare-and-delete",
+          "DisplayName": "Atomic compare-and-delete",
+          "Description": "Deletes one identified row on PostgreSQL only when every declared equality value matches in one provider-owned atomic decision/transaction; zero-row outcomes distinguish absence from comparison mismatch.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.durable-high-water-inspection",
+          "DisplayName": "Durable scoped sequence high-water inspection",
+          "Description": "Returns the committed scoped ProviderSequence high-water on PostgreSQL; the value survives retention and provider/session restart.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.exact-append-outcomes",
+          "DisplayName": "Replay-stable exact append outcomes",
+          "Description": "Returns replay-stable exact generated outcomes on PostgreSQL; result evidence is stored in the idempotency ledger.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.exact-retention",
+          "DisplayName": "Replay-stable exact retention",
+          "Description": "Replays operation-identified retention results on PostgreSQL; the operation ledger and cleanup are durable.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.exact-retention-affected-keys",
+          "DisplayName": "Bounded affected retention keys",
+          "Description": "Returns complete, distinct, deterministically ordered affected projection values on PostgreSQL; the finite bound is checked before row mutation and the values are persisted for replay.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.set-mutation",
+          "DisplayName": "Set-based mutation",
+          "Description": "Updates or deletes every row matching an index-covered portable predicate on PostgreSQL in one UPDATE/DELETE statement; the statement is atomic and reports its affected-row count.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        }
+      ]
+    },
+    {
+      "Id": "sqlserver",
+      "DisplayName": "SQL Server",
+      "Lane": "SQL Server differential lane",
+      "Capabilities": [
+        {
+          "Id": "groundwork.column.provider-sequence",
+          "DisplayName": "Provider-assigned monotonic sequence",
+          "Description": "SQL Server monotonically allocates a durable Int64 key in the insert command; concurrent commit order may differ and no additional provider command is required.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.operational.atomic-commit",
+          "DisplayName": "Atomic commit",
+          "Description": "Commits all staged writes across declared SQL Server storage units in one provider transaction.",
+          "EvidenceGated": true,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.schema.enforced-constraints",
+          "DisplayName": "Enforced physical constraints",
+          "Description": "The deployment enforces declared physical foreign keys and portable check constraints in its native catalog.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.append-idempotency",
+          "DisplayName": "Idempotent append",
+          "Description": "Provides durable idempotent appends on SQL Server; ledger and payload are committed atomically.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.batched-native",
+          "DisplayName": "Native batched writes",
+          "Description": "Executes grouped writes through the provider\u0027s native multi-row command or bulk-write primitive.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.batched-outcomes",
+          "DisplayName": "Batched per-row outcomes",
+          "Description": "Returns one outcome per staged row for SQL Server; exact evidence cost: one OUTPUT result per MERGE batch.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.batched-unit-of-work",
+          "DisplayName": "Batched unit of work",
+          "Description": "Stages and coalesces writes for SQL Server; uses one durable table-valued-parameter MERGE batch; VALUES is a compatibility fallback.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.compare-and-delete",
+          "DisplayName": "Atomic compare-and-delete",
+          "Description": "Deletes one identified row on SQL Server only when every declared equality value matches in one provider-owned atomic decision/transaction; zero-row outcomes distinguish absence from comparison mismatch.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.durable-high-water-inspection",
+          "DisplayName": "Durable scoped sequence high-water inspection",
+          "Description": "Returns the committed scoped ProviderSequence high-water on SQL Server; the value survives retention and provider/session restart.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.exact-append-outcomes",
+          "DisplayName": "Replay-stable exact append outcomes",
+          "Description": "Returns replay-stable exact generated outcomes on SQL Server; result evidence is stored in the idempotency ledger.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.exact-retention",
+          "DisplayName": "Replay-stable exact retention",
+          "Description": "Replays operation-identified retention results on SQL Server; the operation ledger and cleanup are durable.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.exact-retention-affected-keys",
+          "DisplayName": "Bounded affected retention keys",
+          "Description": "Returns complete, distinct, deterministically ordered affected projection values on SQL Server; the finite bound is checked before row mutation and the values are persisted for replay.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.set-mutation",
+          "DisplayName": "Set-based mutation",
+          "Description": "Updates or deletes every row matching an index-covered portable predicate on SQL Server in one UPDATE/DELETE statement; the statement is atomic and reports its affected-row count.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        }
+      ]
+    },
+    {
+      "Id": "mysql",
+      "DisplayName": "MySQL",
+      "Lane": "MySQL differential lane",
+      "Capabilities": [
+        {
+          "Id": "groundwork.column.provider-sequence",
+          "DisplayName": "Provider-assigned monotonic sequence",
+          "Description": "MySQL/MariaDB monotonically allocates a durable Int64 key in the insert command; concurrent commit order may differ and no additional provider command is required.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.operational.atomic-commit",
+          "DisplayName": "Atomic commit",
+          "Description": "Commits all staged writes across declared MySQL/MariaDB storage units in one provider transaction.",
+          "EvidenceGated": true,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.schema.enforced-constraints",
+          "DisplayName": "Enforced physical constraints",
+          "Description": "The deployment enforces declared physical foreign keys and portable check constraints in its native catalog.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.append-idempotency",
+          "DisplayName": "Idempotent append",
+          "Description": "Provides durable idempotent appends on MySQL/MariaDB; ledger and payload are committed atomically.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.batched-outcomes",
+          "DisplayName": "Batched per-row outcomes",
+          "Description": "Returns one outcome per staged row for MySQL/MariaDB; exact evidence cost: one native command per row through the shared relational fallback.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.batched-unit-of-work",
+          "DisplayName": "Batched unit of work",
+          "Description": "Stages and coalesces writes for MySQL/MariaDB; uses the shared transaction-bound row fallback on the first provider release.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.exact-append-outcomes",
+          "DisplayName": "Replay-stable exact append outcomes",
+          "Description": "Returns replay-stable exact generated outcomes on MySQL/MariaDB; result evidence is stored in the idempotency ledger.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.exact-retention",
+          "DisplayName": "Replay-stable exact retention",
+          "Description": "Replays operation-identified retention results on MySQL/MariaDB; the operation ledger and cleanup are durable.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.set-mutation",
+          "DisplayName": "Set-based mutation",
+          "Description": "Updates or deletes every row matching an index-covered portable predicate in one MySQL/MariaDB statement.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        }
+      ]
+    },
+    {
+      "Id": "inmemory",
+      "DisplayName": "InMemory",
+      "Lane": "Reference provider conformance",
+      "Capabilities": [
+        {
+          "Id": "groundwork.column.provider-sequence",
+          "DisplayName": "Provider-assigned monotonic sequence",
+          "Description": "the in-memory provider monotonically allocates a durable Int64 key in the insert command; concurrent commit order may differ and no additional provider command is required.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.operational.atomic-commit",
+          "DisplayName": "Atomic commit",
+          "Description": "Commits all staged writes across declared the in-memory provider storage units in one provider transaction.",
+          "EvidenceGated": true,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.append-idempotency",
+          "DisplayName": "Idempotent append",
+          "Description": "Provides durable idempotent appends on the in-memory provider; ledger and payload are committed atomically.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.batched-outcomes",
+          "DisplayName": "Batched per-row outcomes",
+          "Description": "Returns one outcome per staged row for the in-memory provider; exact evidence cost: one provider operation per coalesced row.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.batched-unit-of-work",
+          "DisplayName": "Batched unit of work",
+          "Description": "Stages and coalesces writes for the in-memory provider; uses provider-neutral per-row operations inside the transaction.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.compare-and-delete",
+          "DisplayName": "Atomic compare-and-delete",
+          "Description": "Deletes one identified row on the in-memory provider only when every declared equality value matches in one provider-owned atomic decision/transaction; zero-row outcomes distinguish absence from comparison mismatch.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.durable-high-water-inspection",
+          "DisplayName": "Durable scoped sequence high-water inspection",
+          "Description": "Returns the committed scoped ProviderSequence high-water on the in-memory provider; the value survives retention and provider/session restart.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.exact-append-outcomes",
+          "DisplayName": "Replay-stable exact append outcomes",
+          "Description": "Returns replay-stable exact generated outcomes on the in-memory provider; result evidence is stored in the idempotency ledger.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.exact-retention",
+          "DisplayName": "Replay-stable exact retention",
+          "Description": "Replays operation-identified retention results on the in-memory provider; the operation ledger and cleanup are durable.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.exact-retention-affected-keys",
+          "DisplayName": "Bounded affected retention keys",
+          "Description": "Returns complete, distinct, deterministically ordered affected projection values on the in-memory provider; the finite bound is checked before row mutation and the values are persisted for replay.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        }
+      ]
+    },
+    {
+      "Id": "mongodb-replica-set",
+      "DisplayName": "MongoDB replica set",
+      "Lane": "MongoDB differential lane",
+      "Capabilities": [
+        {
+          "Id": "groundwork.column.provider-sequence",
+          "DisplayName": "Provider-assigned monotonic sequence",
+          "Description": "MongoDB monotonically allocates a sequence in a counter collection and commits it with the row in a transaction-capable deployment; concurrent commit order may differ and each inserted row/coalesced exact write uses one additional counter command.",
+          "EvidenceGated": true,
+          "AdditionalCommandsPerWrite": 1
+        },
+        {
+          "Id": "groundwork.operational.atomic-commit",
+          "DisplayName": "Atomic commit",
+          "Description": "Commits all staged writes across declared MongoDB storage units in one provider transaction.",
+          "EvidenceGated": true,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.append-idempotency",
+          "DisplayName": "Idempotent append",
+          "Description": "Provides durable idempotent appends on MongoDB; ledger and payload are committed atomically.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.batched-native",
+          "DisplayName": "Native batched writes",
+          "Description": "Executes grouped writes through the provider\u0027s native multi-row command or bulk-write primitive.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.batched-outcomes",
+          "DisplayName": "Batched per-row outcomes",
+          "Description": "Returns one outcome per staged row for MongoDB; exact evidence cost: one FindOneAndUpdate per coalesced row.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.batched-unit-of-work",
+          "DisplayName": "Batched unit of work",
+          "Description": "Stages and coalesces writes for MongoDB; uses unordered BulkWrite for aggregate commits.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.compare-and-delete",
+          "DisplayName": "Atomic compare-and-delete",
+          "Description": "Deletes one identified row on MongoDB only when every declared equality value matches in one provider-owned atomic decision/transaction; zero-row outcomes distinguish absence from comparison mismatch.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.durable-high-water-inspection",
+          "DisplayName": "Durable scoped sequence high-water inspection",
+          "Description": "Returns the committed scoped ProviderSequence high-water on MongoDB; the value survives retention and provider/session restart.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.exact-append-outcomes",
+          "DisplayName": "Replay-stable exact append outcomes",
+          "Description": "Returns replay-stable exact generated outcomes on MongoDB; result evidence is stored in the idempotency ledger.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.exact-retention",
+          "DisplayName": "Replay-stable exact retention",
+          "Description": "Replays operation-identified retention results on MongoDB; the operation ledger and cleanup are durable.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.exact-retention-affected-keys",
+          "DisplayName": "Bounded affected retention keys",
+          "Description": "Returns complete, distinct, deterministically ordered affected projection values on MongoDB; the finite bound is checked before row mutation and the values are persisted for replay.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.set-mutation",
+          "DisplayName": "Set-based mutation",
+          "Description": "Updates or deletes every document matching an index-covered portable predicate on MongoDB with one updateMany/deleteMany, and reports matchedCount/deletedCount. Unlike the relational providers, a multi-document updateMany/deleteMany is atomic only when it runs inside a transaction: open a unit of work on a transaction-capable deployment when the whole set must apply or none of it.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        }
+      ]
+    },
+    {
+      "Id": "mongodb-standalone",
+      "DisplayName": "MongoDB standalone",
+      "Lane": "Capability-refusal lane",
+      "Capabilities": [
+        {
+          "Id": "groundwork.storage.batched-native",
+          "DisplayName": "Native batched writes",
+          "Description": "Executes grouped writes through the provider\u0027s native multi-row command or bulk-write primitive.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.batched-outcomes",
+          "DisplayName": "Batched per-row outcomes",
+          "Description": "Returns one outcome per staged row for MongoDB; exact evidence cost: one FindOneAndUpdate per coalesced row.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.batched-unit-of-work",
+          "DisplayName": "Batched unit of work",
+          "Description": "Stages and coalesces writes for MongoDB; uses unordered BulkWrite for aggregate commits.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
+          "Id": "groundwork.storage.set-mutation",
+          "DisplayName": "Set-based mutation",
+          "Description": "Updates or deletes every document matching an index-covered portable predicate on MongoDB with one updateMany/deleteMany, and reports matchedCount/deletedCount. Unlike the relational providers, a multi-document updateMany/deleteMany is atomic only when it runs inside a transaction: open a unit of work on a transaction-capable deployment when the whole set must apply or none of it.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        }
+      ]
+    }
+  ]
+}

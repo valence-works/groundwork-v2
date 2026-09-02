@@ -1,5 +1,7 @@
 # Groundwork.Query.Model
 
+[Groundwork v2 documentation portal](https://github.com/valence-works/groundwork-v2/wiki) contains the full consumer documentation.
+
 The innermost assembly: the portable predicate and query AST. `QueryRequest`, `Predicate`,
 `ColumnRef`, `Paging`, `Projection`, and `PortableQuerySemantics`.
 

@@ -1,5 +1,7 @@
 # Groundwork.MySql
 
+[Groundwork v2 documentation portal](https://github.com/valence-works/groundwork-v2/wiki) contains the full consumer documentation.
+
 The MySQL/MariaDB provider for the provider-neutral `Groundwork.Store` contracts. It is built on
 `Groundwork.Substrate.Relational` and `MySqlConnector`, with provider-specific code limited to the
 dialect, catalog, locking/fencing, and native command adapters.

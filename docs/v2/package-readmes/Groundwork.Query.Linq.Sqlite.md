@@ -1,5 +1,7 @@
 # Groundwork.Query.Linq.Sqlite
 
+[Groundwork v2 documentation portal](https://github.com/valence-works/groundwork-v2/wiki) contains the full consumer documentation.
+
 The SQLite execution adapter for the closed LINQ front-end. Open a SQLite session with
 `Groundwork.Sqlite`, then configure `new GwQueryDatabase(new SqliteLinqExecutor(session))`, and
 `query.Where(...).ToListAsync(cancellationToken)` executes without you implementing an executor.

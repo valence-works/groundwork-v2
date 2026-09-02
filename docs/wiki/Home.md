@@ -2,7 +2,8 @@
 
 Groundwork is a **provider-neutral persistence kernel for .NET**. You declare typed storage
 once — columns, a key, indexes, scope, concurrency, lifecycle — and map that single declaration
-to SQLite, PostgreSQL, SQL Server, or MongoDB without provider concerns leaking into your model.
+to SQLite, PostgreSQL, SQL Server, MongoDB, or MySQL without provider concerns leaking into your
+model.
 
 ```csharp
 var table = RecordTable.For<Customer>("customers")
@@ -23,12 +24,16 @@ var matches = records.Query(
     RecordQueryOptions.UsingIndex("by_email"));
 ```
 
-Swap `SqliteProviderFactory` for `PostgreSqlProviderFactory`, `SqlServerProviderFactory`, or
-`MongoProviderFactory` and nothing above changes.
+Swap `SqliteProviderFactory` for `PostgreSqlProviderFactory`, `SqlServerProviderFactory`,
+`MongoProviderFactory`, or `MySqlProviderFactory` and nothing above changes. Tests can use the same
+declaration with `InMemoryProviderFactory`.
 
-> **Status: pre-1.0 preview.** All packages are published as `0.x-preview.N` to a private-ish
-> public Feedz source, not nuget.org. Read [Versioning & Support](Versioning-and-Support) and
-> [Installation](Installation) before adopting.
+> **Status: pre-1.0 preview.** The current published release is **`0.4.0-preview.5`**. Packages are
+> published to a public Feedz source, not nuget.org. Read
+> [Versioning & Support](Versioning-and-Support) and [Installation](Installation) before adopting.
+
+Use the wiki **Search** box to find a symbol or diagnostic. On a small screen, where the sidebar can
+collapse, the complete **All pages** inventory below is the mobile navigation.
 
 ---
 
@@ -111,7 +116,7 @@ map, model-import report, catalog adoption boundary, and a complete customer/ord
 
 ## The 60-second mental model
 
-```
+```text
                         your code
                             │
       ┌─────────────────────┼─────────────────────┐
@@ -125,16 +130,16 @@ map, model-import report, catalog adoption boundary, and a complete customer/ord
                  IStorageProviderConnection
                  IStorageSession / IUnitOfWork
                             │
-      ┌───────────┬─────────┼─────────┬───────────┐
-   Sqlite    PostgreSql  SqlServer  MongoDb    Testing
+      ┌──────────┬──────────┼──────────┬──────────┬──────────┐
+   Sqlite   PostgreSql  SqlServer   MongoDb    MySql     Testing
                             │
                     Groundwork.Kernel         ← declarations, portability rules
                  Groundwork.Query.Model       ← the predicate AST, BCL-only
 ```
 
 Everything depends **inward**. A declaration never knows about a provider. A provider never knows
-about `Records` or `Documents`. That is what makes the same declaration runnable on four databases —
-and what makes it possible for you to add a fifth family or a fifth provider without forking.
+about `Records` or `Documents`. That is what makes the same declaration runnable on five databases —
+and what makes it possible for you to add another family or provider without forking.
 
 ---
 

@@ -1,5 +1,7 @@
 # Groundwork.Query.Linq.Execution
 
+[Groundwork v2 documentation portal](https://github.com/valence-works/groundwork-v2/wiki) contains the full consumer documentation.
+
 `GwLinqExecutor` — the **one** execution adapter behind the closed LINQ front-end, for every
 provider.
 
@@ -41,7 +43,7 @@ dotnet add package Groundwork.Query.Linq.Execution --prerelease
 ```
 
 Pair it with your provider package. See
-[`Groundwork.Query.Linq`](https://www.nuget.org/packages/Groundwork.Query.Linq) for the query
+`Groundwork.Query.Linq` for the query
 surface itself and why it is deliberately not `IQueryable`.
 
 ## Every Groundwork package

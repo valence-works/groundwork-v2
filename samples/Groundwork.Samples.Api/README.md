@@ -1,6 +1,7 @@
 # Groundwork sample API
 
-A runnable ASP.NET Core minimal API showing one declaration serving four databases: typed CRUD, a
+A runnable ASP.NET Core minimal API showing one declaration serving five databases and the
+deterministic in-memory reference provider: typed CRUD, a
 covered query with paging, a unit of work, optimistic concurrency, tenant scopes, capability
 advertisement, and the Groundwork health check.
 
@@ -46,8 +47,8 @@ curl 'localhost:5000/tenants/acme/notes?limit=20'
 }
 ```
 
-`Provider` accepts `sqlite`, `postgresql`, `sqlserver`, and `mongodb`. Nothing else in the sample
-changes — not the declaration, not the writes, not the queries. The four-line factory switch lives in
+`Provider` accepts `sqlite`, `postgresql`, `sqlserver`, `mongodb`, `mysql`, and `inmemory`. Nothing
+else in the sample changes — not the declaration, not the writes, not the queries. The factory switch lives in
 `SampleStorage.ProviderFactory`; `Groundwork.Extensions.DependencyInjection` references no provider
 at all, so a real application references exactly the one it deploys.
 
@@ -99,8 +100,10 @@ must be `true`. Do not turn it on anywhere else.
 
 ## Tests
 
-`tests/Groundwork.Samples.Api.Tests` hosts this application with `WebApplicationFactory` against a
-temporary SQLite file and exercises every endpoint above.
+`tests/Groundwork.Samples.Api.Tests` hosts this application with `WebApplicationFactory` and
+exercises every endpoint above. The ordinary local run uses a temporary SQLite file; the dedicated
+documentation-evidence workflow repeats the same public sample journey against all five shipped
+databases and the in-memory reference provider, and refuses skipped tests.
 
 ## Read next
 
