@@ -180,12 +180,19 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         if (query.IsMatchNone || !ExplainAssertionMode.ShouldAssert(query.SelectedIndex)) return;
         var logicalIndex = query.SelectedIndex!;
         var physicalIndex = options.ResolvePhysicalIndexName(logicalIndex);
-        using var explain = Command("EXPLAIN (FORMAT JSON) " + query.CommandText.TrimEnd().TrimEnd(';'));
-        RelationalQueryResultReader.AddParameters(explain, query);
-        var rawPlan = Convert.ToString(await mode.ExecuteScalar(explain).ConfigureAwait(false), CultureInfo.InvariantCulture) ?? string.Empty;
+        var plans = new List<string>(query.Statements.Length);
+        foreach (var statement in query.Statements)
+        {
+            using var explain = Command("EXPLAIN (FORMAT JSON) " + statement.TrimEnd().TrimEnd(';'));
+            RelationalQueryResultReader.AddParameters(explain, query);
+            plans.Add(Convert.ToString(
+                await mode.ExecuteScalar(explain).ConfigureAwait(false),
+                CultureInfo.InvariantCulture) ?? string.Empty);
+        }
+        var rawPlan = string.Join(Environment.NewLine, plans);
         ExplainAssertionMode.AssertChosenIndex(
             "PostgreSQL", logicalIndex, physicalIndex, query.IndexHintApplied, rawPlan,
-            PostgreSqlExplainPlanInspector.ChoseIndex(rawPlan, physicalIndex));
+            plans.All(plan => PostgreSqlExplainPlanInspector.ChoseIndex(plan, physicalIndex)));
     }
 
     public StoredEntry? Read(StorageKey key) =>

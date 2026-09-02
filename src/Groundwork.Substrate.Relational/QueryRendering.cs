@@ -54,7 +54,8 @@ public sealed class RelationalQueryCommand
             selectedIndex,
             indexHintApplied,
             appliedOrder,
-            requiresCompositeMaterializer: false)
+            requiresCompositeMaterializer: false,
+            statements: null)
     {
     }
 
@@ -66,7 +67,8 @@ public sealed class RelationalQueryCommand
         string? selectedIndex,
         bool indexHintApplied,
         IReadOnlyList<string> appliedOrder,
-        bool requiresCompositeMaterializer)
+        bool requiresCompositeMaterializer,
+        IReadOnlyList<string>? statements = null)
     {
         CommandText = commandText ?? throw new ArgumentNullException(nameof(commandText));
         Parameters = (parameters ?? throw new ArgumentNullException(nameof(parameters))).ToImmutableArray();
@@ -78,6 +80,9 @@ public sealed class RelationalQueryCommand
         IndexHintApplied = indexHintApplied;
         AppliedOrder = (appliedOrder ?? throw new ArgumentNullException(nameof(appliedOrder))).ToImmutableArray();
         RequiresCompositeMaterializer = requiresCompositeMaterializer;
+        Statements = statements?.ToImmutableArray() ?? [CommandText];
+        if (Statements.Length == 0 || Statements.Any(string.IsNullOrWhiteSpace))
+            throw new ArgumentException("Relational query statements cannot be empty.", nameof(statements));
     }
 
     public string CommandText { get; }
@@ -88,6 +93,7 @@ public sealed class RelationalQueryCommand
     public bool IndexHintApplied { get; }
     public ImmutableArray<string> AppliedOrder { get; }
     internal bool RequiresCompositeMaterializer { get; }
+    internal ImmutableArray<string> Statements { get; }
 }
 
 /// <summary>Native SQL and parameter values produced for one set-based mutation.</summary>
@@ -235,7 +241,43 @@ public static class RelationalQueryResultReader
         var rows = new List<IReadOnlyDictionary<string, object?>>();
         while (await mode.Read(reader).ConfigureAwait(false))
             rows.Add(MaterializeRow(reader, decode));
+        if (query.Statements.Length > 1)
+            await AttachSeparateTotalCount(query, reader, rows, decode, mode).ConfigureAwait(false);
         return rows;
+    }
+
+    private static async ValueTask AttachSeparateTotalCount(
+        RelationalQueryCommand query,
+        DbDataReader reader,
+        List<IReadOnlyDictionary<string, object?>> rows,
+        Func<string, object?, object?> decode,
+        RelationalExecution mode)
+    {
+        if (!query.IncludesTotalCount || query.Statements.Length != 2)
+            throw new InvalidOperationException("A multi-statement relational query must be one page followed by its total count.");
+        if (!await mode.NextResult(reader).ConfigureAwait(false) || !await mode.Read(reader).ConfigureAwait(false))
+            throw new InvalidOperationException("A counted relational page did not return its total-count result set.");
+
+        var countRow = MaterializeRow(reader, decode);
+        if (countRow.Count != 1 || !countRow.TryGetValue("__groundwork_total_count", out var totalCount) || totalCount is null)
+            throw new InvalidOperationException("A counted relational page returned an invalid total-count result set.");
+        if (await mode.Read(reader).ConfigureAwait(false) || await mode.NextResult(reader).ConfigureAwait(false))
+            throw new InvalidOperationException("A counted relational page returned unexpected rows or result sets after its total count.");
+
+        if (rows.Count == 0)
+        {
+            rows.Add(new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["__groundwork_total_count"] = totalCount,
+                ["__groundwork_count_only"] = 1L
+            });
+            return;
+        }
+
+        var first = rows[0].ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+        first["__groundwork_total_count"] = totalCount;
+        first["__groundwork_count_only"] = 0L;
+        rows[0] = first;
     }
 
     private static DbCommand CreateCommand(DbConnection connection, RelationalQueryCommand query, DbTransaction? transaction)
@@ -451,6 +493,7 @@ public abstract class RelationalQueryRenderer
         if (indexHintApplied)
             from += " " + RenderIndexHint(options.ResolvePhysicalIndexName(pinnedIndex!.Name));
         string sql;
+        IReadOnlyList<string>? statements = null;
         if (request.Result is ResultShape.Reduction reduction)
         {
             sql = RenderReduction(reduction, request, effectiveOrder, cursor, parameters, ref parameterIndex, from, where, options);
@@ -509,11 +552,14 @@ public abstract class RelationalQueryRenderer
                 else if ((request.Paging.Offset is not null || request.Paging.Limit is not null) && RequiresOrderForOffset)
                     page += " ORDER BY (SELECT 1)";
                 page += RenderPaging(request.Paging, parameters, ref parameterIndex);
-                sql = latestSource + ", __groundwork_page AS (" + page + "), __groundwork_total AS (SELECT " + aggregate + " AS __groundwork_total_count FROM " + countSource + countWhere + ") " +
-                    "SELECT __groundwork_page.*, __groundwork_total.__groundwork_total_count, CASE WHEN __groundwork_page.__groundwork_has_row IS NULL THEN 1 ELSE 0 END AS __groundwork_count_only " +
-                    "FROM __groundwork_total LEFT JOIN __groundwork_page ON 1 = 1 ORDER BY " +
-                    dialect.QuoteIdentifier("__groundwork_count_only") + " ASC" +
-                    (effectiveOrder.Count == 0 ? string.Empty : ", " + RenderOrder(effectiveOrder, options)) + ";";
+                // Keep both statements in one provider command and reuse the predicate parameter
+                // set. The caller's transaction, when present, remains the authority for
+                // cross-statement visibility; TotalCount is not a snapshot-isolation contract.
+                var pageStatement = latestSource + " " + page + ";";
+                var countStatement = latestSource + " SELECT " + aggregate +
+                    " AS __groundwork_total_count FROM " + countSource + countWhere + ";";
+                statements = [pageStatement, countStatement];
+                sql = string.Join(" ", statements);
             }
         }
         else
@@ -573,7 +619,9 @@ public abstract class RelationalQueryRenderer
             matchNone,
             expectedIndex?.Name,
             indexHintApplied,
-            effectiveOrder.Select(term => term.Column.Name).ToArray());
+            effectiveOrder.Select(term => term.Column.Name).ToArray(),
+            requiresCompositeMaterializer: false,
+            statements: statements);
     }
 
     private RelationalQueryCommand RenderJoined(QueryRequest request, QueryRenderOptions? options)
@@ -651,6 +699,7 @@ public abstract class RelationalQueryRenderer
             var selection = JoinedSelection(request, effectiveOrder, options);
             var from = JoinedFrom(request.Join!, pinnedIndex, indexHintApplied, options);
             string sql;
+            IReadOnlyList<string>? statements = null;
             if (request.Result is ResultShape.Reduction reduction)
             {
                 sql = RenderJoinedReduction(
@@ -694,13 +743,13 @@ public abstract class RelationalQueryRenderer
                         pageWhere += " AND (" + RenderContinuation(effectiveOrder, cursor, parameters, ref parameterIndex) + ")";
                     var page = "SELECT * FROM " + pageSource + " WHERE " + pageWhere;
                     page += JoinedOrderAndPaging(request.Paging, effectiveOrder, parameters, ref parameterIndex, options);
-                    sql = baseCte + ", __groundwork_page AS (" + page + "), __groundwork_total AS (SELECT " +
-                        RenderCountAggregate() + " AS __groundwork_total_count FROM " + countSource + countWhere + ") " +
-                        "SELECT __groundwork_page.*, __groundwork_total.__groundwork_total_count, " +
-                        "CASE WHEN __groundwork_page.__groundwork_has_row IS NULL THEN 1 ELSE 0 END AS __groundwork_count_only " +
-                        "FROM __groundwork_total LEFT JOIN __groundwork_page ON 1 = 1 ORDER BY " +
-                        dialect.QuoteIdentifier("__groundwork_count_only") + " ASC" +
-                        (effectiveOrder.Count == 0 ? string.Empty : ", " + RenderOrder(effectiveOrder, options)) + ";";
+                    // As with the single-table path, this is one provider command whose statement
+                    // visibility is governed by the caller's existing transaction isolation.
+                    var pageStatement = baseCte + " " + page + ";";
+                    var countStatement = baseCte + " SELECT " + RenderCountAggregate() +
+                        " AS __groundwork_total_count FROM " + countSource + countWhere + ";";
+                    statements = [pageStatement, countStatement];
+                    sql = string.Join(" ", statements);
                 }
             }
             else if (!scope.UsesDerivedSource)
@@ -740,7 +789,8 @@ public abstract class RelationalQueryRenderer
                 expectedIndex?.Name,
                 indexHintApplied,
                 effectiveOrder.Select(term => term.Column.Name).ToArray(),
-                requiresCompositeMaterializer: request.Projection.AllColumns && request.Result is not ResultShape.Reduction);
+                requiresCompositeMaterializer: request.Projection.AllColumns && request.Result is not ResultShape.Reduction,
+                statements: statements);
         }
         finally
         {

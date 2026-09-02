@@ -638,12 +638,15 @@ public sealed class QueryRendererTests
 
             Assert.Contains("INNER JOIN", command.CommandText, StringComparison.OrdinalIgnoreCase);
             Assert.Contains(marker, command.CommandText, StringComparison.OrdinalIgnoreCase);
-            var finalOrder = command.CommandText.LastIndexOf("ORDER BY", StringComparison.OrdinalIgnoreCase);
-            if (finalOrder >= 0)
+            foreach (var statement in command.Statements)
             {
-                var derivedOrder = command.CommandText.Substring(finalOrder);
-                Assert.DoesNotContain("__groundwork_source", derivedOrder, StringComparison.Ordinal);
-                Assert.DoesNotContain("__groundwork_target", derivedOrder, StringComparison.Ordinal);
+                var finalOrder = statement.LastIndexOf("ORDER BY", StringComparison.OrdinalIgnoreCase);
+                if (finalOrder >= 0)
+                {
+                    var derivedOrder = statement.Substring(finalOrder);
+                    Assert.DoesNotContain("__groundwork_source", derivedOrder, StringComparison.Ordinal);
+                    Assert.DoesNotContain("__groundwork_target", derivedOrder, StringComparison.Ordinal);
+                }
             }
         }
     }
@@ -988,7 +991,8 @@ public sealed class QueryRendererTests
         Assert.DoesNotContain("COUNT", rows.CommandText, StringComparison.OrdinalIgnoreCase);
         Assert.True(count.IncludesTotalCount);
         Assert.Contains("__groundwork_total_count", count.CommandText, StringComparison.Ordinal);
-        Assert.Contains("LEFT JOIN __groundwork_page", count.CommandText, StringComparison.Ordinal);
+        Assert.Equal(2, count.Statements.Length);
+        Assert.DoesNotContain("LEFT JOIN __groundwork_page", count.CommandText, StringComparison.Ordinal);
 
         var sqlServerCount = new SqlServerQueryRenderer().Render(
             Request(new Predicate.Equal(Id, QueryConstant.Of(Id, 1L)), [], Paging.None, ResultShape.TotalCount.Instance));
@@ -1000,6 +1004,83 @@ public sealed class QueryRendererTests
             Paging.None, ResultShape.TotalCount.Instance));
         Assert.Contains("ORDER BY", orderedSqlServerCount.CommandText, StringComparison.Ordinal);
         Assert.Contains("OFFSET 0 ROWS", orderedSqlServerCount.CommandText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Sqlite_counted_index_ordered_page_needs_no_temporary_sort()
+    {
+        using var connection = new SqliteConnection("Data Source=:memory:");
+        connection.Open();
+        using (var setup = connection.CreateCommand())
+        {
+            setup.CommandText = "CREATE TABLE customers (id INTEGER NOT NULL, amount INTEGER NOT NULL); " +
+                "CREATE INDEX ix_amount_id ON customers (amount, id); " +
+                "WITH RECURSIVE values_to_insert(value) AS (SELECT 1 UNION ALL SELECT value + 1 FROM values_to_insert WHERE value < 100) " +
+                "INSERT INTO customers SELECT value, 7 FROM values_to_insert;";
+            setup.ExecuteNonQuery();
+        }
+
+        var options = new QueryRenderOptions(
+            [new QueryIndexDeclaration(
+                "ix_amount_id",
+                [
+                    new QueryIndexColumn("amount", isNullable: false, QueryType.Int32),
+                    new QueryIndexColumn("id", isNullable: false, QueryType.Int64)
+                ])],
+            selectedIndex: "ix_amount_id");
+        var request = Request(
+            new Predicate.Equal(Amount, QueryConstant.Of(Amount, 7)),
+            [new OrderTerm(Id, OrderDirection.Ascending, NullOrder.First)],
+            Paging.Keyset(5),
+            ResultShape.TotalCount.Instance);
+        var command = new SqliteQueryRenderer().Render(request, options);
+        var plan = new List<string>();
+        foreach (var statement in command.Statements)
+        {
+            using var explain = connection.CreateCommand();
+            explain.CommandText = "EXPLAIN QUERY PLAN " + statement.TrimEnd().TrimEnd(';');
+            RelationalQueryResultReader.AddParameters(explain, command);
+            using var reader = explain.ExecuteReader();
+            while (reader.Read())
+                plan.Add(reader.GetString(3));
+        }
+
+        Assert.Equal(2, command.Statements.Length);
+        Assert.Equal(2, plan.Count(line => line.Contains("SEARCH customers USING", StringComparison.OrdinalIgnoreCase) &&
+                                           line.Contains("ix_amount_id", StringComparison.Ordinal)));
+        Assert.DoesNotContain(plan, line => line.Contains("SCAN customers", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(plan, line => line.Contains("TEMP B-TREE", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(plan, line => line.Contains("MATERIAL", StringComparison.OrdinalIgnoreCase));
+
+        var rawPage = RelationalQueryResultReader.Read(connection, command, (_, value) => value);
+        var page = QueryResultMaterializer.Materialize(
+            request,
+            options,
+            rawPage,
+            command.SelectedIndex,
+            command.IndexHintApplied,
+            sourceIncludesRequestedOffset: true,
+            sourceIncludesContinuation: true);
+        Assert.Equal(5, page.Rows.Count);
+        Assert.Equal(100, page.TotalCount);
+
+        var emptyRequest = Request(
+            request.Where,
+            request.Order,
+            Paging.OffsetLimit(200, 5),
+            ResultShape.TotalCount.Instance);
+        var emptyCommand = new SqliteQueryRenderer().Render(emptyRequest, options);
+        var rawEmptyPage = RelationalQueryResultReader.Read(connection, emptyCommand, (_, value) => value);
+        var emptyPage = QueryResultMaterializer.Materialize(
+            emptyRequest,
+            options,
+            rawEmptyPage,
+            emptyCommand.SelectedIndex,
+            emptyCommand.IndexHintApplied,
+            sourceIncludesRequestedOffset: true,
+            sourceIncludesContinuation: true);
+        Assert.Empty(emptyPage.Rows);
+        Assert.Equal(100, emptyPage.TotalCount);
     }
 
     [Fact]
@@ -1029,7 +1110,8 @@ public sealed class QueryRendererTests
 
         Assert.Contains("WHERE", command.CommandText, StringComparison.Ordinal);
         Assert.DoesNotContain("__groundwork_base WHERE ([name]", command.CommandText, StringComparison.Ordinal);
-        Assert.Contains("__groundwork_count_only", command.CommandText, StringComparison.Ordinal);
+        Assert.Equal(2, command.Statements.Length);
+        Assert.DoesNotContain("__groundwork_count_only", command.CommandText, StringComparison.Ordinal);
         Assert.Equal(3, command.Parameters.Length);
     }
 

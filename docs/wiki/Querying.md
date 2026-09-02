@@ -193,7 +193,7 @@ Projection.All
 Projection.ColumnsOnly(idColumn, emailColumn)
 
 ResultShape.Rows.Instance        // never adds a count expression
-ResultShape.TotalCount.Instance  // adds the provider window-count projection
+ResultShape.TotalCount.Instance  // adds a provider-side total count to the page result
 ```
 
 ## Paging
