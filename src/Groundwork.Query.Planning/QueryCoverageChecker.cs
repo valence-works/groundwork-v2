@@ -912,6 +912,9 @@ public static class QueryCoverageChecker
                 case Predicate.ElementOf elementOf:
                     yield return elementOf.Set.Name;
                     yield break;
+                case Predicate.ElementSubstring elementSubstring:
+                    yield return elementSubstring.Set.Name;
+                    yield break;
             }
         }
 

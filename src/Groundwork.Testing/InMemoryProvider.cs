@@ -645,13 +645,16 @@ internal class InMemoryStorageSession : IStorageSession, IProviderBoundStorageSe
         RefuseUnrenderedJoin(request);
         var suppliedOptions = options ?? QueryRenderOptions.Default;
         var searchKeyColumns = SearchKeyQueryMappings.For(Unit);
-        var executionRequest = QuerySearchKeyRewriter.Rewrite(request, searchKeyColumns);
+        var elementSearchKeyColumns = SearchKeyQueryMappings.ElementFor(Unit);
+        var executionRequest = QueryElementSearchKeyRewriter.Rewrite(
+            QuerySearchKeyRewriter.Rewrite(request, searchKeyColumns), elementSearchKeyColumns);
         var renderOptions = suppliedOptions.WithIdentityTieBreaks(Unit.Key.Columns
             .Select(name => QueryColumn(name))
             .Where(column => column is not null)
             .Select(column => column!)) with
         {
-            SearchKeyColumns = searchKeyColumns
+            SearchKeyColumns = searchKeyColumns,
+            ElementSearchKeyColumns = elementSearchKeyColumns
         };
         var validation = PortableQuerySemantics.Validate(executionRequest);
         if (!validation.IsPortable)
@@ -787,7 +790,9 @@ internal class InMemoryStorageSession : IStorageSession, IProviderBoundStorageSe
         {
             var suppliedOptions = options ?? QueryRenderOptions.Default;
             var searchKeyColumns = SearchKeyQueryMappings.For(Unit);
-            var executionRequest = QuerySearchKeyRewriter.Rewrite(request, searchKeyColumns);
+            var elementSearchKeyColumns = SearchKeyQueryMappings.ElementFor(Unit);
+            var executionRequest = QueryElementSearchKeyRewriter.Rewrite(
+                QuerySearchKeyRewriter.Rewrite(request, searchKeyColumns), elementSearchKeyColumns);
             var table = new TableId(Unit.Name);
             var scopeToken = new ColumnRef(
                 table,
@@ -802,7 +807,8 @@ internal class InMemoryStorageSession : IStorageSession, IProviderBoundStorageSe
                         .Select(column => column!))) with
             {
                 LatestPartitionColumns = [scopeToken],
-                SearchKeyColumns = searchKeyColumns
+                SearchKeyColumns = searchKeyColumns,
+                ElementSearchKeyColumns = elementSearchKeyColumns
             };
             var validation = PortableQuerySemantics.Validate(executionRequest);
             if (!validation.IsPortable)

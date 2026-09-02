@@ -234,11 +234,7 @@ public sealed class MySqlDialect : RelationalDialect
         byte[] bytes => bytes.ToArray(),
         JsonDocument document => document.RootElement.GetRawText(),
         JsonElement element => element.GetRawText(),
-        // The closed portable JSON forms (string, JsonDocument and JsonElement) are handled
-        // above. An arbitrary CLR graph needs generated metadata; this substrate deliberately
-        // refuses it rather than introducing reflection into an AOT-compatible provider.
-        _ when definition.Type == PortableType.Json => throw new NotSupportedException(
-            "MySQL/MariaDB JSON values must be supplied as a string, JsonDocument, or JsonElement."),
+        _ when definition.Type == PortableType.Json && value is not string => PortableJsonSerializer.Serialize(value),
         _ => value
     };
 

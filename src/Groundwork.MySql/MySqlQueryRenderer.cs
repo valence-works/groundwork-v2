@@ -140,6 +140,45 @@ public sealed class MySqlQueryRenderer : RelationalQueryRenderer
     protected override string RenderEndsWith(string expression, string parameter) =>
         "(CHAR_LENGTH(@" + parameter + ") = 0 OR BINARY RIGHT(" + expression + ", CHAR_LENGTH(@" + parameter + ")) = BINARY @" + parameter + ")";
 
+    protected override string RenderElementSubstring(
+        Predicate.ElementSubstring elementSubstring,
+        ICollection<QueryRenderParameter> parameters,
+        ref int parameterIndex)
+    {
+        if (elementSubstring.Set.Type != QueryType.String)
+            throw new QueryRenderException("GW-SEM-TYPE-005", "Element substring matching requires a typed string element set.");
+        if (elementSubstring.Anchor is not (Anchor.Contains or Anchor.EndsWith))
+            throw new QueryRenderException("GW-SEM-TEXT-003", "The requested element substring anchor is not portable; use Contains or EndsWith.");
+        var expression = Dialect.QuoteIdentifier(elementSubstring.Set.Name);
+        var parameter = AddElementParameter(QueryType.String, elementSubstring.Needle, parameters, ref parameterIndex);
+        var element = ApplyElementComparison("element.element_value", elementSubstring.StringComparison);
+        var needle = ApplyElementComparison("@" + parameter, elementSubstring.StringComparison);
+        var operation = elementSubstring.Anchor == Anchor.Contains
+            ? "INSTR(" + element + ", " + needle + ") > 0"
+            : "RIGHT(" + element + ", CHAR_LENGTH(" + needle + ")) = " + needle;
+        var emptyNeedle = "CHAR_LENGTH(@" + parameter + ") = 0";
+        var validJson = "CASE WHEN JSON_VALID(" + expression + ") = 1 THEN " + expression + " ELSE JSON_ARRAY() END";
+        var validArray = "CASE WHEN JSON_TYPE(" + validJson + ") = 'ARRAY' THEN " + validJson + " ELSE JSON_ARRAY() END";
+        var arrayGuard = "JSON_TYPE(" + validJson + ") = 'ARRAY'";
+        var table = "JSON_TABLE(" + validArray + ", '$[*]' COLUMNS (element_index FOR ORDINALITY, element_value LONGTEXT CHARACTER SET utf8mb4 PATH '$' NULL ON ERROR)) AS element";
+        var stringGuard = "JSON_TYPE(JSON_EXTRACT(" + validArray + ", CONCAT('$[', element.element_index - 1, ']'))) = 'STRING'";
+        return "(" + arrayGuard + " AND EXISTS (SELECT 1 FROM " + table + " WHERE " + stringGuard + " AND (" + emptyNeedle + " OR " + operation + ")))";
+    }
+
+    private static string ApplyElementComparison(string expression, QueryStringComparisonPolicy policy) => policy switch
+    {
+        QueryStringComparisonPolicy.Ordinal => "BINARY " + expression,
+        QueryStringComparisonPolicy.AsciiIgnoreCase => ApplyAsciiFold(expression),
+        _ => throw new QueryRenderException("GW-SEM-TEXT-001", "Element substring matching requires an explicit portable comparison policy.")
+    };
+
+    private static string ApplyAsciiFold(string expression)
+    {
+        foreach (var letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+            expression = "REPLACE(" + expression + " COLLATE utf8mb4_bin, '" + letter + "', '" + char.ToLowerInvariant(letter) + "')";
+        return expression + " COLLATE utf8mb4_bin";
+    }
+
     internal static string RenderOrdinalKey(string expression) =>
         "HEX(CONVERT(" + expression + " USING utf16))";
 }

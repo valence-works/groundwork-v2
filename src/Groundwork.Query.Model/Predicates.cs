@@ -108,6 +108,29 @@ public abstract record Predicate
         public SetQuantifier Quantifier { get; }
     }
 
+    /// <summary>Matches a substring against at least one string element in a typed set.</summary>
+    public sealed record ElementSubstring : Predicate
+    {
+        public ElementSubstring(
+            ElementSetRef set,
+            string needle,
+            Anchor anchor,
+            QueryStringComparisonPolicy stringComparison = QueryStringComparisonPolicy.Ordinal)
+        {
+            Set = set ?? throw new ArgumentNullException(nameof(set));
+            if (!QueryConstant.IsWellFormedUtf16(needle ?? throw new ArgumentNullException(nameof(needle))))
+                throw new ArgumentException("Substring needle must contain well-formed UTF-16.", nameof(needle));
+            Needle = needle;
+            Anchor = anchor;
+            StringComparison = stringComparison;
+        }
+
+        public ElementSetRef Set { get; }
+        public string Needle { get; }
+        public Anchor Anchor { get; }
+        public QueryStringComparisonPolicy StringComparison { get; }
+    }
+
     public sealed record ColumnCompare : Predicate
     {
         public ColumnCompare(ColumnRef left, CompareOp op, ColumnRef right)

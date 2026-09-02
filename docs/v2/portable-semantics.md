@@ -24,7 +24,25 @@ which `Validate` returns no refusals.
   logic. `ElementOf(Any)` is false for an empty owner, so its complement is
   true for an empty owner. Element sets declare an exact element type; legacy
   untyped set references are refused rather than allowing provider-specific
-  JSON/BSON element coercion.
+  JSON/BSON element coercion. `ElementSubstring(Any)` applies `Contains` or
+  `EndsWith` independently to each string element: null/missing/malformed
+  owners and empty arrays do not match, null or non-string elements do not
+  match, an empty needle matches every string element, duplicates do not
+  change the result, and adjacent elements are never concatenated. Its
+  needle is never silently truncated: a needle longer than an element simply does
+  not match, and provider/request size limits refuse the query rather than
+  altering it.
+  Its comparison policy is explicit: raw arrays admit `Ordinal` or the exact ASCII A-Z
+  `AsciiIgnoreCase` fold, while `UnicodeOrdinalIgnoreCase` is admitted only when the JSON column
+  declares a versioned persisted per-element search-key array and the query resolves that mapping.
+  A missing or mismatched mapping is refused before provider I/O. Culture-sensitive behavior is refused.
+  `MaximumElementCodeUnits`, when declared, must be positive; writes and backfills refuse an
+  over-bound or ill-formed UTF-16 string instead of truncating it. Null and non-string members keep
+  their position as JSON null in the parallel key array.
+  Native expansion is server-evaluated, but remains bounded-scan-only until
+  a provider declares a compatible element search-key index, so coverage
+  planning refuses it with `GW-COVER-016` unless the caller records an
+  `AcceptedScan`.
 - Text accepted for provider planning is explicitly `Ordinal`. Ordinal
   `StartsWith` is lowered to an exact `[prefix, successor)` range on the base
   column and does not create a derived column. `UnicodeOrdinalIgnoreCase` and

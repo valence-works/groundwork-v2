@@ -1,4 +1,6 @@
 using Groundwork.Kernel;
+using Groundwork.Kernel.Schema;
+using System.Text.Json.Nodes;
 using Xunit;
 
 namespace Groundwork.Kernel.Tests;
@@ -223,6 +225,278 @@ public sealed class Q9SearchKeyTests
         }));
     }
 
+    [Fact]
+    public void Element_search_key_expansion_preserves_positions_and_unicode_ordinal_keys()
+    {
+        var physical = SearchKeyProjection.Expand(ElementUnit());
+
+        var key = Assert.Single(physical.Columns, column => column.Name == "__groundwork_search_workflowIds");
+        Assert.Equal(PortableType.Json, key.Type);
+        Assert.True(key.IsNullable);
+        var derived = Assert.Single(physical.DerivedColumns);
+        Assert.Equal(PortableProjection.ElementBoundarySearchKey, derived.Projection);
+        Assert.Equal(
+            "groundwork-element-search-key-array-v1+" +
+            "max-450+" +
+            PortableStringComparison.GetSearchKeyAlgorithmId(PortableStringComparisonPolicy.UnicodeOrdinalIgnoreCase),
+            derived.AlgorithmId);
+
+        var values = SearchKeyProjection.Populate(
+            physical,
+            new Dictionary<string, object?>
+            {
+                ["id"] = 1,
+                ["workflowIds"] = new object?[] { "Örn", 42, null, "WORK" }
+            });
+
+        var document = Assert.IsAssignableFrom<IReadOnlyList<string?>>(values["__groundwork_search_workflowIds"]);
+        Assert.Equal(
+            [
+                PortableStringComparison.CreateSearchKey("Örn", PortableStringComparisonPolicy.UnicodeOrdinalIgnoreCase),
+                null,
+                null,
+                PortableStringComparison.CreateSearchKey("WORK", PortableStringComparisonPolicy.UnicodeOrdinalIgnoreCase)
+            ],
+            document);
+    }
+
+    [Fact]
+    public void Element_search_key_population_supports_an_unexpanded_logical_declaration()
+    {
+        var values = SearchKeyProjection.Populate(
+            ElementUnit(),
+            new Dictionary<string, object?>
+            {
+                ["id"] = 1,
+                ["workflowIds"] = new[] { "Örn" }
+            });
+
+        var document = Assert.IsAssignableFrom<IReadOnlyList<string?>>(values["__groundwork_search_workflowIds"]);
+        Assert.Equal(
+            PortableStringComparison.CreateSearchKey("Örn", PortableStringComparisonPolicy.UnicodeOrdinalIgnoreCase),
+            document[0]);
+    }
+
+    [Fact]
+    public void Element_search_key_refuses_ill_formed_string_values_instead_of_silently_dropping_them()
+    {
+        var failure = Assert.Throws<InvalidOperationException>(() => SearchKeyProjection.Populate(
+            SearchKeyProjection.Expand(ElementUnit()),
+            new Dictionary<string, object?>
+            {
+                ["id"] = 1,
+                ["workflowIds"] = new[] { "\uD800" }
+            }));
+
+        Assert.Contains("ill-formed UTF-16", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Element_search_key_refuses_values_over_the_declared_element_bound()
+    {
+        var unit = SearchKeyProjection.Expand(new StorageUnit
+        {
+            Id = new StorageUnitId("bounded-elements"),
+            Name = "bounded_elements",
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new ColumnDefinition
+                {
+                    Name = "workflowIds",
+                    Type = PortableType.Json,
+                    ElementSearchKey = new ElementSearchKeyDefinition
+                    {
+                        Collation = PortableCollation.UnicodeOrdinalIgnoreCase,
+                        MaximumElementCodeUnits = 2
+                    }
+                }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        });
+
+        var failure = Assert.Throws<InvalidOperationException>(() => SearchKeyProjection.Populate(
+            unit,
+            new Dictionary<string, object?> { ["id"] = 1, ["workflowIds"] = new[] { "long" } }));
+
+        Assert.Contains("MaximumElementCodeUnits", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Element_search_key_reads_json_nodes_without_losing_string_elements()
+    {
+        var values = SearchKeyProjection.Populate(
+            SearchKeyProjection.Expand(ElementUnit()),
+            new Dictionary<string, object?>
+            {
+                ["id"] = 1,
+                ["workflowIds"] = new JsonArray("Örn", 42, null)
+            });
+
+        var key = Assert.IsAssignableFrom<IReadOnlyList<string?>>(values["__groundwork_search_workflowIds"]);
+        Assert.Equal(
+            PortableStringComparison.CreateSearchKey("Örn", PortableStringComparisonPolicy.UnicodeOrdinalIgnoreCase),
+            key[0]);
+        Assert.Null(key[1]);
+        Assert.Null(key[2]);
+    }
+
+    [Fact]
+    public void Element_search_key_treats_a_dictionary_as_malformed_json_instead_of_an_array()
+    {
+        var values = SearchKeyProjection.Populate(
+            SearchKeyProjection.Expand(ElementUnit()),
+            new Dictionary<string, object?>
+            {
+                ["id"] = 1,
+                ["workflowIds"] = new Dictionary<string, object?> { ["value"] = "WORK" }
+            });
+
+        Assert.Null(values["__groundwork_search_workflowIds"]);
+    }
+
+    [Fact]
+    public void Element_search_key_column_is_nullable_when_a_non_nullable_owner_is_malformed()
+    {
+        var logical = ElementUnit() with
+        {
+            Columns = [.. ElementUnit().Columns.Select(column => column.Name == "workflowIds"
+                ? column with { IsNullable = false }
+                : column)]
+        };
+        var physical = SearchKeyProjection.Expand(logical);
+
+        Assert.True(physical.Columns.Single(column => column.Name == "__groundwork_search_workflowIds").IsNullable);
+        var values = SearchKeyProjection.Populate(
+            physical,
+            new Dictionary<string, object?>
+            {
+                ["id"] = 1,
+                ["workflowIds"] = new Dictionary<string, object?> { ["value"] = "WORK" }
+            });
+
+        Assert.Null(values["__groundwork_search_workflowIds"]);
+    }
+
+    [Fact]
+    public void Adding_an_element_search_key_plans_add_then_authorized_derived_backfill()
+    {
+        var logical = ElementUnit() with
+        {
+            Columns = [.. ElementUnit().Columns.Select(column => column with { ElementSearchKey = null })]
+        };
+        var desired = SearchKeyProjection.Expand(ElementUnit());
+        var initial = AppliedState(logical);
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            new PhysicalSchemaTarget(new SchemaSubject(desired), new ProviderIdentity("test", "1.0")),
+            PhysicalSchemaHistoryState.FromApplied(initial),
+            DateTimeOffset.UnixEpoch);
+
+        var operations = plan.Operations.ToArray();
+        var add = Assert.Single(operations.OfType<AddColumnOperation>(), operation =>
+            operation.Column.Name == "__groundwork_search_workflowIds");
+        var backfill = Assert.Single(operations.OfType<BackfillColumnOperation>(), operation =>
+            operation.Derived?.Projection == PortableProjection.ElementBoundarySearchKey);
+        Assert.True(backfill.RequiresAuthorization);
+        Assert.True(Array.IndexOf(operations, add) < Array.IndexOf(operations, backfill));
+    }
+
+    [Fact]
+    public void Changing_an_element_search_key_algorithm_plans_an_authorized_derived_backfill()
+    {
+        var initialUnit = SearchKeyProjection.Expand(ElementUnit());
+        var initial = AppliedState(initialUnit);
+        var changedLogical = ElementUnit() with
+        {
+            Columns = [.. ElementUnit().Columns.Select(column => column.Name == "workflowIds"
+                ? column with
+                {
+                    ElementSearchKey = new ElementSearchKeyDefinition
+                    {
+                        Collation = PortableCollation.OrdinalIgnoreCase,
+                        MaximumElementCodeUnits = 450
+                    }
+                }
+                : column)]
+        };
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            new PhysicalSchemaTarget(
+                new SchemaSubject(SearchKeyProjection.Expand(changedLogical)),
+                new ProviderIdentity("test", "1.0")),
+            PhysicalSchemaHistoryState.FromApplied(initial),
+            DateTimeOffset.UnixEpoch);
+
+        var backfill = Assert.Single(plan.Operations.OfType<BackfillColumnOperation>(), operation =>
+            operation.Derived?.Projection == PortableProjection.ElementBoundarySearchKey);
+        Assert.True(plan.IsApplicable, string.Join("; ", plan.Refusals.Select(refusal => refusal.Message)));
+        Assert.True(backfill.RequiresAuthorization);
+        Assert.NotEqual(
+            initialUnit.DerivedColumns.Single().AlgorithmId,
+            backfill.Derived!.AlgorithmId);
+    }
+
+    [Fact]
+    public void Changing_an_element_bound_plans_an_authorized_validation_backfill()
+    {
+        var initial = AppliedState(SearchKeyProjection.Expand(ElementUnit()));
+        var changedLogical = ElementUnit() with
+        {
+            Columns = [.. ElementUnit().Columns.Select(column => column.Name == "workflowIds"
+                ? column with
+                {
+                    ElementSearchKey = column.ElementSearchKey! with { MaximumElementCodeUnits = 225 }
+                }
+                : column)]
+        };
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            new PhysicalSchemaTarget(
+                new SchemaSubject(SearchKeyProjection.Expand(changedLogical)),
+                new ProviderIdentity("test", "1.0")),
+            PhysicalSchemaHistoryState.FromApplied(initial),
+            DateTimeOffset.UnixEpoch);
+
+        var backfill = Assert.Single(plan.Operations.OfType<BackfillColumnOperation>(), operation =>
+            operation.Derived?.Projection == PortableProjection.ElementBoundarySearchKey);
+        Assert.True(backfill.RequiresAuthorization);
+        Assert.Contains("max-225", backfill.Derived!.AlgorithmId, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Applied_state_omits_legacy_null_element_keys_and_round_trips_declared_keys()
+    {
+        var legacyUnit = ElementUnit() with
+        {
+            Columns = [.. ElementUnit().Columns.Select(column => column with { ElementSearchKey = null })]
+        };
+        var legacyJson = PhysicalSchemaAppliedStateSerializer.Serialize(AppliedState(legacyUnit));
+
+        Assert.DoesNotContain("elementSearchKey", legacyJson, StringComparison.Ordinal);
+        Assert.Equal(legacyJson, PhysicalSchemaAppliedStateSerializer.Serialize(
+            PhysicalSchemaAppliedStateSerializer.Deserialize(legacyJson)));
+
+        var declaredJson = PhysicalSchemaAppliedStateSerializer.Serialize(AppliedState(ElementUnit()));
+        Assert.Contains("elementSearchKey", declaredJson, StringComparison.Ordinal);
+        var restored = PhysicalSchemaAppliedStateSerializer.Deserialize(declaredJson);
+        Assert.Equal(
+            PortableCollation.UnicodeOrdinalIgnoreCase,
+            restored.Snapshot.Subject.Columns.Single(column => column.Name == "workflowIds").ElementSearchKey!.Collation);
+    }
+
+    private static PhysicalSchemaAppliedState AppliedState(StorageUnit unit)
+    {
+        var target = new PhysicalSchemaTarget(new SchemaSubject(unit), new ProviderIdentity("test", "1.0"));
+        var plan = PhysicalSchemaDiffPlanner.Plan(target, PhysicalSchemaHistoryState.Empty, DateTimeOffset.UnixEpoch);
+        return plan.Complete(
+            plan.Operations
+                .Where(operation => operation.Kind != PhysicalSchemaOperationKind.PublishAppliedState)
+                .Select(operation => new PhysicalSchemaOperationAcknowledgement(
+                    operation.Identity,
+                    operation.Fingerprint,
+                    DateTimeOffset.UnixEpoch))
+                .ToArray(),
+            DateTimeOffset.UnixEpoch);
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("")]
@@ -277,6 +551,27 @@ public sealed class Q9SearchKeyTests
                 {
                     CultureName = cultureName,
                     MaximumExpansionFactor = 12
+                }
+            }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] }
+    };
+
+    private static StorageUnit ElementUnit() => new()
+    {
+        Id = new StorageUnitId("workflows"),
+        Name = "workflows",
+        Columns =
+        [
+            new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false },
+            new ColumnDefinition
+            {
+                Name = "workflowIds",
+                Type = PortableType.Json,
+                ElementSearchKey = new ElementSearchKeyDefinition
+                {
+                    Collation = PortableCollation.UnicodeOrdinalIgnoreCase,
+                    MaximumElementCodeUnits = 450
                 }
             }
         ],

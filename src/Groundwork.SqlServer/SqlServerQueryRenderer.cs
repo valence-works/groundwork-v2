@@ -288,6 +288,49 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
             : "(" + arrayGuard + " AND " + string.Join(" AND ", clauses.Select(clause => "EXISTS (SELECT 1 FROM OPENJSON(" + expression + ") AS element WHERE " + clause + ")")) + ")";
     }
 
+    protected override string RenderElementSubstring(
+        Predicate.ElementSubstring elementSubstring,
+        ICollection<QueryRenderParameter> parameters,
+        ref int parameterIndex)
+    {
+        if (elementSubstring.Set.Type != QueryType.String)
+            throw new QueryRenderException("GW-SEM-TYPE-005", "Element substring matching requires a typed string element set.");
+        if (elementSubstring.Anchor is not (Anchor.Contains or Anchor.EndsWith))
+            throw new QueryRenderException("GW-SEM-TEXT-003", "The requested element substring anchor is not portable; use Contains or EndsWith.");
+        if (elementSubstring.Anchor == Anchor.Contains && elementSubstring.Needle.Length > 8_000)
+        {
+            throw new QueryRenderException(
+                "GW-QUERY-030",
+                "SQL Server CHARINDEX refuses element-substring Contains needles longer than 8,000 UTF-16 code units; declare MaximumElementCodeUnits so an over-bound request can resolve before provider I/O.");
+        }
+        var expression = Dialect.QuoteIdentifier(elementSubstring.Set.Name);
+        var parameter = AddElementParameter(QueryType.String, elementSubstring.Needle, parameters, ref parameterIndex);
+        var element = ApplyElementComparison("element.[value]", elementSubstring.StringComparison);
+        var needle = ApplyElementComparison("@" + parameter, elementSubstring.StringComparison);
+        var operation = elementSubstring.Anchor == Anchor.Contains
+            ? "CHARINDEX(" + needle + ", " + element + ") > 0"
+            : "RIGHT(" + element + ", DATALENGTH(" + needle + ") / 2) = " + needle;
+        var emptyNeedle = "DATALENGTH(@" + parameter + ") = 0";
+        var arrayGuard = "ISJSON(" + expression + ") = 1 AND LEFT(LTRIM(" + expression + "), 1) = '['";
+        var validArray = "CASE WHEN " + arrayGuard + " THEN " + expression + " ELSE '[]' END";
+        return "(" + arrayGuard + " AND EXISTS (SELECT 1 FROM OPENJSON(" + validArray + ") AS element WHERE element.[type] = 1 AND (" + emptyNeedle + " OR " + operation + ")))";
+    }
+
+    private static string ApplyElementComparison(string expression, QueryStringComparisonPolicy policy) => policy switch
+    {
+        QueryStringComparisonPolicy.Ordinal => expression + " COLLATE Latin1_General_100_BIN2",
+        QueryStringComparisonPolicy.AsciiIgnoreCase => ApplyAsciiFold(expression) + " COLLATE Latin1_General_100_BIN2",
+        _ => throw new QueryRenderException("GW-SEM-TEXT-001", "Element substring matching requires an explicit portable comparison policy.")
+    };
+
+    private static string ApplyAsciiFold(string expression)
+    {
+        expression += " COLLATE Latin1_General_100_BIN2";
+        foreach (var letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+            expression = "REPLACE(" + expression + ", '" + letter + "', '" + char.ToLowerInvariant(letter) + "')";
+        return expression;
+    }
+
     protected override string RenderPaging(
         Paging paging,
         ICollection<QueryRenderParameter> parameters,

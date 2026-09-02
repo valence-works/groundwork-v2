@@ -783,6 +783,58 @@ public sealed class PortabilityTests
     }
 
     [Fact]
+    public void Element_search_key_requires_a_json_source_column()
+    {
+        var result = Validate(Unit([
+            Column("value", PortableType.String) with
+            {
+                ElementSearchKey = new ElementSearchKeyDefinition
+                {
+                    Collation = PortableCollation.UnicodeOrdinalIgnoreCase
+                }
+            }]));
+
+        var refusal = Assert.Single(result.Refusals, item => item.Code == "GW-PORT-016");
+        Assert.Equal("columns.value.elementSearchKey", refusal.Path);
+        Assert.Contains("JSON source", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Element_search_key_rejects_a_non_portable_collation()
+    {
+        var result = Validate(Unit([
+            Column("values", PortableType.Json) with
+            {
+                ElementSearchKey = new ElementSearchKeyDefinition
+                {
+                    Collation = PortableCollation.Ordinal
+                }
+            }]));
+
+        var refusal = Assert.Single(result.Refusals, item => item.Code == "GW-PORT-016");
+        Assert.Equal("columns.values.elementSearchKey.collation", refusal.Path);
+        Assert.Contains("OrdinalIgnoreCase", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Element_search_key_rejects_a_non_positive_element_bound()
+    {
+        var result = Validate(Unit([
+            Column("values", PortableType.Json) with
+            {
+                ElementSearchKey = new ElementSearchKeyDefinition
+                {
+                    Collation = PortableCollation.UnicodeOrdinalIgnoreCase,
+                    MaximumElementCodeUnits = 0
+                }
+            }]));
+
+        var refusal = Assert.Single(result.Refusals, item => item.Code == "GW-PORT-016");
+        Assert.Equal("columns.values.elementSearchKey.maximumElementCodeUnits", refusal.Path);
+        Assert.Contains("positive", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Retention_order_column_must_be_non_nullable_and_orderable()
     {
         var result = Validate(

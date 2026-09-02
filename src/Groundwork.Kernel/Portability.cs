@@ -147,6 +147,7 @@ public static class PortabilityValidator
         ValidateIndexBudget(indexes, byName, diagnostics);
         ValidateGeneration(unit, columns, diagnostics);
         ValidateCollation(columns, diagnostics);
+        ValidateElementSearchKeys(columns, diagnostics);
         ValidateLocaleSortKeys(columns, diagnostics);
         ValidateRetention(unit.Retention ?? context.Retention, byName, diagnostics);
         ValidateMongoKeyOrder(unit, context, diagnostics);
@@ -915,6 +916,37 @@ public static class PortabilityValidator
                 $"columns.{column.Name}.localeSortKey");
             if (refusal is not null)
                 diagnostics.Add(refusal);
+        }
+    }
+
+    private static void ValidateElementSearchKeys(
+        IReadOnlyList<ColumnDefinition> columns,
+        ICollection<PortabilityRefusal> diagnostics)
+    {
+        foreach (var column in columns.Where(column => column is not null && column.ElementSearchKey is not null))
+        {
+            var declaration = column.ElementSearchKey!;
+            if (column.Type != PortableType.Json)
+            {
+                diagnostics.Add(new(
+                    "GW-PORT-016",
+                    $"Element search keys require a JSON source column; '{column.Name}' is '{column.Type}'.",
+                    $"columns.{column.Name}.elementSearchKey"));
+            }
+            if (declaration.Collation is not (PortableCollation.OrdinalIgnoreCase or PortableCollation.UnicodeOrdinalIgnoreCase))
+            {
+                diagnostics.Add(new(
+                    "GW-PORT-016",
+                    $"Element search-key column '{column.Name}' requires OrdinalIgnoreCase or UnicodeOrdinalIgnoreCase collation.",
+                    $"columns.{column.Name}.elementSearchKey.collation"));
+            }
+            if (declaration.MaximumElementCodeUnits is <= 0)
+            {
+                diagnostics.Add(new(
+                    "GW-PORT-016",
+                    $"Element search-key column '{column.Name}' requires a positive MaximumElementCodeUnits value when a bound is supplied.",
+                    $"columns.{column.Name}.elementSearchKey.maximumElementCodeUnits"));
+            }
         }
     }
 

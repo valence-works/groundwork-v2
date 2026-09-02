@@ -118,7 +118,7 @@ internal static class JoinedQueryValidation
 
     private static bool ContainsElementSet(Predicate predicate) => predicate switch
     {
-        Predicate.ElementOf => true,
+        Predicate.ElementOf or Predicate.ElementSubstring => true,
         Predicate.Not not => ContainsElementSet(not.Inner),
         Predicate.And and => and.Terms.Any(ContainsElementSet),
         Predicate.Or or => or.Terms.Any(ContainsElementSet),

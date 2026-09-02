@@ -80,4 +80,43 @@ public sealed class SqliteQueryRenderer : RelationalQueryRenderer
             ? "(" + arrayGuard + " AND EXISTS (SELECT 1 FROM json_each(" + expression + ") WHERE " + string.Join(" OR ", clauses) + "))"
             : "(" + arrayGuard + " AND " + string.Join(" AND ", clauses.Select(clause => "EXISTS (SELECT 1 FROM json_each(" + expression + ") WHERE " + clause + ")")) + ")";
     }
+
+    protected override string RenderElementSubstring(
+        Predicate.ElementSubstring elementSubstring,
+        ICollection<QueryRenderParameter> parameters,
+        ref int parameterIndex)
+    {
+        if (elementSubstring.Set.Type != QueryType.String)
+            throw new QueryRenderException("GW-SEM-TYPE-005", "Element substring matching requires a typed string element set.");
+        if (elementSubstring.Anchor is not (Anchor.Contains or Anchor.EndsWith))
+            throw new QueryRenderException("GW-SEM-TEXT-003", "The requested element substring anchor is not portable; use Contains or EndsWith.");
+        var expression = Dialect.QuoteIdentifier(elementSubstring.Set.Name);
+        var parameter = AddElementParameter(QueryType.String, elementSubstring.Needle, parameters, ref parameterIndex);
+        var element = ApplyElementComparison("json_each.value", elementSubstring.StringComparison);
+        var needle = ApplyElementComparison("@" + parameter, elementSubstring.StringComparison);
+        var operation = elementSubstring.Anchor == Anchor.Contains
+            ? "instr(" + element + ", " + needle + ") > 0"
+            : "substr(" + element + ", -length(" + needle + ")) = " + needle;
+        var emptyNeedle = "length(@" + parameter + ") = 0";
+        // json_each raises on malformed input even when it appears on the right side of AND.
+        // Feed it a guaranteed-valid empty array and retain the original array guard separately.
+        var validJson = "CASE WHEN json_valid(" + expression + ") = 1 THEN " + expression + " ELSE '[]' END";
+        var arrayValue = "CASE WHEN json_type(" + validJson + ") = 'array' THEN " + validJson + " ELSE '[]' END";
+        var arrayGuard = "json_type(" + validJson + ") = 'array'";
+        return "(" + arrayGuard + " AND EXISTS (SELECT 1 FROM json_each(" + arrayValue + ") WHERE json_each.type = 'text' AND (" + emptyNeedle + " OR " + operation + ")))";
+    }
+
+    private static string ApplyElementComparison(string expression, QueryStringComparisonPolicy policy) => policy switch
+    {
+        QueryStringComparisonPolicy.Ordinal => expression + " COLLATE GROUNDWORK_UTF16_ORDINAL",
+        QueryStringComparisonPolicy.AsciiIgnoreCase => ApplyAsciiFold(expression) + " COLLATE GROUNDWORK_UTF16_ORDINAL",
+        _ => throw new QueryRenderException("GW-SEM-TEXT-001", "Element substring matching requires an explicit portable comparison policy.")
+    };
+
+    private static string ApplyAsciiFold(string expression)
+    {
+        foreach (var letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+            expression = "replace(" + expression + ", '" + letter + "', '" + char.ToLowerInvariant(letter) + "')";
+        return expression;
+    }
 }

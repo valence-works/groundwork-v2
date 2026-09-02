@@ -1227,6 +1227,7 @@ public sealed class QueryRendererTests
             new SqliteQueryRenderer(),
             new PostgreSqlQueryRenderer(),
             new SqlServerQueryRenderer(),
+            new MySqlQueryRenderer(),
             new MongoQueryRenderer()
         })
         {
@@ -1546,6 +1547,149 @@ public sealed class QueryRendererTests
     }
 
     [Fact]
+    public void Array_element_substring_uses_native_expansion_for_every_supported_provider()
+    {
+        var set = new ElementSetRef("workflowIds", QueryType.String);
+        var contains = Request(
+            new Predicate.ElementSubstring(set, "flow-id", Anchor.Contains),
+            [], Paging.None, ResultShape.Rows.Instance);
+        var endsWith = Request(
+            new Predicate.ElementSubstring(set, "ID", Anchor.EndsWith, QueryStringComparisonPolicy.AsciiIgnoreCase),
+            [], Paging.None, ResultShape.Rows.Instance);
+
+        var sqlite = new SqliteQueryRenderer().Render(contains);
+        var postgres = new PostgreSqlQueryRenderer().Render(contains);
+        var sqlServer = new SqlServerQueryRenderer().Render(contains);
+        var mySql = new MySqlQueryRenderer().Render(contains);
+        var mongo = new MongoQueryRenderer().Render(contains);
+
+        Assert.Contains("json_each", sqlite.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("json_each.type = 'text'", sqlite.CommandText, StringComparison.Ordinal);
+        Assert.Contains("jsonb_array_elements", postgres.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("jsonb_typeof(element.value) = 'string'", postgres.CommandText, StringComparison.Ordinal);
+        Assert.Contains("OPENJSON", sqlServer.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("element.[type] = 1", sqlServer.CommandText, StringComparison.Ordinal);
+        Assert.Contains("JSON_TABLE", mySql.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("JSON_TYPE(JSON_EXTRACT", mySql.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("$expr", mongo.Filter.ToString(), StringComparison.Ordinal);
+        Assert.Contains("$map", mongo.Filter.ToString(), StringComparison.Ordinal);
+        Assert.Contains("$indexOfCP", mongo.Filter.ToString(), StringComparison.Ordinal);
+        Assert.Single(sqlite.Parameters);
+        Assert.Single(postgres.Parameters);
+        Assert.Single(sqlServer.Parameters);
+        Assert.Single(mySql.Parameters);
+
+        var foldedSqlite = new SqliteQueryRenderer().Render(endsWith);
+        var foldedPostgres = new PostgreSqlQueryRenderer().Render(endsWith);
+        var foldedSqlServer = new SqlServerQueryRenderer().Render(endsWith);
+        var foldedMySql = new MySqlQueryRenderer().Render(endsWith);
+        var foldedMongo = new MongoQueryRenderer().Render(endsWith);
+        Assert.Contains("replace", foldedSqlite.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("translate", foldedPostgres.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("REPLACE", foldedSqlServer.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("COLLATE Latin1_General_100_BIN2", foldedSqlServer.CommandText, StringComparison.Ordinal);
+        Assert.Contains("REPLACE(element.[value] COLLATE Latin1_General_100_BIN2", foldedSqlServer.CommandText, StringComparison.Ordinal);
+        Assert.Contains("REPLACE", foldedMySql.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("$anyElementTrue", foldedMongo.Filter.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("$replaceAll", foldedMongo.Filter.ToString(), StringComparison.OrdinalIgnoreCase);
+
+        var oversizedContains = Request(
+            new Predicate.ElementSubstring(set, new string('x', 8_001), Anchor.Contains),
+            [], Paging.None, ResultShape.Rows.Instance);
+        var sqlServerLimit = Assert.Throws<QueryRenderException>(() =>
+            new SqlServerQueryRenderer().Render(oversizedContains));
+        Assert.Equal("GW-QUERY-030", sqlServerLimit.Code);
+
+        var boundedOptions = QueryRenderOptions.Default with
+        {
+            ElementSearchKeyColumns = new Dictionary<string, QueryElementSearchKeyColumn>
+            {
+                ["workflowIds"] = new(
+                    "workflowIds",
+                    "__groundwork_search_workflowIds",
+                    QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase,
+                    450)
+            }
+        };
+        var boundedSqlServer = new SqlServerQueryRenderer().Render(oversizedContains, boundedOptions);
+        Assert.True(boundedSqlServer.IsMatchNone);
+        Assert.Empty(boundedSqlServer.Parameters);
+
+        var unicode = Request(
+            new Predicate.ElementSubstring(set, "ID", Anchor.EndsWith, QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase),
+            [], Paging.None, ResultShape.Rows.Instance);
+        Assert.All(new object[] { new SqliteQueryRenderer(), new PostgreSqlQueryRenderer(), new SqlServerQueryRenderer(), new MySqlQueryRenderer(), new MongoQueryRenderer() }, renderer =>
+        {
+            var failure = Assert.Throws<QueryRenderException>(() => Render(renderer, unicode));
+            Assert.Equal("GW-SEM-TEXT-001", failure.Code);
+        });
+
+        var mappedOptions = QueryRenderOptions.Default with
+        {
+            ElementSearchKeyColumns = new Dictionary<string, QueryElementSearchKeyColumn>
+            {
+                ["workflowIds"] = new(
+                    "workflowIds",
+                    "__groundwork_search_workflowIds",
+                    QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase,
+                    450)
+            }
+        };
+        var mappedSqlite = new SqliteQueryRenderer().Render(unicode, mappedOptions);
+        var mappedPostgres = new PostgreSqlQueryRenderer().Render(unicode, mappedOptions);
+        var mappedSqlServer = new SqlServerQueryRenderer().Render(unicode, mappedOptions);
+        var mappedMySql = new MySqlQueryRenderer().Render(unicode, mappedOptions);
+        var mappedMongo = new MongoQueryRenderer().Render(unicode, mappedOptions);
+        Assert.Contains("__groundwork_search_workflowIds", mappedSqlite.CommandText, StringComparison.Ordinal);
+        Assert.Contains("json_each", mappedSqlite.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("|000049|000044", mappedSqlite.Parameters.Single().Value);
+        Assert.Contains("__groundwork_search_workflowIds", mappedPostgres.CommandText, StringComparison.Ordinal);
+        Assert.Contains("jsonb_array_elements", mappedPostgres.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("__groundwork_search_workflowIds", mappedSqlServer.CommandText, StringComparison.Ordinal);
+        Assert.Contains("OPENJSON", mappedSqlServer.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("__groundwork_search_workflowIds", mappedMySql.CommandText, StringComparison.Ordinal);
+        Assert.Contains("JSON_TABLE", mappedMySql.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("__groundwork_search_workflowIds", mappedMongo.Filter.ToString(), StringComparison.Ordinal);
+        Assert.Contains("$substrCP", mappedMongo.Filter.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("regex", mappedMongo.Filter.ToString(), StringComparison.OrdinalIgnoreCase);
+
+        using var connection = new SqliteConnection("Data Source=:memory:");
+        connection.Open();
+        connection.CreateCollation("GROUNDWORK_UTF16_ORDINAL", string.CompareOrdinal);
+        using (var schema = connection.CreateCommand())
+        {
+            schema.CommandText = "CREATE TABLE customers (id INTEGER NOT NULL, workflowIds TEXT NULL); " +
+                "INSERT INTO customers VALUES (1, '[\"ab\",\"cd\"]'), (2, '[\"flow-id\"]'), " +
+                "(3, '[\"flow-\",\"id\"]'), (4, 'not-json'), (5, NULL), (6, '[]'), " +
+                "(7, '[\"flow-id\",\"flow-id\"]'), (8, '[\"WÖRKFLOW\"]'), (9, '[\"WORKFLOW\"]');";
+            schema.ExecuteNonQuery();
+        }
+        using var query = connection.CreateCommand();
+        query.CommandText = sqlite.CommandText;
+        foreach (var parameter in sqlite.Parameters)
+            query.Parameters.AddWithValue("@" + parameter.Name, parameter.Value ?? DBNull.Value);
+        using var reader = query.ExecuteReader();
+        var matchedIds = new List<long>();
+        while (reader.Read())
+            matchedIds.Add(reader.GetInt64(0));
+        Assert.Equal(new long[] { 2, 7 }, matchedIds);
+
+        var ascii = Request(
+            new Predicate.ElementSubstring(set, "workflow", Anchor.Contains, QueryStringComparisonPolicy.AsciiIgnoreCase),
+            [], Paging.None, ResultShape.Rows.Instance);
+        using var asciiQuery = connection.CreateCommand();
+        var asciiCommand = new SqliteQueryRenderer().Render(ascii);
+        asciiQuery.CommandText = asciiCommand.CommandText;
+        foreach (var parameter in asciiCommand.Parameters)
+            asciiQuery.Parameters.AddWithValue("@" + parameter.Name, parameter.Value ?? DBNull.Value);
+        using var asciiReader = asciiQuery.ExecuteReader();
+        var asciiIds = new List<long>();
+        while (asciiReader.Read())
+            asciiIds.Add(asciiReader.GetInt64(0));
+        Assert.Equal(new long[] { 9 }, asciiIds);
+    }
+
+    [Fact]
     public void Relational_not_nodes_use_total_complements_and_column_not_equal_rejects_nulls()
     {
         var notEqual = Request(
@@ -1708,6 +1852,7 @@ public sealed class QueryRendererTests
         SqliteQueryRenderer sqlite => sqlite.Render(request),
         PostgreSqlQueryRenderer postgres => postgres.Render(request),
         SqlServerQueryRenderer sqlServer => sqlServer.Render(request),
+        MySqlQueryRenderer mySql => mySql.Render(request),
         MongoQueryRenderer mongo => mongo.Render(request),
         _ => throw new ArgumentOutOfRangeException(nameof(renderer))
     };
@@ -1717,6 +1862,7 @@ public sealed class QueryRendererTests
         SqliteQueryRenderer sqlite => sqlite.Render(request, options),
         PostgreSqlQueryRenderer postgres => postgres.Render(request, options),
         SqlServerQueryRenderer sqlServer => sqlServer.Render(request, options),
+        MySqlQueryRenderer mySql => mySql.Render(request, options),
         MongoQueryRenderer mongo => mongo.Render(request, options),
         _ => throw new ArgumentOutOfRangeException(nameof(renderer))
     };

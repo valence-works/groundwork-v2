@@ -152,6 +152,7 @@ internal static class RelationalSessionPolicy
                 .Concat(physicalIndexNames.Where(pair => !suppliedOptions.PhysicalIndexNames.ContainsKey(pair.Key)))
                 .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
             SearchKeyColumns = SearchKeyQueryMappings.For(unit),
+            ElementSearchKeyColumns = SearchKeyQueryMappings.ElementFor(unit),
             LatestPartitionColumns = crossScope ? [scopeToken] : suppliedOptions.LatestPartitionColumns
         };
     }

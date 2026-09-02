@@ -746,6 +746,8 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
         PortableProjection.BoundarySearchKey => PortableStringComparison.SearchKeyAlgorithmId,
         PortableProjection.LocaleSortKey => throw new InvalidOperationException(
             $"Locale sort-key projection '{definition.Name}' requires an explicit algorithm identity."),
+        PortableProjection.ElementBoundarySearchKey => throw new InvalidOperationException(
+            $"Element search-key projection '{definition.Name}' requires an explicit algorithm identity."),
         PortableProjection.Sha256 => PortableStringComparison.LookupHashAlgorithmId,
         _ => throw new ArgumentOutOfRangeException(nameof(definition), definition.Projection, null)
     };
@@ -1003,7 +1005,8 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 .Concat(MongoSchemaTargets.PhysicalIndexNames(Unit)
                     .Where(pair => !suppliedOptions.PhysicalIndexNames.ContainsKey(pair.Key)))
                 .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
-            SearchKeyColumns = SearchKeyQueryMappings.For(Unit)
+            SearchKeyColumns = SearchKeyQueryMappings.For(Unit),
+            ElementSearchKeyColumns = SearchKeyQueryMappings.ElementFor(Unit)
         };
         var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);
         var reduction = executionSource.Result as ResultShape.Reduction;
@@ -1266,6 +1269,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 Indexes = ImmutableArray<QueryIndexDeclaration>.Empty,
                 PhysicalIndexNames = new Dictionary<string, string>(StringComparer.Ordinal),
                 SearchKeyColumns = SearchKeyQueryMappings.For(Unit),
+                ElementSearchKeyColumns = SearchKeyQueryMappings.ElementFor(Unit),
                 LatestPartitionColumns = [scopeToken]
             };
             var executionSource = QueryRequestExecution.WithProviderPredicate(
@@ -1848,7 +1852,8 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             Unit.Name,
             QueryRenderOptions.Default with
             {
-                SearchKeyColumns = SearchKeyQueryMappings.For(Unit)
+                SearchKeyColumns = SearchKeyQueryMappings.For(Unit),
+                ElementSearchKeyColumns = SearchKeyQueryMappings.ElementFor(Unit)
             });
         var set = new BsonDocument();
         foreach (var column in physical.Keys.OrderBy(column => column, StringComparer.Ordinal))
@@ -1887,7 +1892,8 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             Unit.Name,
             QueryRenderOptions.Default with
             {
-                SearchKeyColumns = SearchKeyQueryMappings.For(Unit)
+                SearchKeyColumns = SearchKeyQueryMappings.For(Unit),
+                ElementSearchKeyColumns = SearchKeyQueryMappings.ElementFor(Unit)
             });
         commandObserver?.Observe(new ProviderCommandEvent(
             "mongodb.delete-where",
@@ -3904,7 +3910,11 @@ internal static class SchemaIdentity
             ? PortableCollation.Ordinal
             : column.Collation,
         column.Generation,
-        column.Default is null ? "default:absent" : "default:present:" + column.Default.Value);
+        column.Default is null ? "default:absent" : "default:present:" + column.Default.Value) +
+        (column.ElementSearchKey is null
+            ? string.Empty
+            : "|element-search-key:" + column.ElementSearchKey.Collation + ":" +
+              (column.ElementSearchKey.MaximumElementCodeUnits?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "unbounded"));
 
     private static string Index(IndexDefinition index) => string.Join("|",
         index.Name, index.IsUnique, index.MissingValues, index.SchemaVersion,

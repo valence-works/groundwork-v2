@@ -175,6 +175,33 @@ public sealed record QuerySearchKeyColumn
     public bool SupportsPrefixPredicates { get; }
 }
 
+/// <summary>Maps a logical JSON string-array to its positional physical search-key array.</summary>
+public sealed record QueryElementSearchKeyColumn
+{
+    public QueryElementSearchKeyColumn(
+        string sourceColumn,
+        string physicalColumn,
+        QuerySearchKeyPolicy policy,
+        int? maximumElementCodeUnits = null)
+    {
+        if (string.IsNullOrWhiteSpace(sourceColumn))
+            throw new ArgumentException("A source column is required.", nameof(sourceColumn));
+        if (string.IsNullOrWhiteSpace(physicalColumn))
+            throw new ArgumentException("A physical column is required.", nameof(physicalColumn));
+        if (maximumElementCodeUnits is <= 0)
+            throw new ArgumentOutOfRangeException(nameof(maximumElementCodeUnits));
+        SourceColumn = sourceColumn;
+        PhysicalColumn = physicalColumn;
+        Policy = policy;
+        MaximumElementCodeUnits = maximumElementCodeUnits;
+    }
+
+    public string SourceColumn { get; }
+    public string PhysicalColumn { get; }
+    public QuerySearchKeyPolicy Policy { get; }
+    public int? MaximumElementCodeUnits { get; }
+}
+
 /// <summary>Provider-neutral knobs passed to a native query renderer.</summary>
 public sealed record QueryRenderOptions
 {
@@ -198,6 +225,7 @@ public sealed record QueryRenderOptions
             throw new ArgumentException("Driving identity columns cannot contain null references.", nameof(drivingIdentityColumns));
         PhysicalIndexNames = ImmutableDictionary<string, string>.Empty.WithComparers(StringComparer.Ordinal);
         SearchKeyColumns = ImmutableDictionary<string, QuerySearchKeyColumn>.Empty.WithComparers(StringComparer.Ordinal);
+        ElementSearchKeyColumns = ImmutableDictionary<string, QueryElementSearchKeyColumn>.Empty.WithComparers(StringComparer.Ordinal);
         LatestPartitionColumns = ImmutableArray<ColumnRef>.Empty;
     }
 
@@ -230,6 +258,9 @@ public sealed record QueryRenderOptions
 
     /// <summary>Provider-resolved logical-to-physical prefix search-key mappings.</summary>
     public IReadOnlyDictionary<string, QuerySearchKeyColumn> SearchKeyColumns { get; init; }
+
+    /// <summary>Provider-resolved logical-to-physical positional JSON element search-key mappings.</summary>
+    public IReadOnlyDictionary<string, QueryElementSearchKeyColumn> ElementSearchKeyColumns { get; init; }
 
     /// <summary>The maximum number of distinct values in one <c>In</c> predicate.</summary>
     public int InValueLimit { get; init; } = 1_000;

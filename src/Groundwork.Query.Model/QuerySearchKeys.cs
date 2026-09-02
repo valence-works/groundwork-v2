@@ -167,3 +167,72 @@ public static class QuerySearchKeyRewriter
         }
     }
 }
+
+/// <summary>Rewrites Unicode element-substring predicates to a persisted positional key array.</summary>
+public static class QueryElementSearchKeyRewriter
+{
+    public static QueryRequest Rewrite(
+        QueryRequest request,
+        IReadOnlyDictionary<string, QueryElementSearchKeyColumn> mappings)
+    {
+        if (request == null) throw new ArgumentNullException(nameof(request));
+        if (mappings == null) throw new ArgumentNullException(nameof(mappings));
+        var where = RewritePredicate(request.Where, mappings, allowBoundFold: true);
+        return ReferenceEquals(where, request.Where)
+            ? request
+            : new QueryRequest(request.Table, where, request.Order, request.Projection, request.Paging,
+                request.Result, request.LatestPerKey, request.AcceptedScan, request.Distinct, request.Join)
+            {
+                CanonicalPredicate = request.CanonicalPredicate,
+                ContinuationFingerprint = request.ContinuationFingerprint,
+                ContinuationBindingDiscriminator = request.ContinuationBindingDiscriminator
+            };
+    }
+
+    private static Predicate RewritePredicate(
+        Predicate predicate,
+        IReadOnlyDictionary<string, QueryElementSearchKeyColumn> mappings,
+        bool allowBoundFold)
+    {
+        switch (predicate)
+        {
+            case Predicate.ElementSubstring substring:
+                if (substring.Set.Type != QueryType.String ||
+                    !mappings.TryGetValue(substring.Set.Name, out var mapping))
+                    return substring;
+                var isUnicode = substring.StringComparison == QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase;
+                if (!string.Equals(mapping.SourceColumn, substring.Set.Name, StringComparison.Ordinal) ||
+                    (isUnicode && mapping.Policy != QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase))
+                {
+                    if (!isUnicode)
+                        return substring;
+                    throw new QueryRenderException(
+                        "GW-QUERY-031",
+                        $"Element substring set '{substring.Set.Name}' declares UnicodeOrdinalIgnoreCase, " +
+                        $"but its schema element search-key mapping declares '{mapping.Policy}'. " +
+                        "Rebuild the element search-key projection with the matching policy.");
+                }
+                if (allowBoundFold &&
+                    mapping.MaximumElementCodeUnits is int maximumElementCodeUnits &&
+                    substring.Needle.Length > maximumElementCodeUnits)
+                {
+                    return Predicate.AlwaysFalse.Instance;
+                }
+                if (!isUnicode)
+                    return substring;
+                return new Predicate.ElementSubstring(
+                    new ElementSetRef(mapping.PhysicalColumn, QueryType.String),
+                    QuerySearchKeys.Encode(substring.Needle, mapping.Policy),
+                    substring.Anchor,
+                    QueryStringComparisonPolicy.Ordinal);
+            case Predicate.And and:
+                return new Predicate.And(and.Terms.Select(term => RewritePredicate(term, mappings, allowBoundFold)));
+            case Predicate.Or or:
+                return new Predicate.Or(or.Terms.Select(term => RewritePredicate(term, mappings, allowBoundFold)));
+            case Predicate.Not not:
+                return new Predicate.Not(RewritePredicate(not.Inner, mappings, allowBoundFold: false));
+            default:
+                return predicate;
+        }
+    }
+}

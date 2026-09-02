@@ -556,6 +556,30 @@ public static class ExpressionLowerer
             var lambdaArgument = call.Method.IsStatic && call.Arguments.Count != 0 ? call.Arguments[call.Arguments.Count - 1] : call.Arguments.SingleOrDefault();
             if (call.Method.Name is "Any" or "All" && call.Method.DeclaringType == typeof(Enumerable) && collectionExpression is MemberExpression collection && model.ElementSets.ContainsKey(collection.Member.Name) && lambdaArgument is not null && Unwrap(lambdaArgument) is LambdaExpression lambda)
             {
+                if (call.Method.Name == "Any" && lambda.Body is MethodCallExpression elementStringCall &&
+                    elementStringCall.Object == lambda.Parameters[0] &&
+                    elementStringCall.Method.DeclaringType == typeof(string) &&
+                    elementStringCall.Method.Name is "Contains" or "EndsWith" &&
+                    elementStringCall.Arguments.Count == 2 &&
+                    elementStringCall.Arguments[1] is ConstantExpression elementComparison &&
+                    elementComparison.Value is StringComparison elementPolicy &&
+                    elementPolicy is StringComparison.Ordinal or StringComparison.OrdinalIgnoreCase)
+                {
+                    var elementSet = model.ElementSet(collection.Member.Name);
+                    if (elementSet.Type != QueryType.String)
+                    {
+                        Add("GW-LINQ-106", "Element substring matching requires a declared string element set", call);
+                        return AstPredicate.AlwaysFalse.Instance;
+                    }
+                    var needle = ClosedValue(elementStringCall.Arguments[0], parameter, diagnostics) as string ?? string.Empty;
+                    return new AstPredicate.ElementSubstring(
+                        elementSet,
+                        needle,
+                        elementStringCall.Method.Name == "Contains" ? Anchor.Contains : Anchor.EndsWith,
+                        elementPolicy == StringComparison.Ordinal
+                            ? QueryStringComparisonPolicy.Ordinal
+                            : QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase);
+                }
                 if (lambda.Body is BinaryExpression equality && equality.NodeType == ExpressionType.Equal)
                 {
                     var leftIsElement = equality.Left == lambda.Parameters[0];

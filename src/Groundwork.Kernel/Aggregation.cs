@@ -1597,6 +1597,11 @@ public static class AggregationExecutor
                         "GW-AGG-SOURCE-005",
                         "Element-set source predicates require a declared portable set column and are not admitted by aggregation profiles.",
                         "sourcePredicate")]);
+                case Predicate.ElementSubstring:
+                    throw new AggregationValidationException([new(
+                        "GW-AGG-SOURCE-005",
+                        "Element-set substring source predicates require a declared portable set column and are not admitted by aggregation profiles.",
+                        "sourcePredicate")]);
                 default:
                     throw new AggregationValidationException([new(
                         "GW-AGG-SOURCE-006",

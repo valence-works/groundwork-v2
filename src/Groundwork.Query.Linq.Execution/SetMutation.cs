@@ -394,7 +394,9 @@ internal static class SetMutationAdmission
                 ? RuntimeCoverage.ForMutation(unit, null)
                 : RuntimeCoverage.ForMutation(session))
             .EnsureCovered(request, now);
-        var physical = QuerySearchKeyRewriter.Rewrite(request, SearchKeyQueryMappings.For(unit));
+        var physical = QueryElementSearchKeyRewriter.Rewrite(
+            QuerySearchKeyRewriter.Rewrite(request, SearchKeyQueryMappings.For(unit)),
+            SearchKeyQueryMappings.ElementFor(unit));
 
         // A relational RenderPredicateFragment and MongoDB's filter renderer both skip the
         // portability validation their full query renderers run, so it is run here rather than

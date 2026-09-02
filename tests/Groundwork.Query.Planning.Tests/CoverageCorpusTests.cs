@@ -27,6 +27,7 @@ public sealed class CoverageCorpusTests
         yield return Case("range", Request(new Predicate.Range(Amount, Bound.Inclusive(QueryConstant.Of(Amount, 0m)), null)), Index(Amount), true);
         yield return Case("starts-with-range", Request(new Predicate.StartsWith(Text, "op")), Index(Text), true);
         yield return Case("substring-refused", Request(new Predicate.Substring(Text, "pen", Anchor.Contains)), Index(Text), false);
+        yield return Case("element-substring-refused", Request(new Predicate.ElementSubstring(new ElementSetRef("text_values", QueryType.String), "pen", Anchor.Contains)), Index(Text), false);
         yield return Case("negated-equality-refused", Request(new Predicate.Not(new Predicate.Equal(Text, QueryConstant.Of(Text, "open")))), Index(Text), false);
         yield return Case("same-column-or", Request(new Predicate.Or([
             new Predicate.Equal(Text, QueryConstant.Of(Text, "open")),
@@ -140,6 +141,58 @@ public sealed class CoverageCorpusTests
                 Assert.Contains(result.Refusal.SuggestedDeclaration, result.Refusal.Message, StringComparison.Ordinal);
             }
         }
+    }
+
+    [Fact]
+    public void Element_substring_is_bounded_scan_only_until_explicitly_accepted()
+    {
+        const string physicalColumn = "__groundwork_search_text_values";
+        var predicate = new Predicate.ElementSubstring(
+            new ElementSetRef("text_values", QueryType.String),
+            "pen",
+            Anchor.Contains,
+            QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase);
+        var mappings = new Dictionary<string, QueryElementSearchKeyColumn>(StringComparer.Ordinal)
+        {
+            ["text_values"] = new(
+                "text_values",
+                physicalColumn,
+                QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase,
+                maximumElementCodeUnits: 450)
+        };
+        var physicalIndex = new CoverageIndex(
+            "ix_element_search",
+            [new CoverageIndexColumn(physicalColumn, isNullable: true)]);
+        var mapped = QueryElementSearchKeyRewriter.Rewrite(Request(predicate), mappings);
+        var mappedPredicate = Assert.IsType<Predicate.ElementSubstring>(mapped.Where);
+        Assert.Equal(physicalColumn, mappedPredicate.Set.Name);
+        Assert.Equal(QueryStringComparisonPolicy.Ordinal, mappedPredicate.StringComparison);
+
+        var refused = QueryCoverageChecker.Check(mapped, [physicalIndex]);
+
+        Assert.False(refused.IsCovered);
+        Assert.Null(refused.Index);
+        Assert.Contains(refused.Refusals, refusal => refusal.Code == "GW-COVER-016");
+        Assert.All(refused.Refusals, refusal => Assert.DoesNotContain("Add: [GwIndex(", refusal.SuggestedDeclaration, StringComparison.Ordinal));
+
+        var acceptedLogical = new QueryRequest(
+            Table,
+            predicate,
+            [],
+            Projection.All,
+            Paging.None,
+            acceptedScan: ScanAcceptance.Allow(
+                "GW-SCAN-371",
+                "Native JSON expansion is bounded and explicitly accepted for this query.",
+                "groundwork",
+                new DateTimeOffset(2099, 1, 1, 0, 0, 0, TimeSpan.Zero))
+        );
+        var accepted = QueryElementSearchKeyRewriter.Rewrite(acceptedLogical, mappings);
+        var result = QueryCoverageChecker.Check(accepted, [physicalIndex]);
+        Assert.False(result.IsCovered);
+        Assert.Null(result.Index);
+        Assert.Contains(result.Refusals, refusal => refusal.Code == "GW-COVER-016");
+        QueryCoverageEnforcer.EnsureCovered(accepted, [physicalIndex], new DateTimeOffset(2028, 1, 1, 0, 0, 0, TimeSpan.Zero));
     }
 
     private static object[] Case(string name, QueryRequest request, CoverageIndex index, bool expectedCovered) =>
