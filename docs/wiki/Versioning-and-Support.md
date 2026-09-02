@@ -143,6 +143,19 @@ unproven columns retain portable explicit null ordering. Provider-specific strin
 and keyset-continuation semantics remain unchanged. See the complete
 [0.4.0-preview.4 release notes](../v2/releases/0.4.0-preview.4.md).
 
+### `0.4.0-preview.5` — Retention evidence, deployment safety, and array search
+
+This preview adds bounded affected-key evidence for exact retention, refuses
+hosted schema auto-apply outside Development, makes the first-party schema tool
+provider-ready in an isolated deployment, and adds native provider-neutral
+substring matching over string-array elements.
+
+Existing preview.4 catalogs remain compatible. A schema identity changes only
+when a JSON column opts into `ElementSearchKey`; review and apply that explicit
+plan before using Unicode ordinal ignore-case element-substring queries. No
+catalog discard is required. See the complete
+[0.4.0-preview.5 release notes](../v2/releases/0.4.0-preview.5.md).
+
 ---
 
 ## Provider support matrix
