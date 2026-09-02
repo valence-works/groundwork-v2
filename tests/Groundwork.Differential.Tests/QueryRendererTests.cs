@@ -1593,6 +1593,28 @@ public sealed class QueryRendererTests
         Assert.Contains("$anyElementTrue", foldedMongo.Filter.ToString(), StringComparison.OrdinalIgnoreCase);
         Assert.Contains("$replaceAll", foldedMongo.Filter.ToString(), StringComparison.OrdinalIgnoreCase);
 
+        var oversizedContains = Request(
+            new Predicate.ElementSubstring(set, new string('x', 8_001), Anchor.Contains),
+            [], Paging.None, ResultShape.Rows.Instance);
+        var sqlServerLimit = Assert.Throws<QueryRenderException>(() =>
+            new SqlServerQueryRenderer().Render(oversizedContains));
+        Assert.Equal("GW-QUERY-030", sqlServerLimit.Code);
+
+        var boundedOptions = QueryRenderOptions.Default with
+        {
+            ElementSearchKeyColumns = new Dictionary<string, QueryElementSearchKeyColumn>
+            {
+                ["workflowIds"] = new(
+                    "workflowIds",
+                    "__groundwork_search_workflowIds",
+                    QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase,
+                    450)
+            }
+        };
+        var boundedSqlServer = new SqlServerQueryRenderer().Render(oversizedContains, boundedOptions);
+        Assert.True(boundedSqlServer.IsMatchNone);
+        Assert.Empty(boundedSqlServer.Parameters);
+
         var unicode = Request(
             new Predicate.ElementSubstring(set, "ID", Anchor.EndsWith, QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase),
             [], Paging.None, ResultShape.Rows.Instance);

@@ -269,6 +269,32 @@ public sealed class Q9SearchKeyQueryTests
     }
 
     [Fact]
+    public void Element_substring_longer_than_the_declared_element_bound_is_match_none()
+    {
+        var request = new QueryRequest(
+            Table,
+            new Predicate.ElementSubstring(
+                new ElementSetRef("workflowIds", QueryType.String),
+                new string('x', 451),
+                Anchor.Contains),
+            [],
+            Projection.All,
+            Paging.None);
+
+        var rewritten = QueryElementSearchKeyRewriter.Rewrite(request,
+            new Dictionary<string, QueryElementSearchKeyColumn>
+            {
+                ["workflowIds"] = new(
+                    "workflowIds",
+                    "__groundwork_search_workflowIds",
+                    QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase,
+                    450)
+            });
+
+        Assert.Same(Predicate.AlwaysFalse.Instance, rewritten.Where);
+    }
+
+    [Fact]
     public void Element_substring_rewrite_does_not_type_an_untyped_set()
     {
         var request = new QueryRequest(

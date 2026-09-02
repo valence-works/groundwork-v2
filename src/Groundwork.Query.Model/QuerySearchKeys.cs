@@ -199,17 +199,25 @@ public static class QueryElementSearchKeyRewriter
                 if (substring.Set.Type != QueryType.String ||
                     !mappings.TryGetValue(substring.Set.Name, out var mapping))
                     return substring;
-                if (substring.StringComparison != QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase)
-                    return substring;
+                var isUnicode = substring.StringComparison == QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase;
                 if (!string.Equals(mapping.SourceColumn, substring.Set.Name, StringComparison.Ordinal) ||
-                    mapping.Policy != QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase)
+                    (isUnicode && mapping.Policy != QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase))
                 {
+                    if (!isUnicode)
+                        return substring;
                     throw new QueryRenderException(
                         "GW-QUERY-031",
                         $"Element substring set '{substring.Set.Name}' declares UnicodeOrdinalIgnoreCase, " +
                         $"but its schema element search-key mapping declares '{mapping.Policy}'. " +
                         "Rebuild the element search-key projection with the matching policy.");
                 }
+                if (mapping.MaximumElementCodeUnits is int maximumElementCodeUnits &&
+                    substring.Needle.Length > maximumElementCodeUnits)
+                {
+                    return Predicate.AlwaysFalse.Instance;
+                }
+                if (!isUnicode)
+                    return substring;
                 return new Predicate.ElementSubstring(
                     new ElementSetRef(mapping.PhysicalColumn, QueryType.String),
                     QuerySearchKeys.Encode(substring.Needle, mapping.Policy),

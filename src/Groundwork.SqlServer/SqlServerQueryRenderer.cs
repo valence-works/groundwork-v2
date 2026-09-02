@@ -297,6 +297,12 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
             throw new QueryRenderException("GW-SEM-TYPE-005", "Element substring matching requires a typed string element set.");
         if (elementSubstring.Anchor is not (Anchor.Contains or Anchor.EndsWith))
             throw new QueryRenderException("GW-SEM-TEXT-003", "The requested element substring anchor is not portable; use Contains or EndsWith.");
+        if (elementSubstring.Anchor == Anchor.Contains && elementSubstring.Needle.Length > 8_000)
+        {
+            throw new QueryRenderException(
+                "GW-QUERY-030",
+                "SQL Server CHARINDEX refuses element-substring Contains needles longer than 8,000 UTF-16 code units; declare MaximumElementCodeUnits so an over-bound request can resolve before provider I/O.");
+        }
         var expression = Dialect.QuoteIdentifier(elementSubstring.Set.Name);
         var parameter = AddElementParameter(QueryType.String, elementSubstring.Needle, parameters, ref parameterIndex);
         var element = ApplyElementComparison("element.[value]", elementSubstring.StringComparison);
