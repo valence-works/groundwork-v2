@@ -8,32 +8,52 @@ package_cache="$(mktemp -d)"
 build_root="$(mktemp -d)"
 trap 'rm -rf "$package_cache" "$build_root"' EXIT
 
-feed="${GROUNDWORK_PUBLIC_API_PACKAGES:-$repo_root/artifacts/acceptance-packages}"
-test -d "$feed" || {
-  echo "Missing packed artifacts at '$feed'. Run 'eng/pack-public-packages.sh artifacts/acceptance-packages' first." >&2
-  exit 1
-}
-
+remote_only="${GROUNDWORK_PUBLIC_API_REMOTE_ONLY:-false}"
+feedz_source="${GROUNDWORK_PUBLIC_API_FEEDZ_SOURCE:-}"
 version="${GROUNDWORK_PUBLIC_API_VERSION:-}"
-if [[ -z "$version" ]]; then
-  version="$(find "$feed" -maxdepth 1 -name 'Groundwork.Documents.*.nupkg' -print -quit | sed -E 's#^.*/Groundwork\.Documents\.([0-9][^/]*)\.nupkg$#\1#')"
-fi
-test -n "$version" || {
-  echo "Could not determine the package version in '$feed'." >&2
-  exit 1
-}
-
-for required in \
-  Groundwork.Kernel Groundwork.Query.Model Groundwork.Query.Linq Groundwork.Query.Linq.Execution \
-  Groundwork.Query.Planning Groundwork.Schema \
-  Groundwork.Records Groundwork.Store Groundwork.Records.Store Groundwork.Diagnostics \
-  Groundwork.Substrate.Relational Groundwork.Sqlite Groundwork.MySql Groundwork.Documents \
-  Groundwork.EntityFrameworkCore Groundwork.Testing Groundwork.Tool; do
-  test -f "$feed/$required.$version.nupkg" || {
-    echo "The local feed is missing $required.$version." >&2
+if [[ "$remote_only" == true ]]; then
+  test -n "$feedz_source" || {
+    echo "GROUNDWORK_PUBLIC_API_FEEDZ_SOURCE is required in remote-only mode." >&2
     exit 1
   }
-done
+  current_release="$(sed -n 's:.*<GroundworkCurrentRelease>\(.*\)</GroundworkCurrentRelease>.*:\1:p' "$repo_root/Directory.Build.props")"
+  test -n "$current_release" || {
+    echo "Could not determine GroundworkCurrentRelease from Directory.Build.props." >&2
+    exit 1
+  }
+  version="${version:-$current_release}"
+  [[ "$version" == "$current_release" ]] || {
+    echo "Remote clean-room version '$version' is not GroundworkCurrentRelease '$current_release'." >&2
+    exit 1
+  }
+else
+  feed="${GROUNDWORK_PUBLIC_API_PACKAGES:-$repo_root/artifacts/acceptance-packages}"
+  test -d "$feed" || {
+    echo "Missing packed artifacts at '$feed'. Run 'eng/pack-public-packages.sh artifacts/acceptance-packages' first." >&2
+    exit 1
+  }
+  if [[ -z "$version" ]]; then
+    version="$(find "$feed" -maxdepth 1 -name 'Groundwork.Documents.*.nupkg' -print -quit | sed -E 's#^.*/Groundwork\.Documents\.([0-9][^/]*)\.nupkg$#\1#')"
+  fi
+fi
+test -n "$version" || {
+  echo "Could not determine the package version." >&2
+  exit 1
+}
+
+if [[ "$remote_only" != true ]]; then
+  for required in \
+    Groundwork.Kernel Groundwork.Query.Model Groundwork.Query.Linq Groundwork.Query.Linq.Execution \
+    Groundwork.Query.Planning Groundwork.Schema \
+    Groundwork.Records Groundwork.Store Groundwork.Records.Store Groundwork.Diagnostics \
+    Groundwork.Substrate.Relational Groundwork.Sqlite Groundwork.MySql Groundwork.Documents \
+    Groundwork.EntityFrameworkCore Groundwork.Testing Groundwork.Tool; do
+    test -f "$feed/$required.$version.nupkg" || {
+      echo "The local feed is missing $required.$version." >&2
+      exit 1
+    }
+  done
+fi
 
 if grep -REn '<ProjectReference|TestingAdapter|InternalsVisibleTo|System\.Reflection|\.\./.*src' "$consumer_root" --include='*.cs' --include='*.csproj'; then
   echo "The clean-room consumer contains a forbidden internal or source dependency." >&2
@@ -58,8 +78,19 @@ run_external_consumer() {
   cp "$consumer_root/Groundwork.PublicApi.Consumer.csproj" "$external_root/"
   cp "$consumer_root/Program.cs" "$external_root/"
   cp "$consumer_root/PublicApiApprovalFixture.cs" "$external_root/"
-  cp "$consumer_root/NuGet.Config" "$external_root/"
-  cp "$feed"/Groundwork.*.nupkg "$external_root/feed/"
+  if [[ "$remote_only" == true ]]; then
+    sed \
+      -e 's#key="groundwork-local" value="./feed"#key="groundwork-feedz" value="'"$feedz_source"'"#' \
+      -e 's#key="groundwork-local"#key="groundwork-feedz"#' \
+      "$consumer_root/NuGet.Config" > "$external_root/NuGet.Config"
+    if grep -Eq 'groundwork-local|value="\./feed"' "$external_root/NuGet.Config"; then
+      echo "The remote clean-room consumer retained a local package source." >&2
+      exit 1
+    fi
+  else
+    cp "$consumer_root/NuGet.Config" "$external_root/"
+    cp "$feed"/Groundwork.*.nupkg "$external_root/feed/"
+  fi
 
   if grep -En '<ProjectReference|TestingAdapter|InternalsVisibleTo|\.\./.*src' "$external_root" --include='*.cs' --include='*.csproj'; then
     echo "The copied consumer contains a forbidden dependency." >&2

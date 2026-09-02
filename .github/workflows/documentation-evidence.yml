@@ -1,0 +1,151 @@
+name: Documentation evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Optional exact release version (must equal GroundworkCurrentRelease)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: documentation-evidence-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "true"
+  FEEDZ_NUGET_SOURCE: https://f.feedz.io/valence-works/groundwork/nuget/index.json
+
+jobs:
+  feedz-clean-room:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - name: Start evidence clock
+        id: evidence
+        run: |
+          echo "started_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+          echo "started_epoch=$(date +%s)" >> "$GITHUB_OUTPUT"
+      - name: Resolve and pin the published release
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          expected=$(sed -n 's:.*<GroundworkCurrentRelease>\(.*\)</GroundworkCurrentRelease>.*:\1:p' Directory.Build.props)
+          version="${INPUT_VERSION:-$expected}"
+          test -n "$expected" && test "$version" = "$expected"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Verify every package from Feedz without local artifacts
+        id: package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          eng/verify-published-packages.sh "$FEEDZ_NUGET_SOURCE" "$VERSION"
+      - name: Run the package-only public API journey from Feedz
+        id: clean-room
+        if: always() && steps.version.outcome == 'success'
+        env:
+          GROUNDWORK_PUBLIC_API_FEEDZ_SOURCE: ${{ env.FEEDZ_NUGET_SOURCE }}
+          GROUNDWORK_PUBLIC_API_REMOTE_ONLY: "true"
+          GROUNDWORK_PUBLIC_API_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          tests/Groundwork.PublicApi.Acceptance.Tests/verify-clean-room.sh
+      - name: Write the publication-safe Feedz evidence manifest
+        if: always()
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          STARTED_AT: ${{ steps.evidence.outputs.started_at }}
+          STARTED_EPOCH: ${{ steps.evidence.outputs.started_epoch }}
+          PACKAGE_OUTCOME: ${{ steps.package.outcome }}
+          CLEAN_ROOM_OUTCOME: ${{ steps.clean-room.outcome }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/docs-evidence/feedz
+          finished_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+          elapsed=$(( $(date +%s) - ${STARTED_EPOCH:-$(date +%s)} ))
+          cat > artifacts/docs-evidence/feedz/evidence-manifest.md <<EOF
+          # Groundwork documentation Feedz evidence
+
+          - Feed source: \`$FEEDZ_NUGET_SOURCE\`
+          - GroundworkCurrentRelease: \`${VERSION:-unresolved}\`
+          - Source ref: \`${GITHUB_REF}\`
+          - Checkout SHA: \`${GITHUB_SHA}\`
+          - Started (UTC): \`${STARTED_AT:-unavailable}\`
+          - Finished (UTC): \`$finished_at\`
+          - Elapsed seconds: \`$elapsed\`
+          - Runner OS: \`${RUNNER_OS}\`
+          - .NET SDK: \`$(dotnet --version)\`
+
+          ## Evidence steps
+
+          | Step | Outcome |
+          | --- | --- |
+          | All public packages and Groundwork.Tool restored from Feedz | ${PACKAGE_OUTCOME:-not-run} |
+          | Public API clean-room consumer restored and run from Feedz | ${CLEAN_ROOM_OUTCOME:-not-run} |
+
+          Commands:
+
+          - \`eng/verify-published-packages.sh "$FEEDZ_NUGET_SOURCE" "$VERSION"\`
+          - \`tests/Groundwork.PublicApi.Acceptance.Tests/verify-clean-room.sh\` with remote-only Feedz mode
+
+          Raw restore/build output is intentionally not retained in this publication-safe manifest.
+          EOF
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: groundwork-documentation-feedz-${{ github.run_id }}
+          path: artifacts/docs-evidence/feedz/**
+          if-no-files-found: warn
+          retention-days: 7
+
+  newcomer-sqlite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: 10.0.x
+      - name: Resolve and pin the published release
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          expected=$(sed -n 's:.*<GroundworkCurrentRelease>\(.*\)</GroundworkCurrentRelease>.*:\1:p' Directory.Build.props)
+          version="${INPUT_VERSION:-$expected}"
+          test -n "$expected" && test "$version" = "$expected"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Run the publication-safe newcomer SQLite journey
+        if: always()
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version="${VERSION:-${INPUT_VERSION:-}}"
+          if [[ -z "$version" ]]; then
+            version=$(sed -n 's:.*<GroundworkCurrentRelease>\(.*\)</GroundworkCurrentRelease>.*:\1:p' Directory.Build.props)
+          fi
+          version="${version:-unresolved}"
+          mkdir -p artifacts/docs-evidence/newcomer
+          eng/verify-newcomer-sqlite.sh "$FEEDZ_NUGET_SOURCE" "$version" \
+            artifacts/docs-evidence/newcomer/report.md
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: groundwork-documentation-newcomer-${{ github.run_id }}
+          path: artifacts/docs-evidence/newcomer/**
+          if-no-files-found: warn
+          retention-days: 7

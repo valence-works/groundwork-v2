@@ -263,6 +263,73 @@ public sealed class PackagingContractTests
     }
 
     [Fact]
+    public void Documentation_evidence_workflow_is_manual_independent_and_bounded()
+    {
+        var workflow = File.ReadAllText(Path.Combine(
+            RepositoryRoot.Find(), ".github/workflows/documentation-evidence.yml"));
+        var triggers = workflow[workflow.IndexOf("\non:", StringComparison.Ordinal)..
+                               workflow.IndexOf("\npermissions:", StringComparison.Ordinal)];
+
+        Assert.Contains("workflow_dispatch:", triggers, StringComparison.Ordinal);
+        Assert.DoesNotContain("push:", triggers, StringComparison.Ordinal);
+        Assert.DoesNotContain("pull_request:", triggers, StringComparison.Ordinal);
+        Assert.DoesNotContain("release:", triggers, StringComparison.Ordinal);
+        Assert.DoesNotContain("actions/checkout@v4", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("actions/setup-dotnet@v4", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("actions/upload-artifact@v4", workflow, StringComparison.Ordinal);
+        Assert.Equal(2, Regex.Matches(workflow,
+            "actions/checkout@11d5960a326750d5838078e36cf38b85af677262").Count);
+        Assert.Equal(2, Regex.Matches(workflow,
+            "actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9").Count);
+        Assert.Equal(2, Regex.Matches(workflow,
+            "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02").Count);
+        Assert.Contains("GroundworkCurrentRelease", workflow, StringComparison.Ordinal);
+        Assert.Contains("feedz-clean-room:", workflow, StringComparison.Ordinal);
+        Assert.Contains("newcomer-sqlite:", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("needs: feedz-clean-room", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("needs: newcomer-sqlite", workflow, StringComparison.Ordinal);
+        Assert.True(Regex.Matches(workflow, "if: always\\(\\)").Count >= 2);
+        Assert.Equal(2, Regex.Matches(workflow, "retention-days: 7").Count);
+        Assert.Contains("verify-published-packages.sh \"$FEEDZ_NUGET_SOURCE\" \"$VERSION\"", workflow, StringComparison.Ordinal);
+        Assert.Contains("GROUNDWORK_PUBLIC_API_REMOTE_ONLY: \"true\"", workflow, StringComparison.Ordinal);
+        Assert.Contains("verify-newcomer-sqlite.sh \"$FEEDZ_NUGET_SOURCE\" \"$version\"", workflow, StringComparison.Ordinal);
+        Assert.Contains("if: always()\n        env:\n          VERSION: ${{ steps.version.outputs.version }}\n          INPUT_VERSION: ${{ inputs.version }}", workflow, StringComparison.Ordinal);
+        Assert.Contains("evidence-manifest.md", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("package-verification.log", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("clean-room.log", workflow, StringComparison.Ordinal);
+        Assert.Contains("artifacts/docs-evidence/newcomer/report.md", workflow, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Documentation_evidence_scripts_preserve_local_hash_mode_and_support_remote_mode()
+    {
+        var root = RepositoryRoot.Find();
+        var published = File.ReadAllText(Path.Combine(root, "eng/verify-published-packages.sh"));
+        Assert.Contains("[expected-package-directory]", published, StringComparison.Ordinal);
+        Assert.Contains("[[ \"$expected_packages\" == \"-\" ]] && expected_packages=\"\"", published, StringComparison.Ordinal);
+        Assert.Contains("[[ -n \"$expected_packages\" ]] || return 0", published, StringComparison.Ordinal);
+        Assert.Contains("Artifact hash mismatch", published, StringComparison.Ordinal);
+
+        var cleanRoom = File.ReadAllText(Path.Combine(
+            root, "tests/Groundwork.PublicApi.Acceptance.Tests/verify-clean-room.sh"));
+        Assert.Contains("GROUNDWORK_PUBLIC_API_REMOTE_ONLY", cleanRoom, StringComparison.Ordinal);
+        Assert.Contains("GROUNDWORK_PUBLIC_API_FEEDZ_SOURCE", cleanRoom, StringComparison.Ordinal);
+        Assert.Contains("GroundworkCurrentRelease", cleanRoom, StringComparison.Ordinal);
+        Assert.Contains("Remote clean-room version", cleanRoom, StringComparison.Ordinal);
+        Assert.Contains("groundwork-local|value=", cleanRoom, StringComparison.Ordinal);
+
+        var newcomer = File.ReadAllText(Path.Combine(root, "eng/verify-newcomer-sqlite.sh"));
+        Assert.Contains("GroundworkCurrentRelease", newcomer, StringComparison.Ordinal);
+        Assert.Contains("index-covered customer query", newcomer, StringComparison.Ordinal);
+        Assert.Contains("declared customer aggregation", newcomer, StringComparison.Ordinal);
+        Assert.Contains("Groundwork newcomer SQLite evidence", newcomer, StringComparison.Ordinal);
+        Assert.Contains("groundwork-feedz", newcomer, StringComparison.Ordinal);
+        Assert.Contains("Started (UTC)", newcomer, StringComparison.Ordinal);
+        Assert.Contains("Checkout SHA", newcomer, StringComparison.Ordinal);
+        Assert.Contains("raw command output are intentionally not retained", newcomer, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Nuget_publication_workflow_pins_actions_and_gates_credentials_on_the_package_manifest()
     {
         var root = RepositoryRoot.Find();
