@@ -1,5 +1,6 @@
 using Groundwork.Kernel;
 using Groundwork.LiveDatabases;
+using Groundwork.MySql;
 using Groundwork.MongoDb;
 using Groundwork.PostgreSql;
 using Groundwork.Query.Model;
@@ -56,6 +57,7 @@ public sealed class CorpusDifferentialTests
         var postgres = Required("GROUNDWORK_POSTGRES_CONNECTION");
         var sqlServer = LiveSqlServer.Required();
         var mongo = LiveMongo.Required();
+        using var mySqlDatabase = LiveMySqlDatabase.OpenOrSkip();
         var providerRows = ArraySubstringRows.Select(row =>
         {
             var converted = new Dictionary<string, object?>(row, StringComparer.Ordinal);
@@ -64,10 +66,12 @@ public sealed class CorpusDifferentialTests
             return converted;
         }).ToArray();
         using var sqlite = OpenSqlite(ArraySubstringUnit, providerRows);
+        using var inMemory = OpenInMemory(ArraySubstringUnit, ArraySubstringRows);
         using var pg = OpenPostgreSql(postgres, ArraySubstringUnit, providerRows);
         using var sql = OpenSqlServer(sqlServer, ArraySubstringUnit, providerRows);
         using var mongoSession = OpenMongo(mongo, ArraySubstringUnit, providerRows);
-        var providers = new[] { sqlite, pg, sql, mongoSession };
+        using var mySqlSession = OpenMySql(mySqlDatabase.ConnectionString, ArraySubstringUnit, providerRows);
+        var providers = new[] { inMemory, sqlite, pg, sql, mongoSession, mySqlSession };
         var table = new TableId(ArraySubstringTableName);
         var id = new ColumnRef(table, "id", QueryType.Int64, isNullable: false);
         var set = new ElementSetRef("workflowIds", QueryType.String);
@@ -75,6 +79,10 @@ public sealed class CorpusDifferentialTests
         {
             new Predicate.ElementSubstring(set, "flow-id", Anchor.Contains),
             new Predicate.ElementSubstring(set, "workflow", Anchor.Contains, QueryStringComparisonPolicy.AsciiIgnoreCase),
+            new Predicate.ElementSubstring(set, "ö", Anchor.Contains, QueryStringComparisonPolicy.AsciiIgnoreCase),
+            new Predicate.ElementSubstring(set, "a", Anchor.Contains, QueryStringComparisonPolicy.AsciiIgnoreCase),
+            new Predicate.ElementSubstring(set, "wörk", Anchor.Contains, QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase),
+            new Predicate.ElementSubstring(set, "ö", Anchor.Contains, QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase),
             new Predicate.ElementSubstring(set, string.Empty, Anchor.EndsWith),
             new Predicate.ElementSubstring(set, new string('x', 10_000), Anchor.Contains)
         };
@@ -105,6 +113,42 @@ public sealed class CorpusDifferentialTests
                 Assert.Equal(expected, actual);
             }
         }
+    }
+
+    [Fact]
+    public void Inmemory_executes_unicode_element_substring_through_the_persisted_key_array()
+    {
+        using var inMemory = OpenInMemory(ArraySubstringUnit, ArraySubstringRows);
+        var table = new TableId(ArraySubstringTableName);
+        var id = new ColumnRef(table, "id", QueryType.Int64, isNullable: false);
+        var predicate = new Predicate.ElementSubstring(
+            new ElementSetRef("workflowIds", QueryType.String),
+            "wörk",
+            Anchor.Contains,
+            QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase);
+        var request = new QueryRequest(
+            table,
+            predicate,
+            [new OrderTerm(id, OrderDirection.Ascending, NullOrder.First)],
+            Projection.ColumnsOnly(id),
+            Paging.None,
+            ResultShape.Rows.Instance,
+            acceptedScan: ScanAcceptance.Allow(
+                "GW-SCAN-371",
+                "Unicode string-array substring uses the declared positional key array.",
+                "groundwork-tests",
+                new DateTimeOffset(2099, 1, 1, 0, 0, 0, TimeSpan.Zero)));
+
+        var expected = ArraySubstringRows
+            .Where(row => PortableQuerySemantics.Evaluate(predicate, row))
+            .Select(row => (long)row["id"]!)
+            .ToArray();
+        var actual = inMemory.Query(request, QueryRenderOptions.Default).Rows
+            .Select(row => (long)row["id"]!)
+            .ToArray();
+
+        Assert.Equal(expected, actual);
+        Assert.Equal(new[] { 8L }, actual);
     }
 
     [Fact]
@@ -975,7 +1019,17 @@ public sealed class CorpusDifferentialTests
         Columns =
         [
             new() { Name = "id", Type = PortableType.Int64, IsNullable = false },
-            new() { Name = "workflowIds", Type = PortableType.Json, IsNullable = true }
+            new()
+            {
+                Name = "workflowIds",
+                Type = PortableType.Json,
+                IsNullable = true,
+                ElementSearchKey = new ElementSearchKeyDefinition
+                {
+                    Collation = PortableCollation.UnicodeOrdinalIgnoreCase,
+                    MaximumElementCodeUnits = 450
+                }
+            }
         ],
         Key = new KeyDefinition { Columns = ["id"] }
     };
@@ -1217,10 +1271,29 @@ public sealed class CorpusDifferentialTests
         new Dictionary<string, object?> { ["id"] = 9L, ["workflowIds"] = new object?[] { "WORKFLOW" } },
         new Dictionary<string, object?> { ["id"] = 10L, ["workflowIds"] = new object?[] { null, 42, string.Empty } },
         new Dictionary<string, object?> { ["id"] = 11L, ["workflowIds"] = new object?[] { new string('x', 128) } },
-        new Dictionary<string, object?> { ["id"] = 12L }
+        new Dictionary<string, object?> { ["id"] = 12L },
+        new Dictionary<string, object?> { ["id"] = 13L, ["workflowIds"] = new object?[] { "Ö" } },
+        new Dictionary<string, object?> { ["id"] = 14L, ["workflowIds"] = new object?[] { "ö" } },
+        new Dictionary<string, object?> { ["id"] = 15L, ["workflowIds"] = new object?[] { "A" } },
+        new Dictionary<string, object?> { ["id"] = 16L, ["workflowIds"] = new object?[] { "a" } }
     ];
 
     private static CorpusSession OpenSqlite() => OpenSqlite(Unit, Rows);
+
+    private static CorpusSession OpenInMemory(
+        StorageUnit unit,
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> rows)
+    {
+        var connection = new InMemoryProviderFactory().Create("array-substring-" + Guid.NewGuid().ToString("N"));
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        foreach (var row in rows)
+        {
+            session.Delete(new StorageKey(KeyValues(unit, row)));
+            session.Insert(new StorageValues(row));
+        }
+        return new CorpusSession("InMemory", session.Query, connection.Dispose);
+    }
 
     private static CorpusSession OpenSqlite(
         StorageUnit unit,
@@ -1309,6 +1382,19 @@ public sealed class CorpusDifferentialTests
             session.Insert(new MongoStorageValues(row));
         }
         return new MongoCorpusSession(session.Query, connection.Dispose);
+    }
+
+    private static CorpusSession OpenMySql(string connectionString, StorageUnit unit, IReadOnlyList<IReadOnlyDictionary<string, object?>> rows)
+    {
+        var connection = new MySqlProviderFactory().Create(connectionString);
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        foreach (var row in rows)
+        {
+            session.Delete(new StorageKey(KeyValues(unit, row)));
+            session.Insert(new StorageValues(row));
+        }
+        return new CorpusSession("MySQL", session.Query, connection.Dispose);
     }
 
     private static IReadOnlyDictionary<string, object?> KeyValues(

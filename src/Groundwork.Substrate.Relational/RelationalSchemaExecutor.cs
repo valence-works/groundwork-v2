@@ -933,6 +933,8 @@ public sealed class RelationalSchemaExecutor
         PortableProjection.BoundarySearchKey => PortableStringComparison.SearchKeyAlgorithmId,
         PortableProjection.LocaleSortKey => throw new InvalidOperationException(
             $"Locale sort-key projection '{definition.Name}' requires an explicit algorithm identity."),
+        PortableProjection.ElementBoundarySearchKey => throw new InvalidOperationException(
+            $"Element search-key projection '{definition.Name}' requires an explicit algorithm identity."),
         PortableProjection.Sha256 => PortableStringComparison.LookupHashAlgorithmId,
         _ => throw new ArgumentOutOfRangeException(nameof(definition), definition.Projection, null)
     };

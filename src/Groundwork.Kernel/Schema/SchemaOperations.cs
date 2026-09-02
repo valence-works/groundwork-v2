@@ -190,6 +190,7 @@ public sealed class AddColumnOperation : PhysicalSchemaOperation
         column.Generation.ToString(),
         column.Default is null ? null : SchemaValue.Canonicalize(column.Default.Value, column.Type),
         .. SchemaSubject.LocaleSortKeyIdentity(column),
+        .. SchemaSubject.ElementSearchKeyIdentity(column),
         .. SchemaSubject.LogicalIdentity(column)
     ]);
 
@@ -204,6 +205,7 @@ public sealed class AddColumnOperation : PhysicalSchemaOperation
         Collation = column.Collation,
         LogicalCollation = column.LogicalCollation,
         LocaleSortKey = column.LocaleSortKey is null ? null : column.LocaleSortKey with { },
+        ElementSearchKey = column.ElementSearchKey is null ? null : column.ElementSearchKey with { },
         Default = column.Default is null ? null : new PortableDefault(SchemaValue.Snapshot(column.Default.Value, column.Type)),
         Generation = column.Generation,
         Id = column.Id

@@ -1602,6 +1602,35 @@ public sealed class QueryRendererTests
             Assert.Equal("GW-SEM-TEXT-001", failure.Code);
         });
 
+        var mappedOptions = QueryRenderOptions.Default with
+        {
+            ElementSearchKeyColumns = new Dictionary<string, QueryElementSearchKeyColumn>
+            {
+                ["workflowIds"] = new(
+                    "workflowIds",
+                    "__groundwork_search_workflowIds",
+                    QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase,
+                    450)
+            }
+        };
+        var mappedSqlite = new SqliteQueryRenderer().Render(unicode, mappedOptions);
+        var mappedPostgres = new PostgreSqlQueryRenderer().Render(unicode, mappedOptions);
+        var mappedSqlServer = new SqlServerQueryRenderer().Render(unicode, mappedOptions);
+        var mappedMySql = new MySqlQueryRenderer().Render(unicode, mappedOptions);
+        var mappedMongo = new MongoQueryRenderer().Render(unicode, mappedOptions);
+        Assert.Contains("__groundwork_search_workflowIds", mappedSqlite.CommandText, StringComparison.Ordinal);
+        Assert.Contains("json_each", mappedSqlite.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("|000049|000044", mappedSqlite.Parameters.Single().Value);
+        Assert.Contains("__groundwork_search_workflowIds", mappedPostgres.CommandText, StringComparison.Ordinal);
+        Assert.Contains("jsonb_array_elements", mappedPostgres.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("__groundwork_search_workflowIds", mappedSqlServer.CommandText, StringComparison.Ordinal);
+        Assert.Contains("OPENJSON", mappedSqlServer.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("__groundwork_search_workflowIds", mappedMySql.CommandText, StringComparison.Ordinal);
+        Assert.Contains("JSON_TABLE", mappedMySql.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("__groundwork_search_workflowIds", mappedMongo.Filter.ToString(), StringComparison.Ordinal);
+        Assert.Contains("$substrCP", mappedMongo.Filter.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("regex", mappedMongo.Filter.ToString(), StringComparison.OrdinalIgnoreCase);
+
         using var connection = new SqliteConnection("Data Source=:memory:");
         connection.Open();
         connection.CreateCollation("GROUNDWORK_UTF16_ORDINAL", string.CompareOrdinal);

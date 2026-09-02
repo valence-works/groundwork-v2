@@ -4,6 +4,8 @@ using Groundwork.LiveDatabases;
 using Groundwork.Query.Model;
 using Groundwork.SqlServer;
 using Groundwork.Store;
+using Groundwork.Substrate.Relational;
+using Microsoft.Data.SqlClient;
 using Xunit;
 
 namespace Groundwork.SqlServer.Tests;
@@ -20,6 +22,27 @@ public sealed class SqlServerParameterBudgetTests(SqlServerFixture fixture)
         Assert.Equal(2_098, SqlServerQueryRenderer.ParameterBudget);
         Assert.Equal(SqlServerQueryRenderer.ParameterBudget, connection.QueryAdmission.MaximumParameters);
         Assert.Equal(SqlServerQueryRenderer.ParameterBudget, connection.QueryAdmission.MaximumBatchReadKeys);
+    }
+
+    [Fact]
+    public void Relational_parameter_binding_keeps_long_search_needles_as_nvarchar_max()
+    {
+        var needle = new string('x', 10_000);
+        var command = new RelationalQueryCommand(
+            "SELECT @p0",
+            [new QueryRenderParameter("p0", QueryType.String, needle)],
+            includesTotalCount: false,
+            isMatchNone: false,
+            selectedIndex: null,
+            indexHintApplied: false,
+            appliedOrder: []);
+        using var native = new SqlCommand();
+
+        RelationalQueryResultReader.AddParameters(native, command);
+
+        var parameter = Assert.IsType<SqlParameter>(Assert.Single(native.Parameters));
+        Assert.Equal(-1, parameter.Size);
+        Assert.Equal(needle.Length, Assert.IsType<string>(parameter.Value).Length);
     }
 
     [SkippableFact]

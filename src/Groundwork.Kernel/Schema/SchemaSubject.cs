@@ -478,6 +478,7 @@ public sealed class SchemaSubject
         Collation = source.Collation,
         LogicalCollation = source.LogicalCollation,
         LocaleSortKey = source.LocaleSortKey is null ? null : source.LocaleSortKey with { },
+        ElementSearchKey = source.ElementSearchKey is null ? null : source.ElementSearchKey with { },
         Default = source.Default is null ? null : new PortableDefault(SchemaValue.Snapshot(source.Default.Value, source.Type)),
         Generation = source.Generation,
         Id = source.Id
@@ -497,6 +498,7 @@ public sealed class SchemaSubject
             column.Generation.ToString(),
             column.Default is null ? null : SchemaValue.Canonicalize(column.Default.Value, column.Type),
             .. LocaleSortKeyIdentity(column),
+            .. ElementSearchKeyIdentity(column),
             .. LogicalIdentity(column)
         ]);
 
@@ -507,6 +509,15 @@ public sealed class SchemaSubject
             [
                 column.LocaleSortKey.CultureName,
                 column.LocaleSortKey.MaximumExpansionFactor.ToString(CultureInfo.InvariantCulture)
+            ];
+
+    internal static string?[] ElementSearchKeyIdentity(ColumnDefinition column) =>
+        column.ElementSearchKey is null
+            ? []
+            :
+            [
+                column.ElementSearchKey.Collation.ToString(),
+                column.ElementSearchKey.MaximumElementCodeUnits?.ToString(CultureInfo.InvariantCulture)
             ];
 
     /// <summary>

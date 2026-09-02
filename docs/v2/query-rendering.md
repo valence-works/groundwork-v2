@@ -14,12 +14,13 @@ The aggregate command and its budget probe bind the same fragment parameters bef
 `Predicate.ElementSubstring` remains a native server predicate: SQLite expands JSON1 arrays with
 `json_each`, PostgreSQL expands JSONB arrays with `jsonb_array_elements`, SQL Server uses
 `OPENJSON`, MySQL/MariaDB uses `JSON_TABLE`, and MongoDB uses an array `$elemMatch` or aggregation
-expression. Each
-provider admits only the declared string element type and evaluates one element at a time; no
-serialized-array substring or client post-filter is used. The coverage checker reports this shape
-as bounded-scan-only unless a provider declares a compatible element search-key index. Raw arrays
-admit only `Ordinal` and the exact ASCII A-Z fold; `UnicodeOrdinalIgnoreCase` is refused because
-the existing versioned Unicode fold requires a persisted per-element search key.
+expression. Each provider admits only the declared string element type and evaluates one element at a
+time; no serialized-array substring or client post-filter is used. Raw arrays admit `Ordinal` and the
+exact ASCII A-Z fold. A declared `ElementSearchKey` maps Unicode ordinal-ignore-case queries to a
+provider-owned positional JSON key array and an encoded ordinal needle, preserving element boundaries
+while keeping evaluation native. The coverage checker reports both raw expansion and mapped-key
+expansion as bounded-scan-only because no provider currently declares an index form for this predicate;
+an unaccepted scan is refused before I/O.
 
 `Paging.Keyset(limit)` is the first keyset page. `Paging.Continuation` carries a typed tuple made
 with `QueryContinuationToken.Encode`; the tuple contains every requested order term followed by

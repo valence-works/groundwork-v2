@@ -120,6 +120,7 @@ public sealed class MySqlDialectTests
         Assert.Equal(timestamp.UtcTicks, dialect.ConvertValue(timestamp, Column(PortableType.DateTimeOffset)));
         Assert.Equal(1, dialect.ConvertValue(true, Column(PortableType.Boolean)));
         Assert.Equal("bde4c9e4-65cc-4d6e-bf50-6d9c4f27c22a", dialect.ConvertValue(Guid.Parse("bde4c9e4-65cc-4d6e-bf50-6d9c4f27c22a"), Column(PortableType.Guid)));
+        Assert.Equal("[\"alpha\",null,\"beta\"]", dialect.ConvertValue(new string?[] { "alpha", null, "beta" }, Column(PortableType.Json)));
         Assert.Equal(123, dialect.ReadValue(123L, Column(PortableType.Int32)));
         Assert.Equal(timestamp.UtcTicks, Assert.IsType<DateTimeOffset>(dialect.ReadValue(timestamp.UtcTicks, Column(PortableType.DateTimeOffset))).UtcTicks);
         var json = Assert.IsType<JsonElement>(dialect.ReadValue("{\"ok\":true}", Column(PortableType.Json)));

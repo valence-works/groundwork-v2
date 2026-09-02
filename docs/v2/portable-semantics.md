@@ -32,9 +32,13 @@ which `Validate` returns no refusals.
   needle is never silently truncated: a needle longer than an element simply does
   not match, and provider/request size limits refuse the query rather than
   altering it.
-  Its comparison policy is explicit and limited to `Ordinal` or `AsciiIgnoreCase` for a raw array;
-  `UnicodeOrdinalIgnoreCase` requires a versioned persisted per-element search key and is refused
-  at raw-array admission. Culture-sensitive behavior is refused.
+  Its comparison policy is explicit: raw arrays admit `Ordinal` or the exact ASCII A-Z
+  `AsciiIgnoreCase` fold, while `UnicodeOrdinalIgnoreCase` is admitted only when the JSON column
+  declares a versioned persisted per-element search-key array and the query resolves that mapping.
+  A missing or mismatched mapping is refused before provider I/O. Culture-sensitive behavior is refused.
+  `MaximumElementCodeUnits`, when declared, must be positive; writes and backfills refuse an
+  over-bound or ill-formed UTF-16 string instead of truncating it. Null and non-string members keep
+  their position as JSON null in the parallel key array.
   Native expansion is server-evaluated, but remains bounded-scan-only until
   a provider declares a compatible element search-key index, so coverage
   planning refuses it with `GW-COVER-016` unless the caller records an

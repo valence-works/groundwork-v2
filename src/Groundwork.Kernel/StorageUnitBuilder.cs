@@ -286,6 +286,7 @@ public sealed class ColumnBuilder
     private int? scale;
     private PortableCollation? collation;
     private LocaleSortKeyDefinition? localeSortKey;
+    private ElementSearchKeyDefinition? elementSearchKey;
     private object? defaultValue;
     private bool hasDefault;
     private ColumnGeneration generation = ColumnGeneration.Supplied;
@@ -316,6 +317,23 @@ public sealed class ColumnBuilder
         {
             CultureName = cultureName,
             MaximumExpansionFactor = maximumExpansionFactor
+        };
+        return this;
+    }
+
+    /// <summary>
+    /// Persists a provider-owned parallel JSON search-key array for this JSON column. Each valid
+    /// string element is encoded with the declared folded policy; null and non-string elements
+    /// retain their position as JSON null.
+    /// </summary>
+    public ColumnBuilder ElementSearchKey(
+        PortableCollation collation,
+        int? maximumElementCodeUnits = null)
+    {
+        elementSearchKey = new ElementSearchKeyDefinition
+        {
+            Collation = collation,
+            MaximumElementCodeUnits = maximumElementCodeUnits
         };
         return this;
     }
@@ -352,6 +370,7 @@ public sealed class ColumnBuilder
         Scale = scale,
         Collation = collation,
         LocaleSortKey = localeSortKey,
+        ElementSearchKey = elementSearchKey,
         Default = hasDefault ? new PortableDefault(DefaultValueSnapshot.Create(defaultValue, type)) : null,
         Generation = generation,
         Id = logicalId

@@ -218,4 +218,75 @@ public sealed class Q9SearchKeyQueryTests
         Assert.True(PortableQuerySemantics.Evaluate(rewritten.Where,
             new Dictionary<string, object?> { ["status"] = "\uD7FFsuffix" }));
     }
+
+    [Fact]
+    public void Unicode_element_substring_rewrites_to_the_parallel_boundary_key_array()
+    {
+        var set = new ElementSetRef("workflowIds", QueryType.String);
+        var request = new QueryRequest(
+            Table,
+            new Predicate.ElementSubstring(set, "Örn", Anchor.Contains,
+                QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase),
+            [],
+            Projection.All,
+            Paging.None);
+
+        var rewritten = QueryElementSearchKeyRewriter.Rewrite(request,
+            new Dictionary<string, QueryElementSearchKeyColumn>
+            {
+                ["workflowIds"] = new(
+                    "workflowIds",
+                    "__groundwork_search_workflowIds",
+                    QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase,
+                    450)
+            });
+
+        var predicate = Assert.IsType<Predicate.ElementSubstring>(rewritten.Where);
+        Assert.Equal("__groundwork_search_workflowIds", predicate.Set.Name);
+        Assert.Equal(QueryType.String, predicate.Set.Type);
+        Assert.Equal(QueryStringComparisonPolicy.Ordinal, predicate.StringComparison);
+        Assert.Equal("|0000D6|000052|00004E", predicate.Needle);
+        Assert.True(PortableQuerySemantics.Validate(rewritten).IsPortable);
+    }
+
+    [Fact]
+    public void Unicode_element_substring_without_a_mapping_remains_refused()
+    {
+        var request = new QueryRequest(
+            Table,
+            new Predicate.ElementSubstring(new ElementSetRef("workflowIds", QueryType.String), "Ö", Anchor.Contains,
+                QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase),
+            [],
+            Projection.All,
+            Paging.None);
+
+        var unchanged = QueryElementSearchKeyRewriter.Rewrite(request,
+            new Dictionary<string, QueryElementSearchKeyColumn>());
+
+        Assert.Same(request.Where, unchanged.Where);
+        var refusal = Assert.Single(PortableQuerySemantics.Validate(unchanged).Refusals);
+        Assert.Equal("GW-SEM-TEXT-001", refusal.Code);
+    }
+
+    [Fact]
+    public void Element_substring_rewrite_does_not_type_an_untyped_set()
+    {
+        var request = new QueryRequest(
+            Table,
+            new Predicate.ElementSubstring(new ElementSetRef("workflowIds"), "Ö", Anchor.Contains,
+                QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase),
+            [],
+            Projection.All,
+            Paging.None);
+
+        var unchanged = QueryElementSearchKeyRewriter.Rewrite(request,
+            new Dictionary<string, QueryElementSearchKeyColumn>
+            {
+                ["workflowIds"] = new("workflowIds", "__groundwork_search_workflowIds",
+                    QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase)
+            });
+
+        Assert.Same(request.Where, unchanged.Where);
+        Assert.Equal("GW-SEM-TYPE-007", Assert.Single(PortableQuerySemantics.Validate(unchanged).Refusals).Code);
+    }
 }

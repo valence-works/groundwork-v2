@@ -48,7 +48,9 @@ public sealed class MongoQueryRenderer
         if (request.Join is not null)
             return RenderJoined(request, options, physicalCollectionName, physicalTargetCollectionName, sourcePrefix);
         options ??= QueryRenderOptions.Default;
-        request = QuerySearchKeyRewriter.Rewrite(request, options.SearchKeyColumns);
+        request = QueryElementSearchKeyRewriter.Rewrite(
+            QuerySearchKeyRewriter.Rewrite(request, options.SearchKeyColumns),
+            options.ElementSearchKeyColumns);
         if (options.InValueLimit <= 0)
             throw new ArgumentOutOfRangeException(nameof(options), "The In value limit must be positive.");
 
@@ -177,7 +179,9 @@ public sealed class MongoQueryRenderer
         }
 
         options ??= QueryRenderOptions.Default;
-        request = QuerySearchKeyRewriter.Rewrite(request, options.SearchKeyColumns);
+        request = QueryElementSearchKeyRewriter.Rewrite(
+            QuerySearchKeyRewriter.Rewrite(request, options.SearchKeyColumns),
+            options.ElementSearchKeyColumns);
         if (options.InValueLimit <= 0)
             throw new ArgumentOutOfRangeException(nameof(options), "The In value limit must be positive.");
 
@@ -636,7 +640,9 @@ public sealed class MongoQueryRenderer
             [],
             Projection.All,
             Paging.None);
-        var rewritten = QuerySearchKeyRewriter.Rewrite(request, options.SearchKeyColumns);
+        var rewritten = QueryElementSearchKeyRewriter.Rewrite(
+            QuerySearchKeyRewriter.Rewrite(request, options.SearchKeyColumns),
+            options.ElementSearchKeyColumns);
         return RenderPredicate(rewritten.Where, options, table);
     }
 

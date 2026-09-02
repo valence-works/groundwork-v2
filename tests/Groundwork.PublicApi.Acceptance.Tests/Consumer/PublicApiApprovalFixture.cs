@@ -35,6 +35,7 @@ internal static class PublicApiApprovalFixture
         _ = typeof(EfCoreModelImporter);
         _ = typeof(PortableType);
         _ = typeof(LocaleSortKeyDefinition);
+        _ = typeof(ElementSearchKeyDefinition);
         _ = typeof(PortableLocaleOrdering);
         _ = typeof(MissingValueBehavior);
         _ = typeof(IndexBuilder);
@@ -70,6 +71,9 @@ internal static class PublicApiApprovalFixture
         _ = typeof(Groundwork.Records.StorageDeclarationBuilder);
         _ = typeof(ProviderOwnedColumns);
         _ = typeof(QueryRequest);
+        _ = typeof(Predicate.ElementSubstring);
+        _ = typeof(QueryElementSearchKeyColumn);
+        _ = typeof(QueryElementSearchKeyRewriter);
         _ = typeof(GwReference<,>);
         _ = typeof(GwGeneratedRowMember<>);
         _ = typeof(GwGeneratedRowAccessor<>);
@@ -114,6 +118,7 @@ internal static class PublicApiApprovalFixture
         _ = typeof(StorageKey);
         _ = typeof(StorageValues);
         _ = typeof(StorageUnitQueryRenderOptions);
+        _ = typeof(SearchKeyQueryMappings);
         _ = typeof(QueryAdmissionProfile);
         _ = typeof(KeyedBatchReadRow);
         _ = typeof(KeyedBatchReadResult);
@@ -170,6 +175,14 @@ internal static class PublicApiApprovalFixture
         _ = new Func<Groundwork.Kernel.StorageDeclarationBuilder, Groundwork.Kernel.StorageDeclarationBuilder>(builder =>
             builder.Check("ck_quantity", "quantity", CheckConstraintOperator.GreaterThan, 0));
         _ = new Func<ColumnBuilder, ColumnBuilder>(column => column.LocaleOrder("sv-SE", 12));
+        _ = new Func<ColumnBuilder, ColumnBuilder>(column =>
+            column.ElementSearchKey(PortableCollation.UnicodeOrdinalIgnoreCase, 450));
+        _ = new ElementSearchKeyDefinition
+        {
+            Collation = PortableCollation.UnicodeOrdinalIgnoreCase,
+            MaximumElementCodeUnits = 450
+        };
+        _ = PortableProjection.ElementBoundarySearchKey;
         _ = new Func<Groundwork.Kernel.StorageUnit, PortabilityValidationResult>(unit => PortabilityValidator.Validate(unit));
         _ = new Func<Groundwork.Kernel.StorageUnit, PortabilityValidationResult>(unit => PortabilityValidator.ValidatePortableDefaults(unit));
         _ = new Func<Groundwork.Kernel.StorageDeclarationBuilder, Groundwork.Kernel.StorageDeclarationBuilder>(builder =>
@@ -253,6 +266,27 @@ internal static class PublicApiApprovalFixture
         };
         _ = new Func<Groundwork.Kernel.StorageUnit, string, QueryRenderOptions>(
             (unit, selectedIndex) => unit.CreateQueryRenderOptions(selectedIndex));
+        var elementSearchKey = new QueryElementSearchKeyColumn(
+            "tags",
+            "__gw_tags_elements",
+            QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase,
+            450);
+        _ = new Predicate.ElementSubstring(
+            new ElementSetRef("tags", QueryType.String),
+            "approved",
+            Anchor.Contains,
+            QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase);
+        _ = new QueryRenderOptions
+        {
+            ElementSearchKeyColumns = new Dictionary<string, QueryElementSearchKeyColumn>(StringComparer.Ordinal)
+            {
+                ["tags"] = elementSearchKey
+            }
+        };
+        _ = new Func<QueryRequest, IReadOnlyDictionary<string, QueryElementSearchKeyColumn>, QueryRequest>(
+            QueryElementSearchKeyRewriter.Rewrite);
+        _ = new Func<Groundwork.Kernel.StorageUnit, IReadOnlyDictionary<string, QueryElementSearchKeyColumn>>(
+            SearchKeyQueryMappings.ElementFor);
         _ = new Func<Groundwork.Kernel.StorageUnit, RecordTable<ApprovalRecord>>(
             RecordTable.FromGenerated<ApprovalRecord>);
         _ = new Func<RecordTable<ApprovalRecord>, IStorageProviderConnection, RecordTableSession<ApprovalRecord>>((table, connection) => table.Open(connection));

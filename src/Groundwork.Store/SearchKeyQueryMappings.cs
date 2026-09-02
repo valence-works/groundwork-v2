@@ -48,6 +48,48 @@ public static class SearchKeyQueryMappings
                 StringComparer.Ordinal);
     }
 
+    /// <summary>Builds mappings for positional JSON element search-key arrays.</summary>
+    public static IReadOnlyDictionary<string, QueryElementSearchKeyColumn> ElementFor(StorageUnit unit)
+    {
+        ArgumentNullException.ThrowIfNull(unit);
+        var derived = unit.DerivedColumns
+            .Where(column => column.Projection == PortableProjection.ElementBoundarySearchKey)
+            .ToDictionary(column => column.SourceColumn, StringComparer.Ordinal);
+        return unit.Columns
+            .Where(column => column.Type == PortableType.Json && column.ElementSearchKey is not null)
+            .ToDictionary(
+                column => column.Name,
+                column =>
+                {
+                    if (!derived.TryGetValue(column.Name, out var physical))
+                    {
+                        throw new InvalidOperationException(
+                            $"Element search-key declaration '{column.Name}' has no expanded physical projection.");
+                    }
+
+                    var identity = PortableElementSearchKeyAlgorithm.Parse(physical.AlgorithmId);
+                    if (identity.MaximumElementCodeUnits != column.ElementSearchKey!.MaximumElementCodeUnits)
+                    {
+                        throw new InvalidOperationException(
+                            $"Element search-key mapping '{physical.Name}' has stale bound metadata. Rebuild the projection before use.");
+                    }
+                    var policy = identity.Policy switch
+                    {
+                        PortableStringComparisonPolicy.Ordinal => QuerySearchKeyPolicy.Ordinal,
+                        PortableStringComparisonPolicy.AsciiIgnoreCase => QuerySearchKeyPolicy.AsciiIgnoreCase,
+                        PortableStringComparisonPolicy.UnicodeOrdinalIgnoreCase => QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase,
+                        var unsupported => throw new InvalidOperationException(
+                            $"Element search-key mapping '{physical.Name}' cannot use comparison policy '{unsupported}'.")
+                    };
+                    return new QueryElementSearchKeyColumn(
+                        column.Name,
+                        physical.Name,
+                        policy,
+                        identity.MaximumElementCodeUnits);
+                },
+                StringComparer.Ordinal);
+    }
+
     /// <summary>Retargets caller-declared logical index columns to their physical search keys.</summary>
     public static IReadOnlyList<QueryIndexDeclaration> RetargetIndexes(
         StorageUnit unit,

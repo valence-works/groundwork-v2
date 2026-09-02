@@ -146,13 +146,36 @@ public sealed class CoverageCorpusTests
     [Fact]
     public void Element_substring_is_bounded_scan_only_until_explicitly_accepted()
     {
-        var predicate = new Predicate.ElementSubstring(new ElementSetRef("text_values", QueryType.String), "pen", Anchor.Contains);
-        var refused = QueryCoverageChecker.Check(Request(predicate), [Index(Text)]);
+        const string physicalColumn = "__groundwork_search_text_values";
+        var predicate = new Predicate.ElementSubstring(
+            new ElementSetRef("text_values", QueryType.String),
+            "pen",
+            Anchor.Contains,
+            QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase);
+        var mappings = new Dictionary<string, QueryElementSearchKeyColumn>(StringComparer.Ordinal)
+        {
+            ["text_values"] = new(
+                "text_values",
+                physicalColumn,
+                QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase,
+                maximumElementCodeUnits: 450)
+        };
+        var physicalIndex = new CoverageIndex(
+            "ix_element_search",
+            [new CoverageIndexColumn(physicalColumn, isNullable: true)]);
+        var mapped = QueryElementSearchKeyRewriter.Rewrite(Request(predicate), mappings);
+        var mappedPredicate = Assert.IsType<Predicate.ElementSubstring>(mapped.Where);
+        Assert.Equal(physicalColumn, mappedPredicate.Set.Name);
+        Assert.Equal(QueryStringComparisonPolicy.Ordinal, mappedPredicate.StringComparison);
+
+        var refused = QueryCoverageChecker.Check(mapped, [physicalIndex]);
 
         Assert.False(refused.IsCovered);
+        Assert.Null(refused.Index);
         Assert.Contains(refused.Refusals, refusal => refusal.Code == "GW-COVER-016");
+        Assert.All(refused.Refusals, refusal => Assert.DoesNotContain("Add: [GwIndex(", refusal.SuggestedDeclaration, StringComparison.Ordinal));
 
-        var accepted = new QueryRequest(
+        var acceptedLogical = new QueryRequest(
             Table,
             predicate,
             [],
@@ -164,10 +187,12 @@ public sealed class CoverageCorpusTests
                 "groundwork",
                 new DateTimeOffset(2099, 1, 1, 0, 0, 0, TimeSpan.Zero))
         );
-        var result = QueryCoverageChecker.Check(accepted, [Index(Text)]);
+        var accepted = QueryElementSearchKeyRewriter.Rewrite(acceptedLogical, mappings);
+        var result = QueryCoverageChecker.Check(accepted, [physicalIndex]);
         Assert.False(result.IsCovered);
+        Assert.Null(result.Index);
         Assert.Contains(result.Refusals, refusal => refusal.Code == "GW-COVER-016");
-        QueryCoverageEnforcer.EnsureCovered(accepted, [Index(Text)], new DateTimeOffset(2028, 1, 1, 0, 0, 0, TimeSpan.Zero));
+        QueryCoverageEnforcer.EnsureCovered(accepted, [physicalIndex], new DateTimeOffset(2028, 1, 1, 0, 0, 0, TimeSpan.Zero));
     }
 
     private static object[] Case(string name, QueryRequest request, CoverageIndex index, bool expectedCovered) =>

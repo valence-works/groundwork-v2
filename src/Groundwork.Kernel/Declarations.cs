@@ -68,7 +68,8 @@ public enum PortableProjection
     UnicodeFold,
     BoundarySearchKey,
     LocaleSortKey,
-    Sha256
+    Sha256,
+    ElementBoundarySearchKey
 }
 
 public enum SortDirection
@@ -367,6 +368,21 @@ public sealed record LocaleSortKeyDefinition
     public required int MaximumExpansionFactor { get; init; }
 }
 
+/// <summary>
+/// Declares a provider-owned parallel JSON array containing one boundary-delimited search key for
+/// each string member of a JSON array column. Non-string members retain their slot as JSON null.
+/// </summary>
+public sealed record ElementSearchKeyDefinition
+{
+    public required PortableCollation Collation { get; init; }
+
+    /// <summary>
+    /// Optional maximum source UTF-16 length for each string element. Values beyond this bound are
+    /// refused rather than truncated during writes or data-migration backfills.
+    /// </summary>
+    public int? MaximumElementCodeUnits { get; init; }
+}
+
 public sealed record ColumnDefinition
 {
     public required string Name { get; init; }
@@ -380,6 +396,7 @@ public sealed record ColumnDefinition
     public PortableCollation? LogicalCollation { get; init; }
     /// <summary>Optional locale-aware ordering implemented by a provider-owned ICU sort key.</summary>
     public LocaleSortKeyDefinition? LocaleSortKey { get; init; }
+    public ElementSearchKeyDefinition? ElementSearchKey { get; init; }
     public PortableDefault? Default { get; init; }
     public ColumnGeneration Generation { get; init; } = ColumnGeneration.Supplied;
 

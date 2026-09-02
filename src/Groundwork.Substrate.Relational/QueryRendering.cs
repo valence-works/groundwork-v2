@@ -290,6 +290,8 @@ public static class RelationalQueryResultReader
             var parameter = command.CreateParameter();
             parameter.ParameterName = "@" + value.Name;
             parameter.Value = value.Value ?? DBNull.Value;
+            if (value.Type == QueryType.String && value.Value is string text && text.Length > 4_000)
+                parameter.Size = -1;
             command.Parameters.Add(parameter);
         }
     }
@@ -360,7 +362,9 @@ public abstract class RelationalQueryRenderer
         if (request.Join is not null)
             return RenderJoined(request, options);
         options ??= QueryRenderOptions.Default;
-        request = QuerySearchKeyRewriter.Rewrite(request, options.SearchKeyColumns);
+        request = QueryElementSearchKeyRewriter.Rewrite(
+            QuerySearchKeyRewriter.Rewrite(request, options.SearchKeyColumns),
+            options.ElementSearchKeyColumns);
         if (options.InValueLimit <= 0)
             throw new ArgumentOutOfRangeException(nameof(options), "The In value limit must be positive.");
 
@@ -575,7 +579,9 @@ public abstract class RelationalQueryRenderer
     private RelationalQueryCommand RenderJoined(QueryRequest request, QueryRenderOptions? options)
     {
         options ??= QueryRenderOptions.Default;
-        request = QuerySearchKeyRewriter.Rewrite(request, options.SearchKeyColumns);
+        request = QueryElementSearchKeyRewriter.Rewrite(
+            QuerySearchKeyRewriter.Rewrite(request, options.SearchKeyColumns),
+            options.ElementSearchKeyColumns);
         if (options.InValueLimit <= 0)
             throw new ArgumentOutOfRangeException(nameof(options), "The In value limit must be positive.");
 

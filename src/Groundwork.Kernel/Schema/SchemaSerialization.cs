@@ -60,6 +60,13 @@ public static partial class PhysicalSchemaAppliedStateSerializer
 
     private static void ModifyTypeInfo(JsonTypeInfo typeInfo)
     {
+        if (typeInfo.Type == typeof(ColumnDefinition))
+        {
+            var elementSearchKey = typeInfo.Properties.Single(property =>
+                string.Equals(property.Name, nameof(ColumnDefinition.ElementSearchKey), StringComparison.OrdinalIgnoreCase));
+            elementSearchKey.ShouldSerialize = static (_, value) => value is ElementSearchKeyDefinition;
+            return;
+        }
         if (typeInfo.Type != typeof(StorageUnit))
             return;
         var references = typeInfo.Properties.Single(property =>
