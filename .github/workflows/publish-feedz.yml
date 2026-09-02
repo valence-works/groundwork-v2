@@ -77,6 +77,10 @@ jobs:
         env:
           PACKAGE_VERSION: ${{ steps.version.outputs.version }}
         run: eng/verify-package-layout.sh artifacts/packages "$PACKAGE_VERSION"
+      - name: Generate exact-package API reference
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.version }}
+        run: python3 eng/verify-api-reference.py artifacts/packages "$PACKAGE_VERSION" artifacts/api-reference
       - name: Run the clean-room public API and tool proof from these artifacts
         env:
           GROUNDWORK_PUBLIC_API_PACKAGES: artifacts/packages
@@ -87,6 +91,12 @@ jobs:
           name: groundwork-packages-${{ steps.version.outputs.version }}
           path: artifacts/packages
           if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: groundwork-api-reference-${{ steps.version.outputs.version }}
+          path: artifacts/api-reference
+          if-no-files-found: error
+          retention-days: 7
 
   publish:
     needs: package

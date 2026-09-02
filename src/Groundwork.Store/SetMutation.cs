@@ -107,7 +107,7 @@ public sealed record SetMutationResult(long MatchedRows)
 /// providers refuse direct interface calls that do not carry it. Providers then validate and
 /// physicalize assignments again so admitted callers still cannot mutate keys or provider-owned
 /// projections. Admission — access, capability, portability, and index coverage — belongs to
-/// <see cref="SetMutationSessionExtensions"/> so it is decided once for every provider.
+/// <c>SetMutationSessionExtensions</c> so it is decided once for every provider.
 /// </remarks>
 public interface ISetMutationStorageSession
 {

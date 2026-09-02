@@ -88,6 +88,9 @@ public sealed class PackagingContractTests
         var targets = File.ReadAllText(Path.Combine(root, "Directory.Build.targets"));
         Assert.Contains("Microsoft.SourceLink.GitHub", targets, StringComparison.Ordinal);
         Assert.Contains("docs/v2/package-readmes/$(PackageId).md", targets, StringComparison.Ordinal);
+        Assert.Contains("<GenerateDocumentationFile>true</GenerateDocumentationFile>", targets, StringComparison.Ordinal);
+        Assert.Contains("GroundworkPackApiDocumentation", targets, StringComparison.Ordinal);
+        Assert.Contains("$(DocumentationFile)", targets, StringComparison.Ordinal);
 
         Assert.True(File.Exists(Path.Combine(root, "docs/v2/versioning.md")));
         Assert.True(File.Exists(Path.Combine(root, "docs/v2/support-matrix.md")));
@@ -330,6 +333,21 @@ public sealed class PackagingContractTests
     }
 
     [Fact]
+    public void Publication_workflows_gate_and_retain_the_exact_package_api_reference()
+    {
+        var root = RepositoryRoot.Find();
+        foreach (var workflowName in new[] { "publish-feedz.yml", "publish-nuget.yml" })
+        {
+            var workflow = File.ReadAllText(Path.Combine(root, ".github/workflows", workflowName));
+            var layout = workflow.IndexOf("verify-package-layout.sh", StringComparison.Ordinal);
+            var apiReference = workflow.IndexOf("verify-api-reference.py", StringComparison.Ordinal);
+            Assert.True(layout >= 0 && apiReference > layout, $"{workflowName} must validate package layout before API references.");
+            Assert.Contains("artifacts/packages \"$PACKAGE_VERSION\" artifacts/api-reference", workflow, StringComparison.Ordinal);
+            Assert.Contains("api-reference", workflow, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
     public void Documentation_verification_is_path_scoped_and_does_not_run_solution_lanes()
     {
         var root = RepositoryRoot.Find();
@@ -342,7 +360,9 @@ public sealed class PackagingContractTests
         foreach (var path in new[]
         {
             "README.md", "docs/**", "samples/**", "eng/verify-documentation.py",
-            "eng/generate-provider-matrices.sh", "eng/provider-matrix/**", ".github/workflows/documentation-evidence.yml"
+            "eng/generate-provider-matrices.sh", "eng/provider-matrix/**", "eng/verify-api-reference.py",
+            "eng/api-documentation-baseline.json",
+            ".github/workflows/documentation-evidence.yml"
         })
             Assert.Contains(path, triggers, StringComparison.Ordinal);
         Assert.Contains("python3 eng/verify-documentation.py", workflow, StringComparison.Ordinal);
@@ -354,7 +374,9 @@ public sealed class PackagingContractTests
         Assert.DoesNotContain("actions/checkout@v4", workflow, StringComparison.Ordinal);
         Assert.Contains("actions/checkout@11d5960a326750d5838078e36cf38b85af677262", workflow, StringComparison.Ordinal);
         Assert.Contains("actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9", workflow, StringComparison.Ordinal);
-        Assert.Contains("dotnet-version: 10.0.x", workflow, StringComparison.Ordinal);
+        Assert.Contains("dotnet-version: |", workflow, StringComparison.Ordinal);
+        Assert.Contains("8.0.x", workflow, StringComparison.Ordinal);
+        Assert.Contains("10.0.x", workflow, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -395,9 +417,9 @@ public sealed class PackagingContractTests
         Assert.Equal(2, Regex.Matches(
             workflow,
             "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093").Count);
-        Assert.Single(Regex.Matches(
+        Assert.Equal(2, Regex.Matches(
             workflow,
-            "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"));
+            "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02").Count);
         Assert.Contains("# v4.3.1", workflow, StringComparison.Ordinal);
         Assert.Contains("# v4.3.0", workflow, StringComparison.Ordinal);
         Assert.Contains("# v4.4.0", workflow, StringComparison.Ordinal);

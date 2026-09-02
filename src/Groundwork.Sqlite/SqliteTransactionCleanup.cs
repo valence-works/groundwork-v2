@@ -4,7 +4,7 @@ namespace Groundwork.Sqlite;
 
 /// <summary>
 /// Shared rollback-failure guard for every SQLite write path that opens its own transaction
-/// (<see cref="SqliteUnitOfWork"/> and <see cref="SqliteStorageSession"/>'s single-write path).
+/// (the SQLite unit-of-work path and <see cref="SqliteStorageSession"/>'s single-write path).
 /// </summary>
 /// <remarks>
 /// <para>

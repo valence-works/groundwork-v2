@@ -486,7 +486,7 @@ public sealed record IndexDefinition
     /// compared to it. Opt in per unit to coexist read-side with a catalog another tool extends.
     /// </summary>
     /// <remarks>
-    /// Deliberately absent from <see cref="SchemaSubject.Fingerprint"/> and from the persisted
+    /// Deliberately absent from <see cref="Groundwork.Kernel.Schema.SchemaSubject.Fingerprint"/> and from the persisted
     /// applied state. The fingerprint answers one question — is the deployed catalog the shape this
     /// build compiled — and a foreign column is by construction not part of that shape; folding a
     /// tolerance setting into it would make changing the setting look like a schema change, force a
@@ -557,7 +557,7 @@ public sealed record StorageUnit
     /// compared to it. Opt in per unit to coexist read-side with a catalog another tool extends.
     /// </summary>
     /// <remarks>
-    /// Deliberately absent from <see cref="SchemaSubject.Fingerprint"/> and from the persisted
+    /// Deliberately absent from <see cref="Groundwork.Kernel.Schema.SchemaSubject.Fingerprint"/> and from the persisted
     /// applied state. The fingerprint answers one question — is the deployed catalog the shape this
     /// build compiled — and a foreign column is by construction not part of that shape; folding a
     /// tolerance setting into it would make changing the setting look like a schema change, force a

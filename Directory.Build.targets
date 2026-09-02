@@ -17,6 +17,12 @@
 
   <PropertyGroup Condition="'$(IsPackable)' == 'true'">
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <!-- Keep API-reference generation tied to the exact assemblies shipped in every public
+         package. The XML file is packed beside each library assembly and is not synthesized by
+         the documentation tooling. -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <DocumentationFile>$(TargetDir)$(AssemblyName).xml</DocumentationFile>
+    <NoWarn>$(NoWarn);1591</NoWarn>
   </PropertyGroup>
 
   <!-- Every public package ships its own readme, so a nuget.org listing describes that package
@@ -33,6 +39,23 @@
            Text="Package $(PackageId) has no readme. Create $(GroundworkPackageReadme): every public package describes itself on nuget.org." />
     <ItemGroup>
       <None Include="$(GroundworkPackageReadme)" Pack="true" PackagePath="README.md" Visible="false" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="GroundworkPackApiDocumentation"
+          BeforeTargets="_GetPackageFiles;GenerateNuspec"
+          Condition="'$(IsPackable)' == 'true' and Exists('$(DocumentationFile)') and ('$(IsRoslynComponent)' == 'true' or '$(PackAsTool)' == 'true' or '$(IncludeBuildOutput)' == 'false')">
+    <PropertyGroup>
+      <GroundworkApiDocumentationPackagePath Condition="'$(IsRoslynComponent)' == 'true'">analyzers/dotnet/cs</GroundworkApiDocumentationPackagePath>
+      <GroundworkApiDocumentationPackagePath Condition="'$(PackAsTool)' == 'true'">tools/$(TargetFramework)/any</GroundworkApiDocumentationPackagePath>
+      <GroundworkApiDocumentationPackagePath Condition="'$(GroundworkApiDocumentationPackagePath)' == '' and '$(IncludeBuildOutput)' == 'false'">tools/$(TargetFramework)</GroundworkApiDocumentationPackagePath>
+      <GroundworkApiDocumentationPackagePath Condition="'$(GroundworkApiDocumentationPackagePath)' == ''">$(BuildOutputTargetFolder)/$(TargetFramework)</GroundworkApiDocumentationPackagePath>
+    </PropertyGroup>
+    <ItemGroup>
+      <None Include="$(DocumentationFile)"
+            Pack="true"
+            PackagePath="$(GroundworkApiDocumentationPackagePath)"
+            Visible="false" />
     </ItemGroup>
   </Target>
 

@@ -1,0 +1,189 @@
+{
+  "entries": {
+    "Groundwork.Analyzers|analyzers/dotnet/cs/Groundwork.Analyzers.dll": {
+      "maximumUndocumentedMembers": 15,
+      "publicApiMembers": 18
+    },
+    "Groundwork.Diagnostics|lib/net10.0/Groundwork.Diagnostics.dll": {
+      "maximumUndocumentedMembers": 3,
+      "publicApiMembers": 7
+    },
+    "Groundwork.Diagnostics|lib/net8.0/Groundwork.Diagnostics.dll": {
+      "maximumUndocumentedMembers": 3,
+      "publicApiMembers": 7
+    },
+    "Groundwork.Documents|lib/net10.0/Groundwork.Documents.dll": {
+      "maximumUndocumentedMembers": 123,
+      "publicApiMembers": 143
+    },
+    "Groundwork.Documents|lib/net8.0/Groundwork.Documents.dll": {
+      "maximumUndocumentedMembers": 123,
+      "publicApiMembers": 143
+    },
+    "Groundwork.EntityFrameworkCore|lib/net10.0/Groundwork.EntityFrameworkCore.dll": {
+      "maximumUndocumentedMembers": 54,
+      "publicApiMembers": 59
+    },
+    "Groundwork.EntityFrameworkCore|lib/net8.0/Groundwork.EntityFrameworkCore.dll": {
+      "maximumUndocumentedMembers": 54,
+      "publicApiMembers": 59
+    },
+    "Groundwork.Extensions.DependencyInjection|lib/net10.0/Groundwork.Extensions.DependencyInjection.dll": {
+      "maximumUndocumentedMembers": 55,
+      "publicApiMembers": 97
+    },
+    "Groundwork.Extensions.DependencyInjection|lib/net8.0/Groundwork.Extensions.DependencyInjection.dll": {
+      "maximumUndocumentedMembers": 55,
+      "publicApiMembers": 97
+    },
+    "Groundwork.Kernel|lib/net10.0/Groundwork.Kernel.dll": {
+      "maximumUndocumentedMembers": 1607,
+      "publicApiMembers": 1929
+    },
+    "Groundwork.Kernel|lib/net8.0/Groundwork.Kernel.dll": {
+      "maximumUndocumentedMembers": 1607,
+      "publicApiMembers": 1929
+    },
+    "Groundwork.MongoDb|lib/net10.0/Groundwork.MongoDb.dll": {
+      "maximumUndocumentedMembers": 183,
+      "publicApiMembers": 218
+    },
+    "Groundwork.MongoDb|lib/net8.0/Groundwork.MongoDb.dll": {
+      "maximumUndocumentedMembers": 183,
+      "publicApiMembers": 218
+    },
+    "Groundwork.MySql|lib/net10.0/Groundwork.MySql.dll": {
+      "maximumUndocumentedMembers": 90,
+      "publicApiMembers": 95
+    },
+    "Groundwork.MySql|lib/net8.0/Groundwork.MySql.dll": {
+      "maximumUndocumentedMembers": 90,
+      "publicApiMembers": 95
+    },
+    "Groundwork.PostgreSql|lib/net10.0/Groundwork.PostgreSql.dll": {
+      "maximumUndocumentedMembers": 81,
+      "publicApiMembers": 91
+    },
+    "Groundwork.PostgreSql|lib/net8.0/Groundwork.PostgreSql.dll": {
+      "maximumUndocumentedMembers": 81,
+      "publicApiMembers": 91
+    },
+    "Groundwork.Query.Linq.Execution|lib/net10.0/Groundwork.Query.Linq.Execution.dll": {
+      "maximumUndocumentedMembers": 10,
+      "publicApiMembers": 13
+    },
+    "Groundwork.Query.Linq.Execution|lib/net8.0/Groundwork.Query.Linq.Execution.dll": {
+      "maximumUndocumentedMembers": 10,
+      "publicApiMembers": 13
+    },
+    "Groundwork.Query.Linq.Sqlite|lib/net10.0/Groundwork.Query.Linq.Sqlite.dll": {
+      "maximumUndocumentedMembers": 6,
+      "publicApiMembers": 7
+    },
+    "Groundwork.Query.Linq.Sqlite|lib/net8.0/Groundwork.Query.Linq.Sqlite.dll": {
+      "maximumUndocumentedMembers": 6,
+      "publicApiMembers": 7
+    },
+    "Groundwork.Query.Linq|lib/netstandard2.0/Groundwork.Query.Linq.dll": {
+      "maximumUndocumentedMembers": 226,
+      "publicApiMembers": 244
+    },
+    "Groundwork.Query.Model|lib/netstandard2.0/Groundwork.Query.Model.dll": {
+      "maximumUndocumentedMembers": 740,
+      "publicApiMembers": 796
+    },
+    "Groundwork.Query.Planning|lib/netstandard2.0/Groundwork.Query.Planning.dll": {
+      "maximumUndocumentedMembers": 132,
+      "publicApiMembers": 149
+    },
+    "Groundwork.Records.Store|lib/net10.0/Groundwork.Records.Store.dll": {
+      "maximumUndocumentedMembers": 11,
+      "publicApiMembers": 14
+    },
+    "Groundwork.Records.Store|lib/net8.0/Groundwork.Records.Store.dll": {
+      "maximumUndocumentedMembers": 11,
+      "publicApiMembers": 14
+    },
+    "Groundwork.Records|lib/net10.0/Groundwork.Records.dll": {
+      "maximumUndocumentedMembers": 145,
+      "publicApiMembers": 182
+    },
+    "Groundwork.Records|lib/net8.0/Groundwork.Records.dll": {
+      "maximumUndocumentedMembers": 145,
+      "publicApiMembers": 182
+    },
+    "Groundwork.Schema.Generator|analyzers/dotnet/cs/Groundwork.Schema.Generator.dll": {
+      "maximumUndocumentedMembers": 5,
+      "publicApiMembers": 6
+    },
+    "Groundwork.SchemaTool.MSBuild|tools/net10.0/Groundwork.SchemaTool.MSBuild.dll": {
+      "maximumUndocumentedMembers": 5,
+      "publicApiMembers": 5
+    },
+    "Groundwork.Schema|lib/netstandard2.0/Groundwork.Schema.dll": {
+      "maximumUndocumentedMembers": 298,
+      "publicApiMembers": 340
+    },
+    "Groundwork.SqlServer|lib/net10.0/Groundwork.SqlServer.dll": {
+      "maximumUndocumentedMembers": 41,
+      "publicApiMembers": 47
+    },
+    "Groundwork.SqlServer|lib/net8.0/Groundwork.SqlServer.dll": {
+      "maximumUndocumentedMembers": 41,
+      "publicApiMembers": 47
+    },
+    "Groundwork.Sqlite|lib/net10.0/Groundwork.Sqlite.dll": {
+      "maximumUndocumentedMembers": 26,
+      "publicApiMembers": 31
+    },
+    "Groundwork.Sqlite|lib/net8.0/Groundwork.Sqlite.dll": {
+      "maximumUndocumentedMembers": 26,
+      "publicApiMembers": 31
+    },
+    "Groundwork.Store|lib/net10.0/Groundwork.Store.dll": {
+      "maximumUndocumentedMembers": 546,
+      "publicApiMembers": 687
+    },
+    "Groundwork.Store|lib/net8.0/Groundwork.Store.dll": {
+      "maximumUndocumentedMembers": 546,
+      "publicApiMembers": 687
+    },
+    "Groundwork.Substrate.Mongo|lib/net10.0/Groundwork.Substrate.Mongo.dll": {
+      "maximumUndocumentedMembers": 30,
+      "publicApiMembers": 33
+    },
+    "Groundwork.Substrate.Mongo|lib/net8.0/Groundwork.Substrate.Mongo.dll": {
+      "maximumUndocumentedMembers": 30,
+      "publicApiMembers": 33
+    },
+    "Groundwork.Substrate.Relational|lib/net10.0/Groundwork.Substrate.Relational.dll": {
+      "maximumUndocumentedMembers": 444,
+      "publicApiMembers": 550
+    },
+    "Groundwork.Substrate.Relational|lib/net8.0/Groundwork.Substrate.Relational.dll": {
+      "maximumUndocumentedMembers": 444,
+      "publicApiMembers": 550
+    },
+    "Groundwork.Testing|lib/net10.0/Groundwork.Testing.dll": {
+      "maximumUndocumentedMembers": 196,
+      "publicApiMembers": 222
+    },
+    "Groundwork.Testing|lib/net8.0/Groundwork.Testing.dll": {
+      "maximumUndocumentedMembers": 196,
+      "publicApiMembers": 222
+    },
+    "Groundwork.Tool|tools/net10.0/any/Groundwork.SchemaTool.dll": {
+      "maximumUndocumentedMembers": 135,
+      "publicApiMembers": 147
+    },
+    "Groundwork.Tool|tools/net8.0/any/Groundwork.SchemaTool.dll": {
+      "maximumUndocumentedMembers": 135,
+      "publicApiMembers": 147
+    }
+  },
+  "publicApiSnapshots": {
+    "net10.0": "59b58b3659423535378f41c53bda48d2a1f7fad0d04ab4ce62da85df6cb2d4a0",
+    "net8.0": "8f4f7cd1fa9e417d736d9e1bc64ce7f5d7f36d666e2bdb52531baa31aee0ae17"
+  },
+  "schemaVersion": 1
+}
