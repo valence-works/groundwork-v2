@@ -78,6 +78,10 @@ stop_sample() {
 start_sample() {
   local apply_schema="$1"
   local label="$2"
+  local environment="Production"
+  if [[ "$apply_schema" == "true" ]]; then
+    environment="Development"
+  fi
   port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
   sample_log="$build_root/$label.log"
   health_json="$build_root/$label-health.json"
@@ -85,6 +89,7 @@ start_sample() {
   local ready_ns
   local ready=false
   start_ns="$(python3 -c 'import time; print(time.monotonic_ns())')"
+  ASPNETCORE_ENVIRONMENT="$environment" \
   ASPNETCORE_URLS="http://127.0.0.1:$port" \
   Groundwork__ConnectionString="Data Source=$database" \
   Groundwork__DevelopmentApplySchema="$apply_schema" \
