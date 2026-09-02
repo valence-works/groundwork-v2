@@ -14,6 +14,7 @@ including all four drivers here would make the deploy-size evidence meaningless.
 Development schema creation is explicit. The default remains inspect-only.
 
 ```bash
+ASPNETCORE_ENVIRONMENT=Development \
 Groundwork__DevelopmentApplySchema=true \
 Groundwork__ConnectionString='Data Source=groundwork-native-aot.db' \
 dotnet run --project samples/Groundwork.Samples.NativeAotApi
