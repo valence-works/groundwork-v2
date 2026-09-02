@@ -15,9 +15,13 @@ public sealed class SampleApiFactory : WebApplicationFactory<Program>
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
+        var provider = Environment.GetEnvironmentVariable("GROUNDWORK_SAMPLE_PROVIDER") ?? "sqlite";
+        var configuredConnection = Environment.GetEnvironmentVariable("GROUNDWORK_SAMPLE_CONNECTION");
+        var connectionString = configuredConnection
+            ?? (provider == "sqlite" ? $"Data Source={database}" : $"groundwork-sample-{Guid.NewGuid():N}");
         builder.UseEnvironment("Development");
-        builder.UseSetting("Groundwork:Provider", "sqlite");
-        builder.UseSetting("Groundwork:ConnectionString", $"Data Source={database}");
+        builder.UseSetting("Groundwork:Provider", provider);
+        builder.UseSetting("Groundwork:ConnectionString", connectionString);
         builder.UseSetting("Groundwork:DevelopmentApplySchema", "true");
     }
 

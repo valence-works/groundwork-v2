@@ -18,6 +18,8 @@
     <ProjectReference Include="../../src/Groundwork.PostgreSql/Groundwork.PostgreSql.csproj" />
     <ProjectReference Include="../../src/Groundwork.SqlServer/Groundwork.SqlServer.csproj" />
     <ProjectReference Include="../../src/Groundwork.MongoDb/Groundwork.MongoDb.csproj" />
+    <ProjectReference Include="../../src/Groundwork.MySql/Groundwork.MySql.csproj" />
+    <ProjectReference Include="../../src/Groundwork.Testing/Groundwork.Testing.csproj" />
   </ItemGroup>
 
   <ItemGroup>
