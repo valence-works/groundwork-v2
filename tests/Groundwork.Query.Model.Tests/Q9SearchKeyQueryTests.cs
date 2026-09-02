@@ -141,6 +141,82 @@ public sealed class Q9SearchKeyQueryTests
         }));
     }
 
+    [Theory]
+    [InlineData(QueryStringComparisonPolicy.AsciiIgnoreCase)]
+    [InlineData(QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase)]
+    public void Ordinal_identity_equality_does_not_rewrite_non_ordinal_comparison(
+        QueryStringComparisonPolicy policy)
+    {
+        var workflowExecutionId = new ColumnRef(
+            Table,
+            "workflowExecutionId",
+            QueryType.String,
+            false,
+            32,
+            stringComparison: policy);
+        var request = new QueryRequest(
+            Table,
+            new Predicate.Equal(workflowExecutionId, QueryConstant.Of(workflowExecutionId, "run-42")),
+            [],
+            Projection.All,
+            Paging.None);
+        var mapping = new QuerySearchKeyColumn(
+            workflowExecutionId.Name,
+            "__groundwork_ordinal_workflowExecutionId",
+            QuerySearchKeyPolicy.Ordinal,
+            128,
+            orderByPhysicalColumn: true,
+            supportsPrefixPredicates: false,
+            preservesOrdinalIdentity: true);
+
+        var rewritten = QuerySearchKeyRewriter.Rewrite(
+            request,
+            new Dictionary<string, QuerySearchKeyColumn> { [workflowExecutionId.Name] = mapping });
+
+        Assert.Same(request.Where, rewritten.Where);
+        Assert.Contains(
+            PortableQuerySemantics.Validate(rewritten).Refusals,
+            refusal => refusal.Code == "GW-SEM-TEXT-001");
+    }
+
+    [Theory]
+    [InlineData(QueryStringComparisonPolicy.AsciiIgnoreCase)]
+    [InlineData(QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase)]
+    public void Ordinal_identity_order_does_not_rewrite_non_ordinal_comparison(
+        QueryStringComparisonPolicy policy)
+    {
+        var workflowExecutionId = new ColumnRef(
+            Table,
+            "workflowExecutionId",
+            QueryType.String,
+            false,
+            32,
+            stringComparison: policy);
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(workflowExecutionId, OrderDirection.Ascending, NullOrder.Last)],
+            Projection.All,
+            Paging.None);
+        var mapping = new QuerySearchKeyColumn(
+            workflowExecutionId.Name,
+            "__groundwork_ordinal_workflowExecutionId",
+            QuerySearchKeyPolicy.Ordinal,
+            128,
+            orderByPhysicalColumn: true,
+            supportsPrefixPredicates: false,
+            preservesOrdinalIdentity: true);
+
+        var rewritten = QuerySearchKeyRewriter.Rewrite(
+            request,
+            new Dictionary<string, QuerySearchKeyColumn> { [workflowExecutionId.Name] = mapping });
+
+        Assert.Equal(request.Order, rewritten.Order);
+        Assert.Contains(
+            PortableQuerySemantics.Validate(rewritten).Refusals,
+            refusal => refusal.Code == "GW-SEM-TEXT-001");
+    }
+
     [Fact]
     public void Ordinal_identity_null_equality_remains_on_the_logical_column()
     {
@@ -303,6 +379,36 @@ public sealed class Q9SearchKeyQueryTests
         Assert.Equal(
             ["first", "second", "__groundwork_ordinal_second", "__groundwork_ordinal_first"],
             execution.Projection.Columns.Select(column => column.Name));
+    }
+
+    [Fact]
+    public void Projected_distinct_partial_order_keeps_the_complete_tuple_after_identity_rewrite()
+    {
+        var first = new ColumnRef(Table, "first", QueryType.String, false, 16);
+        var second = new ColumnRef(Table, "second", QueryType.String, false, 16);
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(first, OrderDirection.Descending, NullOrder.Last)],
+            Projection.ColumnsOnly(first, second),
+            Paging.OffsetLimit(0, 10),
+            distinct: true);
+        var options = QueryRenderOptions.Default with
+        {
+            SearchKeyColumns = new Dictionary<string, QuerySearchKeyColumn>
+            {
+                [first.Name] = new(first.Name, "__groundwork_ordinal_first", QuerySearchKeyPolicy.Ordinal, 64,
+                    orderByPhysicalColumn: true, supportsPrefixPredicates: false, preservesOrdinalIdentity: true),
+                [second.Name] = new(second.Name, "__groundwork_ordinal_second", QuerySearchKeyPolicy.Ordinal, 64,
+                    orderByPhysicalColumn: true, supportsPrefixPredicates: false, preservesOrdinalIdentity: true)
+            }
+        };
+
+        var execution = QueryRequestExecution.ForProviderPage(request, options);
+
+        Assert.Equal(
+            ["__groundwork_ordinal_first", "__groundwork_ordinal_second"],
+            execution.Order.Select(term => term.Column.Name));
     }
 
     [Fact]

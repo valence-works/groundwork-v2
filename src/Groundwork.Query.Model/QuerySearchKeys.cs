@@ -86,7 +86,10 @@ public static class QuerySearchKeyRewriter
         {
             if (term.Column.Table != TableId.Empty && term.Column.Table != table)
                 return term;
-            if (!mappings.TryGetValue(term.Column.Name, out var mapping) || !mapping.OrderByPhysicalColumn)
+            if (!mappings.TryGetValue(term.Column.Name, out var mapping) ||
+                !mapping.OrderByPhysicalColumn ||
+                (mapping.PreservesOrdinalIdentity &&
+                 term.Column.StringComparison != QueryStringComparisonPolicy.Ordinal))
                 return term;
             changed = true;
             return new OrderTerm(
@@ -114,6 +117,7 @@ public static class QuerySearchKeyRewriter
                     return equal;
                 if (equal.Value.Kind == QueryConstantKind.Null ||
                     equal.Column.Type != QueryType.String ||
+                    equal.Column.StringComparison != QueryStringComparisonPolicy.Ordinal ||
                     !mappings.TryGetValue(equal.Column.Name, out var equalityMapping) ||
                     !equalityMapping.PreservesOrdinalIdentity ||
                     !string.Equals(equalityMapping.SourceColumn, equal.Column.Name, StringComparison.Ordinal))

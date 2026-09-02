@@ -507,7 +507,13 @@ public static class QueryRequestExecution
             return request;
 
         var order = options.GetEffectiveOrder(request);
-        var executionOrder = request.Order;
+        // A columns-only DISTINCT result is ordered by its complete projected tuple. Keep that
+        // effective order while replacing any marked source terms with their hidden identities;
+        // starting from request.Order would drop projected tie-breaks when the caller supplied a
+        // partial order.
+        var executionOrder = request.Distinct && !request.Projection.AllColumns
+            ? order
+            : request.Order;
         var projection = request.Projection;
         if (!projection.AllColumns)
         {
