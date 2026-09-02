@@ -51,7 +51,7 @@ MongoDB does the same inspect-only split at `OpenSession` via its public `Inspec
 ## The `groundwork` CLI
 
 ```bash
-dotnet tool install --global Groundwork.Tool --version 0.4.0-preview.5 \
+dotnet tool install --global Groundwork.Tool --version 0.4.0-preview.6 \
   --add-source https://f.feedz.io/valence-works/groundwork/nuget/index.json
 ```
 
@@ -375,7 +375,7 @@ therefore **identical to the assembly metadata fingerprint** for the same schema
 ## MSBuild verification
 
 ```xml
-<PackageReference Include="Groundwork.SchemaTool.MSBuild" Version="0.4.0-preview.5" PrivateAssets="all" />
+<PackageReference Include="Groundwork.SchemaTool.MSBuild" Version="0.4.0-preview.6" PrivateAssets="all" />
 
 <PropertyGroup>
   <GroundworkSchemaFile>$(MSBuildProjectDirectory)/groundwork.schema.json</GroundworkSchemaFile>
