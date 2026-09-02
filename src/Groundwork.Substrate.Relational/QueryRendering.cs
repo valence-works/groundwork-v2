@@ -565,6 +565,7 @@ public abstract class RelationalQueryRenderer
         else
         {
             string source;
+            var streamNativeDistinct = false;
             if (!request.Distinct)
             {
                 source = request.LatestPerKey is null
@@ -573,36 +574,47 @@ public abstract class RelationalQueryRenderer
             }
             else
             {
-                // Distinct is a provider operation, and its unit is the projected value rather
-                // than the raw row. A ranked CTE preserves the requested order while allowing
-                // order-only columns to be selected without making them part of the distinct key.
-                var baseCte = RenderLatestSource(request.LatestPerKey, selection, from, where, options);
-                var baseWhere = request.LatestPerKey is null ? "1 = 1" : "__groundwork_latest_rank = 1";
-                if (request.Projection.AllColumns)
+                streamNativeDistinct = CanStreamNativeDistinct(request, effectiveOrder, options);
+                if (streamNativeDistinct)
                 {
-                    source = baseCte + ", __groundwork_distinct AS (SELECT DISTINCT * FROM __groundwork_base WHERE " + baseWhere + ") " +
-                        "SELECT * FROM __groundwork_distinct WHERE 1 = 1";
+                    source = "SELECT DISTINCT " + selection + " FROM " + from + " WHERE " + where;
                 }
                 else
                 {
-                    var partition = string.Join(", ", request.Projection.Columns
-                        .Where(column => !IsExecutionOnlySearchColumn(column, options))
-                        .Select(RenderDistinctPartition));
-                    var rankOrder = effectiveOrder.Count == 0
-                        ? "(SELECT 1)"
-                        : RenderOrder(effectiveOrder, options);
-                    var inputAlias = dialect.QuoteIdentifier("__groundwork_distinct_input");
-                    var rankAlias = dialect.QuoteIdentifier("__groundwork_distinct_rank");
-                    source = baseCte + ", __groundwork_distinct_ranked AS (SELECT " + inputAlias + ".*, ROW_NUMBER() OVER (PARTITION BY " +
-                        partition + " ORDER BY " + rankOrder + ") AS " + rankAlias + " FROM __groundwork_base AS " + inputAlias +
-                        " WHERE " + baseWhere + ") SELECT * FROM __groundwork_distinct_ranked WHERE " + rankAlias + " = 1";
+                    // Distinct is a provider operation, and its unit is the projected value rather
+                    // than the raw row. A ranked CTE preserves the requested order while allowing
+                    // order-only columns to be selected without making them part of the distinct
+                    // key, and preserves portable string equality where native equality differs.
+                    var baseCte = RenderLatestSource(request.LatestPerKey, selection, from, where, options);
+                    var baseWhere = request.LatestPerKey is null ? "1 = 1" : "__groundwork_latest_rank = 1";
+                    if (request.Projection.AllColumns)
+                    {
+                        source = baseCte + ", __groundwork_distinct AS (SELECT DISTINCT * FROM __groundwork_base WHERE " + baseWhere + ") " +
+                            "SELECT * FROM __groundwork_distinct WHERE 1 = 1";
+                    }
+                    else
+                    {
+                        var partition = string.Join(", ", request.Projection.Columns
+                            .Where(column => !IsExecutionOnlySearchColumn(column, options))
+                            .Select(RenderDistinctPartition));
+                        var rankOrder = effectiveOrder.Count == 0
+                            ? "(SELECT 1)"
+                            : RenderOrder(effectiveOrder, options);
+                        var inputAlias = dialect.QuoteIdentifier("__groundwork_distinct_input");
+                        var rankAlias = dialect.QuoteIdentifier("__groundwork_distinct_rank");
+                        source = baseCte + ", __groundwork_distinct_ranked AS (SELECT " + inputAlias + ".*, ROW_NUMBER() OVER (PARTITION BY " +
+                            partition + " ORDER BY " + rankOrder + ") AS " + rankAlias + " FROM __groundwork_base AS " + inputAlias +
+                            " WHERE " + baseWhere + ") SELECT * FROM __groundwork_distinct_ranked WHERE " + rankAlias + " = 1";
+                    }
                 }
             }
             sql = source;
             if (cursor is not null && (request.LatestPerKey is not null || request.Distinct))
                 sql += " AND (" + RenderContinuation(effectiveOrder, cursor, parameters, ref parameterIndex) + ")";
             if (effectiveOrder.Count != 0)
-                sql += " ORDER BY " + RenderOrder(effectiveOrder, options);
+                sql += " ORDER BY " + (streamNativeDistinct
+                    ? RenderStreamableDistinctOrder(effectiveOrder)
+                    : RenderOrder(effectiveOrder, options));
             else if ((request.Paging.Offset is not null || request.Paging.Limit is not null) && RequiresOrderForOffset)
                 sql += " ORDER BY (SELECT 1)";
             sql += RenderPaging(request.Paging, parameters, ref parameterIndex) + ";";
@@ -623,6 +635,51 @@ public abstract class RelationalQueryRenderer
             requiresCompositeMaterializer: false,
             statements: statements);
     }
+
+    private static bool CanStreamNativeDistinct(
+        QueryRequest request,
+        IReadOnlyList<OrderTerm> effectiveOrder,
+        QueryRenderOptions options)
+    {
+        if (request.LatestPerKey is not null ||
+            request.Projection.AllColumns ||
+            request.Projection.Columns.Length == 0 ||
+            effectiveOrder.Any(term => !request.Projection.Columns.Any(column => SameColumn(column, term.Column))))
+        {
+            return false;
+        }
+
+        if (request.Projection.Columns.Length != 2 || effectiveOrder.Count != 1)
+            return false;
+
+        var projected = request.Projection.Columns;
+        var mappings = options.SearchKeyColumns.Values.Where(candidate =>
+            candidate.Policy == QuerySearchKeyPolicy.Ordinal &&
+            candidate.OrderByPhysicalColumn &&
+            candidate.PreservesOrdinalIdentity &&
+            !string.Equals(candidate.SourceColumn, candidate.PhysicalColumn, StringComparison.Ordinal) &&
+            projected.Any(column =>
+                column.Type == QueryType.String &&
+                !column.IsNullable &&
+                column.StringComparison == QueryStringComparisonPolicy.Ordinal &&
+                string.Equals(column.Name, candidate.SourceColumn, StringComparison.Ordinal)) &&
+            projected.Any(column =>
+                column.Type == QueryType.String &&
+                !column.IsNullable &&
+                string.Equals(column.Name, candidate.PhysicalColumn, StringComparison.Ordinal)))
+            .Take(2)
+            .ToArray();
+        if (mappings.Length != 1)
+            return false;
+        var mapping = mappings[0];
+        return
+            string.Equals(effectiveOrder[0].Column.Name, mapping.PhysicalColumn, StringComparison.Ordinal);
+    }
+
+    private string RenderStreamableDistinctOrder(IReadOnlyList<OrderTerm> order) =>
+        string.Join(", ", order.Select(term =>
+            RenderColumn(term.Column) + " " +
+            (term.Direction == OrderDirection.Ascending ? "ASC" : "DESC")));
 
     private RelationalQueryCommand RenderJoined(QueryRequest request, QueryRenderOptions? options)
     {

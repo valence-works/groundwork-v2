@@ -9,6 +9,23 @@ public sealed class Q9SearchKeyQueryTests
     private static readonly TableId Table = new("tickets");
     private static readonly ColumnRef Status = new(Table, "status", QueryType.String, true, 32, stringComparison: QueryStringComparisonPolicy.AsciiIgnoreCase);
 
+    [Theory]
+    [InlineData("name", "name", QuerySearchKeyPolicy.Ordinal)]
+    [InlineData("name", "nameKey", QuerySearchKeyPolicy.AsciiIgnoreCase)]
+    public void Ordinal_identity_claim_requires_a_separate_ordinal_key(
+        string source,
+        string physical,
+        QuerySearchKeyPolicy policy)
+    {
+        var failure = Assert.Throws<ArgumentException>(() => new QuerySearchKeyColumn(
+            source,
+            physical,
+            policy,
+            preservesOrdinalIdentity: true));
+
+        Assert.Equal("preservesOrdinalIdentity", failure.ParamName);
+    }
+
     [Fact]
     public void Locale_mapping_retargets_order_and_continuation_to_the_hidden_text_key()
     {
