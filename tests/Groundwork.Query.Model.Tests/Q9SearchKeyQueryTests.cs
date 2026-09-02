@@ -295,6 +295,36 @@ public sealed class Q9SearchKeyQueryTests
     }
 
     [Fact]
+    public void Negated_over_bound_element_substring_preserves_the_portable_refusal()
+    {
+        var request = new QueryRequest(
+            Table,
+            new Predicate.Not(new Predicate.ElementSubstring(
+                new ElementSetRef("workflowIds", QueryType.String),
+                new string('x', 451),
+                Anchor.Contains)),
+            [],
+            Projection.All,
+            Paging.None);
+
+        var rewritten = QueryElementSearchKeyRewriter.Rewrite(request,
+            new Dictionary<string, QueryElementSearchKeyColumn>
+            {
+                ["workflowIds"] = new(
+                    "workflowIds",
+                    "__groundwork_search_workflowIds",
+                    QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase,
+                    450)
+            });
+
+        var not = Assert.IsType<Predicate.Not>(rewritten.Where);
+        Assert.IsType<Predicate.ElementSubstring>(not.Inner);
+        Assert.Contains(
+            PortableQuerySemantics.Validate(rewritten).Refusals,
+            refusal => refusal.Code == "GW-SEM-NOT-001");
+    }
+
+    [Fact]
     public void Element_substring_rewrite_does_not_type_an_untyped_set()
     {
         var request = new QueryRequest(

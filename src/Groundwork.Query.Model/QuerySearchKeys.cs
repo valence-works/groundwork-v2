@@ -177,7 +177,7 @@ public static class QueryElementSearchKeyRewriter
     {
         if (request == null) throw new ArgumentNullException(nameof(request));
         if (mappings == null) throw new ArgumentNullException(nameof(mappings));
-        var where = RewritePredicate(request.Where, mappings);
+        var where = RewritePredicate(request.Where, mappings, allowBoundFold: true);
         return ReferenceEquals(where, request.Where)
             ? request
             : new QueryRequest(request.Table, where, request.Order, request.Projection, request.Paging,
@@ -191,7 +191,8 @@ public static class QueryElementSearchKeyRewriter
 
     private static Predicate RewritePredicate(
         Predicate predicate,
-        IReadOnlyDictionary<string, QueryElementSearchKeyColumn> mappings)
+        IReadOnlyDictionary<string, QueryElementSearchKeyColumn> mappings,
+        bool allowBoundFold)
     {
         switch (predicate)
         {
@@ -211,7 +212,8 @@ public static class QueryElementSearchKeyRewriter
                         $"but its schema element search-key mapping declares '{mapping.Policy}'. " +
                         "Rebuild the element search-key projection with the matching policy.");
                 }
-                if (mapping.MaximumElementCodeUnits is int maximumElementCodeUnits &&
+                if (allowBoundFold &&
+                    mapping.MaximumElementCodeUnits is int maximumElementCodeUnits &&
                     substring.Needle.Length > maximumElementCodeUnits)
                 {
                     return Predicate.AlwaysFalse.Instance;
@@ -224,11 +226,11 @@ public static class QueryElementSearchKeyRewriter
                     substring.Anchor,
                     QueryStringComparisonPolicy.Ordinal);
             case Predicate.And and:
-                return new Predicate.And(and.Terms.Select(term => RewritePredicate(term, mappings)));
+                return new Predicate.And(and.Terms.Select(term => RewritePredicate(term, mappings, allowBoundFold)));
             case Predicate.Or or:
-                return new Predicate.Or(or.Terms.Select(term => RewritePredicate(term, mappings)));
+                return new Predicate.Or(or.Terms.Select(term => RewritePredicate(term, mappings, allowBoundFold)));
             case Predicate.Not not:
-                return new Predicate.Not(RewritePredicate(not.Inner, mappings));
+                return new Predicate.Not(RewritePredicate(not.Inner, mappings, allowBoundFold: false));
             default:
                 return predicate;
         }
