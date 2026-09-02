@@ -33,7 +33,7 @@ resolve the `.Reference(...)` source declaration; compiled or otherwise opaque d
 fail-closed rather than being admitted as source-only coverage.
 
 Execution needs an adapter — see
-[`Groundwork.Query.Linq.Sqlite`](https://www.nuget.org/packages/Groundwork.Query.Linq.Sqlite).
+`Groundwork.Query.Linq.Sqlite`.
 
 ## Referencing it
 

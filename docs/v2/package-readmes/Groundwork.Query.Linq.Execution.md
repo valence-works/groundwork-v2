@@ -43,7 +43,7 @@ dotnet add package Groundwork.Query.Linq.Execution --prerelease
 ```
 
 Pair it with your provider package. See
-[`Groundwork.Query.Linq`](https://www.nuget.org/packages/Groundwork.Query.Linq) for the query
+`Groundwork.Query.Linq` for the query
 surface itself and why it is deliberately not `IQueryable`.
 
 ## Every Groundwork package

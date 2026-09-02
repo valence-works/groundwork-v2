@@ -7,7 +7,7 @@ The declaration attributes and the canonical schema model: `[GwTable]`, `[GwColu
 
 Attributes on your types are the input; the canonical schema document is the output, and it is what
 the `groundwork` CLI plans and applies from. Pair this with
-[`Groundwork.Schema.Generator`](https://www.nuget.org/packages/Groundwork.Schema.Generator), which
+`Groundwork.Schema.Generator`, which
 emits the canonical schema and its fingerprint as an assembly attribute at compile time.
 
 Targets `netstandard2.0` so the generator and the runtime read the same model.

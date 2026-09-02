@@ -1,0 +1,37 @@
+name: Documentation verification
+
+on:
+  push:
+    paths:
+      - README.md
+      - docs/**
+      - samples/**
+      - eng/verify-documentation.py
+      - docs/v2/executable-snippets.json
+      - .github/workflows/documentation-evidence.yml
+      - .github/workflows/documentation-verification.yml
+  pull_request:
+    paths:
+      - README.md
+      - docs/**
+      - samples/**
+      - eng/verify-documentation.py
+      - docs/v2/executable-snippets.json
+      - .github/workflows/documentation-evidence.yml
+      - .github/workflows/documentation-verification.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: documentation-verification-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Verify Markdown links, anchors, and executable snippets
+        run: python3 eng/verify-documentation.py

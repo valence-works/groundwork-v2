@@ -29,7 +29,7 @@ only plans the kernel's schema protection rules deem safe, while destructive or 
 requires authorization. Enabling it in any non-Development environment refuses startup with
 `GW-HOST-007` before provider admission can mutate schema. For production, review with
 `groundwork plan` and apply deliberately at deployment time with `groundwork apply --safe` — see
-[`Groundwork.Tool`](https://www.nuget.org/packages/Groundwork.Tool).
+`Groundwork.Tool`.
 
 The health check reports the same status, so a `Degraded` catalog is visible to your orchestrator
 rather than showing up as scattered query refusals.

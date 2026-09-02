@@ -520,4 +520,4 @@ and an alternative; resolve it in source control rather than suppressing it.
 - **[Unit of Work & Batching](Unit-of-Work-and-Batching)** — commit semantics and exact outcomes
 - **[Querying](Querying)** — declared joins, projections, and keyed batch reads
 - **[Multi-Tenancy & Scopes](Multi-Tenancy-and-Scopes)** — provider-enforced tenant isolation
-- **[Diagnostics Reference](Diagnostics-Reference#gw-ef---ef-core-model-import)** — importer findings
+- **[Diagnostics Reference](Diagnostics-Reference#gw-ef-ef-core-model-import)** — importer findings

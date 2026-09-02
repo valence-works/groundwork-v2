@@ -330,6 +330,46 @@ public sealed class PackagingContractTests
     }
 
     [Fact]
+    public void Documentation_verification_is_path_scoped_and_does_not_run_solution_lanes()
+    {
+        var root = RepositoryRoot.Find();
+        var workflow = File.ReadAllText(Path.Combine(root, ".github/workflows/documentation-verification.yml"));
+        var triggers = workflow[workflow.IndexOf("\non:", StringComparison.Ordinal)..
+                               workflow.IndexOf("\npermissions:", StringComparison.Ordinal)];
+
+        Assert.Contains("push:", triggers, StringComparison.Ordinal);
+        Assert.Contains("pull_request:", triggers, StringComparison.Ordinal);
+        foreach (var path in new[] { "README.md", "docs/**", "samples/**", "eng/verify-documentation.py", ".github/workflows/documentation-evidence.yml" })
+            Assert.Contains(path, triggers, StringComparison.Ordinal);
+        Assert.Contains("python3 eng/verify-documentation.py", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("dotnet test", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("Groundwork.slnx", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("concurrency.yml", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("performance.yml", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("actions/checkout@v4", workflow, StringComparison.Ordinal);
+        Assert.Contains("actions/checkout@11d5960a326750d5838078e36cf38b85af677262", workflow, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Executable_snippet_manifest_wires_the_first_public_fixture()
+    {
+        var root = RepositoryRoot.Find();
+        var manifest = File.ReadAllText(Path.Combine(root, "docs/v2/executable-snippets.json"));
+
+        Assert.Contains("\"id\": \"newcomer-sqlite\"", manifest, StringComparison.Ordinal);
+        Assert.Contains("\"source\": \"docs/v2/newcomer-sqlite/Program.cs\"", manifest, StringComparison.Ordinal);
+        Assert.Contains("\"runner\": \"eng/verify-newcomer-sqlite.sh\"", manifest, StringComparison.Ordinal);
+        Assert.Contains("\"mode\": \"feedz\"", manifest, StringComparison.Ordinal);
+        Assert.Contains("\"language\": \"csharp\"", manifest, StringComparison.Ordinal);
+        Assert.Contains("executable-snippets.json", File.ReadAllText(Path.Combine(root, "eng/verify-documentation.py")), StringComparison.Ordinal);
+        var verifier = File.ReadAllText(Path.Combine(root, "eng/verify-documentation.py"));
+        Assert.Contains("urlopen", verifier, StringComparison.Ordinal);
+        Assert.Contains("GET_ONLY_HOSTS", verifier, StringComparison.Ordinal);
+        Assert.Contains("RETRYABLE_STATUS_CODES", verifier, StringComparison.Ordinal);
+        Assert.Contains("--offline", verifier, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Nuget_publication_workflow_pins_actions_and_gates_credentials_on_the_package_manifest()
     {
         var root = RepositoryRoot.Find();

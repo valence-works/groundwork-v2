@@ -27,7 +27,7 @@ provider-neutral, leaving the choice of database to whoever consumes it.
 ## Referencing it
 
 If you are writing an application, you almost certainly want
-**[`Groundwork.Records.Store`](https://www.nuget.org/packages/Groundwork.Records.Store)** instead —
+**`Groundwork.Records.Store`** instead —
 it adds the production bridge and brings this package along. Reference `Groundwork.Records` on its
 own only from a library that declares storage without picking a provider.
 
