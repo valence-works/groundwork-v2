@@ -649,7 +649,7 @@ internal class InMemoryStorageSession : IStorageSession, IProviderBoundStorageSe
         var suppliedOptions = options ?? QueryRenderOptions.Default;
         var searchKeyColumns = SearchKeyQueryMappings.For(Unit, suppliedOptions.FindSelectedIndex()?.Name);
         var elementSearchKeyColumns = SearchKeyQueryMappings.ElementFor(Unit);
-        var executionRequest = QueryElementSearchKeyRewriter.Rewrite(
+        var executionSource = QueryElementSearchKeyRewriter.Rewrite(
             QuerySearchKeyRewriter.Rewrite(request, searchKeyColumns), elementSearchKeyColumns);
         var renderOptions = suppliedOptions.WithIdentityTieBreaks(Unit.Key.Columns
             .Select(name => QueryColumn(name))
@@ -659,13 +659,14 @@ internal class InMemoryStorageSession : IStorageSession, IProviderBoundStorageSe
             SearchKeyColumns = searchKeyColumns,
             ElementSearchKeyColumns = elementSearchKeyColumns
         };
-        var validation = PortableQuerySemantics.Validate(executionRequest);
+        var validation = PortableQuerySemantics.Validate(executionSource);
         if (!validation.IsPortable)
         {
             var refusal = validation.Refusals[0];
             throw new QueryRenderException(refusal.Code, refusal.Message + " (" + refusal.Path + ").");
         }
-        ValidateInBudget(executionRequest.Where, suppliedOptions.InValueLimit, request.Table.Value);
+        ValidateInBudget(executionSource.Where, suppliedOptions.InValueLimit, request.Table.Value);
+        var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);
         lock (database.Gate)
         {
             ThrowIfDisposed();

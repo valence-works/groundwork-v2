@@ -25,10 +25,10 @@ public sealed class SelectedOrdinalIdentityProviderTests
         var name = new ColumnRef(table, "name", QueryType.String, isNullable: false, maxLength: 64);
         var request = new QueryRequest(
             table,
-            new Predicate.Equal(name, QueryConstant.Of(name, "Ada")),
+            Predicate.AlwaysTrue.Instance,
             [new OrderTerm(name, OrderDirection.Ascending, NullOrder.First)],
             Projection.ColumnsOnly(name),
-            Paging.None,
+            Paging.Keyset(1),
             distinct: true);
 
         var result = session.Query(request, unit.CreateQueryRenderOptions("by_name"));
@@ -36,6 +36,15 @@ public sealed class SelectedOrdinalIdentityProviderTests
         var row = Assert.Single(result.Rows);
         Assert.Equal("Ada", row["name"]);
         Assert.DoesNotContain("__groundwork_ordinal_name", row.Keys);
+        var continuation = Assert.IsType<string>(result.NextContinuationToken);
+        var next = session.Query(new QueryRequest(
+            request.Table,
+            request.Where,
+            request.Order,
+            request.Projection,
+            Paging.Continuation(continuation, 1),
+            distinct: true), unit.CreateQueryRenderOptions("by_name"));
+        Assert.Equal("Grace", Assert.Single(next.Rows)["name"]);
     }
 
     [Fact]
