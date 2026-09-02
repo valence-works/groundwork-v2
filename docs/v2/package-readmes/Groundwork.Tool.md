@@ -1,5 +1,7 @@
 # Groundwork.Tool
 
+[Groundwork v2 documentation portal](https://github.com/valence-works/groundwork-v2/wiki) contains the full consumer documentation.
+
 The `groundwork` CLI: `plan`, `validate`, `status`, `apply`, `adopt`, and `schema emit`.
 Deployment-time schema planning and application, separate from your application's startup path on
 purpose.

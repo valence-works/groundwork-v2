@@ -1,5 +1,7 @@
 # Groundwork.Testing
 
+[Groundwork v2 documentation portal](https://github.com/valence-works/groundwork-v2/wiki) contains the full consumer documentation.
+
 For provider authors. The public conformance suites (`ConformanceSuite`, `ConformanceScenario`),
 the deterministic `InMemoryProviderFactory`, the concurrency harness, and the schema tool CLI
 harness.

@@ -1,5 +1,7 @@
 # Groundwork.EntityFrameworkCore
 
+[Groundwork v2 documentation portal](https://github.com/valence-works/groundwork-v2/wiki) contains the full consumer documentation.
+
 Design-time scaffolding from an existing EF Core relational model to provider-neutral Groundwork
 kernel declarations.
 

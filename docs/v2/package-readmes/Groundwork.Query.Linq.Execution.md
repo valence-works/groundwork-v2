@@ -1,5 +1,7 @@
 # Groundwork.Query.Linq.Execution
 
+[Groundwork v2 documentation portal](https://github.com/valence-works/groundwork-v2/wiki) contains the full consumer documentation.
+
 `GwLinqExecutor` — the **one** execution adapter behind the closed LINQ front-end, for every
 provider.
 

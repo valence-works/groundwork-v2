@@ -1,5 +1,7 @@
 # Groundwork.PostgreSql
 
+[Groundwork v2 documentation portal](https://github.com/valence-works/groundwork-v2/wiki) contains the full consumer documentation.
+
 The PostgreSQL provider: the PostgreSQL implementation of the provider-neutral `Groundwork.Store`
 contracts, built on `Groundwork.Substrate.Relational` and `Npgsql`.
 

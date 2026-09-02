@@ -1,5 +1,7 @@
 # Groundwork.Query.Linq
 
+[Groundwork v2 documentation portal](https://github.com/valence-works/groundwork-v2/wiki) contains the full consumer documentation.
+
 A **closed** LINQ front-end: `IGwQueryable<T>`, with `Table<T>()`, `Where`, `WhereIf`, ordering,
 `Skip`/`Take`, mapped-column `Select`, `Distinct`, one explicitly activated declared-reference
 `Join`, and the `ToList`/`ToListAsync`,

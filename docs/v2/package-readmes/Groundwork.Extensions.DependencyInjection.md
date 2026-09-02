@@ -1,5 +1,7 @@
 # Groundwork.Extensions.DependencyInjection
 
+[Groundwork v2 documentation portal](https://github.com/valence-works/groundwork-v2/wiki) contains the full consumer documentation.
+
 Dependency injection and hosting integration: `services.AddGroundwork()`, named connections, the
 process-singleton connection lifetime, startup schema admission, and a health check.
 

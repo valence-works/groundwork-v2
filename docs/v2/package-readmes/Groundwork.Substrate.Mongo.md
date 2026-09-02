@@ -1,5 +1,7 @@
 # Groundwork.Substrate.Mongo
 
+[Groundwork v2 documentation portal](https://github.com/valence-works/groundwork-v2/wiki) contains the full consumer documentation.
+
 The document-store equivalent of `Groundwork.Substrate.Relational`: the shared seam for
 MongoDB-shaped providers — session and transaction ownership, collection dispatch, and the
 write-conflict retry behavior that exact append and durable idempotency depend on.

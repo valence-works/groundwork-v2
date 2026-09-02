@@ -1,5 +1,7 @@
 # Groundwork.SqlServer
 
+[Groundwork v2 documentation portal](https://github.com/valence-works/groundwork-v2/wiki) contains the full consumer documentation.
+
 The SQL Server provider: the SQL Server implementation of the provider-neutral `Groundwork.Store`
 contracts and relational schema behaviors, built on `Groundwork.Substrate.Relational` and
 `Microsoft.Data.SqlClient`.

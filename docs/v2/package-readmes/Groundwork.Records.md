@@ -1,5 +1,7 @@
 # Groundwork.Records
 
+[Groundwork v2 documentation portal](https://github.com/valence-works/groundwork-v2/wiki) contains the full consumer documentation.
+
 Typed rows. `RecordTable<T>` maps a CLR type to a kernel `StorageUnit` — key, columns, indexes,
 concurrency, scope — and exposes the `IRecordStore` seam. It also binds typed
 `AggregationRow` selectors to declared aggregation profiles; the binding preserves the profile's
