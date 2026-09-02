@@ -2,6 +2,8 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Groundwork.Store;
+using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
 namespace Groundwork.Samples.Api.Tests;
@@ -13,8 +15,13 @@ namespace Groundwork.Samples.Api.Tests;
 public sealed class SampleApiTests : IClassFixture<SampleApiFactory>
 {
     private readonly HttpClient client;
+    private readonly SampleApiFactory factory;
 
-    public SampleApiTests(SampleApiFactory factory) => client = factory.CreateClient();
+    public SampleApiTests(SampleApiFactory factory)
+    {
+        this.factory = factory;
+        client = factory.CreateClient();
+    }
 
     [Fact]
     public async Task Health_reports_the_admitted_declaration()
@@ -31,8 +38,15 @@ public sealed class SampleApiTests : IClassFixture<SampleApiFactory>
         var ids = capabilities.EnumerateArray()
             .Select(capability => capability.GetProperty("id").GetString())
             .ToArray();
+
+        var deployed = factory.Services.GetRequiredService<IStorageProviderConnection>().Capabilities
+            .Select(capability => capability.Id.Value)
+            .OrderBy(id => id, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.NotEmpty(ids);
+        Assert.Equal(deployed, ids);
         Assert.Contains("groundwork.storage.batched-unit-of-work", ids);
-        Assert.Contains("groundwork.storage.compare-and-delete", ids);
     }
 
     [Fact]
