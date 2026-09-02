@@ -280,19 +280,25 @@ public sealed class PackagingContractTests
         Assert.DoesNotContain("actions/checkout@v4", workflow, StringComparison.Ordinal);
         Assert.DoesNotContain("actions/setup-dotnet@v4", workflow, StringComparison.Ordinal);
         Assert.DoesNotContain("actions/upload-artifact@v4", workflow, StringComparison.Ordinal);
-        Assert.Equal(2, Regex.Matches(workflow,
+        Assert.Equal(4, Regex.Matches(workflow,
             "actions/checkout@11d5960a326750d5838078e36cf38b85af677262").Count);
-        Assert.Equal(2, Regex.Matches(workflow,
+        Assert.Equal(3, Regex.Matches(workflow,
             "actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9").Count);
-        Assert.Equal(2, Regex.Matches(workflow,
+        Assert.Equal(4, Regex.Matches(workflow,
             "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02").Count);
         Assert.Contains("GroundworkCurrentRelease", workflow, StringComparison.Ordinal);
+        Assert.Contains("portal-product:", workflow, StringComparison.Ordinal);
+        Assert.Contains("sample-provider-matrix:", workflow, StringComparison.Ordinal);
         Assert.Contains("feedz-clean-room:", workflow, StringComparison.Ordinal);
         Assert.Contains("newcomer-sqlite:", workflow, StringComparison.Ordinal);
+        foreach (var provider in new[] { "sqlite", "postgresql", "sqlserver", "mongodb", "mysql", "inmemory" })
+            Assert.Contains(provider, workflow, StringComparison.Ordinal);
+        Assert.Contains("expected executed passing tests only", workflow, StringComparison.Ordinal);
         Assert.DoesNotContain("needs: feedz-clean-room", workflow, StringComparison.Ordinal);
         Assert.DoesNotContain("needs: newcomer-sqlite", workflow, StringComparison.Ordinal);
         Assert.True(Regex.Matches(workflow, "if: always\\(\\)").Count >= 2);
-        Assert.Equal(2, Regex.Matches(workflow, "retention-days: 7").Count);
+        Assert.Equal(4, Regex.Matches(workflow, "retention-days: 7").Count);
+        Assert.Contains("verify-published-portal.py", workflow, StringComparison.Ordinal);
         Assert.Contains("verify-published-packages.sh \"$FEEDZ_NUGET_SOURCE\" \"$VERSION\"", workflow, StringComparison.Ordinal);
         Assert.Contains("GROUNDWORK_PUBLIC_API_REMOTE_ONLY: \"true\"", workflow, StringComparison.Ordinal);
         Assert.Contains("verify-newcomer-sqlite.sh \"$FEEDZ_NUGET_SOURCE\" \"$version\"", workflow, StringComparison.Ordinal);
@@ -327,6 +333,9 @@ public sealed class PackagingContractTests
         Assert.Contains("declared customer aggregation", newcomer, StringComparison.Ordinal);
         Assert.Contains("Groundwork newcomer SQLite evidence", newcomer, StringComparison.Ordinal);
         Assert.Contains("groundwork-feedz", newcomer, StringComparison.Ordinal);
+        Assert.Contains("Published portal snapshot SHA-256", newcomer, StringComparison.Ordinal);
+        Assert.Contains("raw.githubusercontent.com/valence-works/groundwork-v2/$source_sha", newcomer, StringComparison.Ordinal);
+        Assert.Contains("## Commands", newcomer, StringComparison.Ordinal);
         Assert.Contains("Started (UTC)", newcomer, StringComparison.Ordinal);
         Assert.Contains("Checkout SHA", newcomer, StringComparison.Ordinal);
         Assert.Contains("raw command output are intentionally not retained", newcomer, StringComparison.Ordinal);

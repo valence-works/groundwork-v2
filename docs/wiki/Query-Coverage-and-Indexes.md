@@ -292,7 +292,7 @@ At startup, providers compare the deployed catalog against the compiled physical
 
 MongoDB performs the same inspect-only split at `OpenSession` via its public `InspectSchema` report.
 
-All four providers execute LINQ terminals through the same gate — see **[The LINQ executor](#the-linq-executor)**.
+All five database providers execute LINQ terminals through the same gate — see **[The LINQ executor](#the-linq-executor)**.
 Extra native indexes are never used to satisfy a declared index, on any provider.
 
 ## Designing indexes that cover

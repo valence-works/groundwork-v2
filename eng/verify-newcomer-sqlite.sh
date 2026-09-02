@@ -5,8 +5,9 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 feed="${1:-}"
 version="${2:-}"
 report="${3:-}"
+portal_url="${4:-https://github.com/valence-works/groundwork-v2/wiki}"
 test -n "$feed" && test -n "$version" && test -n "$report" || {
-  echo "Usage: $0 <feed-service-index> <exact-version> <publication-safe-report>" >&2
+  echo "Usage: $0 <feed-service-index> <exact-version> <publication-safe-report> [published-portal-url]" >&2
   exit 2
 }
 
@@ -33,6 +34,19 @@ write_status=not-run
 query_status=not-run
 aggregation_status=not-run
 evidence_root=""
+portal_sha256=unavailable
+fixture_url=unavailable
+
+sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum -- "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    echo "Neither sha256sum nor shasum is available." >&2
+    return 1
+  fi
+}
 
 write_report() {
   local end_utc end_epoch elapsed
@@ -44,6 +58,9 @@ write_report() {
 
 - Result: **$status**
 - Feed source: \`$feed\`
+- Published portal: \`$portal_url\`
+- Published portal snapshot SHA-256: \`$portal_sha256\`
+- Executable fixture source: \`$fixture_url\`
 - Requested version: \`$version\`
 - GroundworkCurrentRelease: \`${current_release:-unavailable}\`
 - Source ref: \`$source_ref\`
@@ -63,6 +80,20 @@ write_report() {
 | Write three rows | $write_status |
 | Execute the index-covered customer query | $query_status |
 | Execute the declared customer aggregation | $aggregation_status |
+
+## Commands
+
+The evidence runner executed this newcomer sequence from an empty temporary directory:
+
+\`\`\`bash
+curl --fail --location --silent --show-error "$portal_url"
+dotnet new console --framework net10.0 --name GroundworkNewcomer --no-restore
+curl --fail --location --silent --show-error "$fixture_url" --output Program.cs
+dotnet add package Groundwork.Sqlite --version "$version" --no-restore
+dotnet add package Groundwork.Records.Store --version "$version" --no-restore
+dotnet restore --configfile NuGet.Config --force --no-cache --nologo
+dotnet run --configuration Release --no-restore --nologo
+\`\`\`
 
 The journey uses a temporary package consumer with \`Groundwork.Sqlite\` and
 \`Groundwork.Records.Store\` restored from the Feedz source above. No local package artifacts,
@@ -92,11 +123,21 @@ evidence_root="$(mktemp -d)"
 consumer_root="$evidence_root/consumer"
 package_cache="$evidence_root/packages"
 run_log="$evidence_root/run.log"
+portal_snapshot="$evidence_root/portal.html"
 trap 'write_report; rm -rf "$evidence_root"' EXIT
+
+failed_step="open the published portal at the exact documented release"
+curl --fail --location --silent --show-error "$portal_url" --output "$portal_snapshot"
+grep -Fq "$version" "$portal_snapshot" || {
+  echo "The published portal does not expose GroundworkCurrentRelease '$version'." >&2
+  exit 1
+}
+portal_sha256="$(sha256 "$portal_snapshot")"
 
 failed_step="create the temporary package consumer"
 dotnet new console --framework net10.0 --name GroundworkNewcomer --output "$consumer_root" --no-restore >/dev/null
-cp "$repo_root/docs/v2/newcomer-sqlite/Program.cs" "$consumer_root/Program.cs"
+fixture_url="https://raw.githubusercontent.com/valence-works/groundwork-v2/$source_sha/docs/v2/newcomer-sqlite/Program.cs"
+curl --fail --location --silent --show-error "$fixture_url" --output "$consumer_root/Program.cs"
 cat > "$consumer_root/NuGet.Config" <<EOF
 <?xml version="1.0" encoding="utf-8"?>
 <configuration>

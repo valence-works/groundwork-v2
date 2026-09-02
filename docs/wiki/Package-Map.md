@@ -7,7 +7,7 @@ you which, and explains the layering — because the layering is what the whole 
 
 Everything depends **inward**. Nothing depends outward.
 
-```
+```text
      ┌────────────────────────────────────────────────────────┐
      │  Groundwork.Query.Model      (BCL-only, netstandard2.0)│  innermost
      │  the portable predicate/query AST                      │

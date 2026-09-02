@@ -7,6 +7,7 @@ on:
       - docs/**
       - samples/**
       - eng/verify-documentation.py
+      - eng/verify-published-portal.py
       - eng/verify-api-reference.py
       - eng/api-documentation-baseline.json
       - eng/generate-provider-matrices.sh
@@ -21,6 +22,7 @@ on:
       - docs/**
       - samples/**
       - eng/verify-documentation.py
+      - eng/verify-published-portal.py
       - eng/verify-api-reference.py
       - eng/api-documentation-baseline.json
       - eng/generate-provider-matrices.sh

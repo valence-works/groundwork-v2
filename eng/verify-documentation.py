@@ -8,6 +8,7 @@ import json
 import re
 import sys
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -24,6 +25,11 @@ LINK_PATTERN = re.compile(r"(?<!\!)(?:\[[^\]]*\]|<(?P<autolink>https?://[^>]+)>)
 PLAIN_URL_PATTERN = re.compile(r"(?<![<(\[\"'])https?://[^\s<>()]+")
 HEADING_PATTERN = re.compile(r"^ {0,3}#{1,6}\s+(.+?)\s*#*\s*$")
 HTML_ANCHOR_PATTERN = re.compile(r"<(?:a|span)\s+[^>]*?(?:id|name)=[\"']([^\"']+)[\"'][^>]*>", re.IGNORECASE)
+NEGATED_COMPATIBILITY_PATTERN = re.compile(
+    r"\b(?:no|not|never|without|refus(?:e|es|ed)|prohibit(?:s|ed)?)\b",
+    re.IGNORECASE,
+)
+MIGRATION_GUIDANCE_PAGES = frozenset({"EF-Core-Migration.md", "FAQ.md"})
 
 
 @dataclass(frozen=True)
@@ -269,6 +275,76 @@ def validate_manifest(root: Path, manifest_path: Path) -> list[str]:
     return findings
 
 
+def current_release(root: Path) -> str | None:
+    props = root / "Directory.Build.props"
+    if not props.is_file():
+        return None
+    try:
+        value = ET.parse(props).findtext(".//GroundworkCurrentRelease")
+    except ET.ParseError:
+        return None
+    return value.strip() if value and value.strip() else None
+
+
+def validate_portal_product(root: Path) -> list[Finding]:
+    portal = root / "docs/wiki"
+    if not portal.is_dir():
+        return []
+
+    findings: list[Finding] = []
+    required = {
+        "Home.md": ("## All pages", "wiki **Search** box", "small screen"),
+        "_Footer.md": ("edit portal source", "report documentation feedback"),
+        "_Sidebar.md": ("**Getting started**", "**Reference**"),
+    }
+    release = current_release(root)
+    if release is None:
+        findings.append(Finding("Directory.Build.props", 0, "GroundworkCurrentRelease", "current release is absent or invalid"))
+    for name, markers in required.items():
+        path = portal / name
+        label = source_label(root, path)
+        if not path.is_file():
+            findings.append(Finding(label, 0, name, "required portal surface is missing"))
+            continue
+        text = path.read_text(encoding="utf-8")
+        for marker in markers:
+            if marker not in text:
+                findings.append(Finding(label, 0, marker, "required portal product marker is missing"))
+        if name in {"Home.md", "_Footer.md"} and release and release not in text:
+            findings.append(Finding(label, 0, release, "current release context is missing"))
+
+    for path in sorted(portal.glob("*.md")):
+        label = source_label(root, path)
+        in_fence = False
+        fence = ""
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for line_number, line in enumerate(lines, start=1):
+            stripped = line.lstrip()
+            if stripped.startswith("```") or stripped.startswith("~~~"):
+                marker = stripped[:3]
+                if not in_fence:
+                    in_fence, fence = True, marker
+                    if not stripped[3:].strip():
+                        findings.append(Finding(label, line_number, marker, "code fence needs a language for accessible rendering"))
+                elif marker == fence:
+                    in_fence = False
+                continue
+            if in_fence:
+                continue
+
+            folded = line.casefold()
+            for term in ("groundwork v1", "runtime bridge", "fallback alias", "compatibility shim"):
+                if (term in folded and path.name not in MIGRATION_GUIDANCE_PAGES
+                        and not NEGATED_COMPATIBILITY_PATTERN.search(line)):
+                    findings.append(Finding(label, line_number, term, "Groundwork v1 compatibility runtime guidance is prohibited"))
+            context = " ".join(lines[max(0, line_number - 2):line_number])
+            if (re.search(r"\bdual[- ]writes?\b", folded)
+                    and path.name not in MIGRATION_GUIDANCE_PAGES
+                    and not NEGATED_COMPATIBILITY_PATTERN.search(context)):
+                findings.append(Finding(label, line_number, "dual-write", "allowed only as explicit migration guidance or a prohibition"))
+    return findings
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
@@ -282,6 +358,7 @@ def main(argv: list[str] | None = None) -> int:
     files = markdown_files(root)
     findings = validate_local_links(root, files)
     findings.extend(validate_external_links(root, files, args.offline, args.timeout, args.retries))
+    findings.extend(validate_portal_product(root))
     findings.extend(Finding("<manifest>", 0, str(manifest.relative_to(root) if manifest.is_relative_to(root) else manifest), reason)
                     for reason in validate_manifest(root, manifest))
     if findings:

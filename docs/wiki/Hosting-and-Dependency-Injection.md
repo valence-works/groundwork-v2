@@ -240,7 +240,7 @@ See **[Diagnostics Reference](Diagnostics-Reference)**.
 
 `samples/Groundwork.Samples.Api` is a runnable minimal API covering declaration, schema deployment,
 typed CRUD, a covered query with paging, a scope-owned unit of work, optimistic concurrency, and
-tenant scopes, switchable across all four providers from configuration.
+tenant scopes, switchable across all five database providers from configuration.
 
 ## Next
 

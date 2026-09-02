@@ -109,7 +109,7 @@ A generated value is **never** synthesized from your payload or from a read-afte
 ## The native conditional write path
 
 `IConcurrencyStorageSession.ConditionalUpsert` is a **provider-native single statement/command with
-no shared pre-read**. SQLite, PostgreSQL, SQL Server, and MongoDB each issue their native form.
+no shared pre-read**. SQLite, PostgreSQL, SQL Server, MongoDB, and MySQL each issue their native form.
 
 Two consequences worth knowing:
 
