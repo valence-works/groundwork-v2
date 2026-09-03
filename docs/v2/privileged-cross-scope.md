@@ -33,7 +33,7 @@ invocation. Tokens contain neither raw scope values nor audit strings. An audit 
 `query-across-scopes.success` or `query-across-scopes.failure`. If recording the attempt throws,
 the provider is not called. If provider execution and failure recording both throw, the operation
 fails with an aggregate that preserves both exceptions. Provider authors must use
-`BeginPrivilegedQuery` and complete the returned lifecycle with success or failure.
+`BeginPrivilegedQuery` and complete the returned `StorageAccessAuditOperation` with `Success` or `Failure`.
 Identity and purpose are caller-supplied labels, not authentication;
 bind them to the host's authenticated operation context. See [security boundaries](security-boundaries.md).
 
