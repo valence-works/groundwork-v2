@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using Xunit;
@@ -179,6 +181,22 @@ public sealed class PackagingContractTests
         Assert.Contains("groundwork adopt", policy, StringComparison.Ordinal);
         Assert.Contains("data migration", policy, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("recreate", policy, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Api_documentation_baseline_tracks_the_reviewed_public_api_snapshots()
+    {
+        var root = RepositoryRoot.Find();
+        using var baseline = JsonDocument.Parse(File.ReadAllText(
+            Path.Combine(root, "eng", "api-documentation-baseline.json")));
+        var snapshots = baseline.RootElement.GetProperty("publicApiSnapshots");
+
+        foreach (var framework in new[] { "net8.0", "net10.0" })
+        {
+            var snapshot = File.ReadAllBytes(Path.Combine(root, "eng", $"public-api-v1-{framework}.txt"));
+            var actualHash = Convert.ToHexStringLower(SHA256.HashData(snapshot));
+            Assert.Equal(snapshots.GetProperty(framework).GetString(), actualHash);
+        }
     }
 
     [Fact]

@@ -1,0 +1,2 @@
+# Keep frozen public API snapshots byte-stable for their hash-based contract.
+eng/public-api-v1-net*.txt text eol=lf
