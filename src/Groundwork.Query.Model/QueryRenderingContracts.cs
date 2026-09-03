@@ -389,6 +389,7 @@ public sealed record QueryRenderOptions
         SearchKeyColumns.TryGetValue(column.Name, out var mapping) &&
         string.Equals(mapping.SourceColumn, column.Name, StringComparison.Ordinal) &&
         mapping.OrderByPhysicalColumn &&
+        mapping.PreservesOrdinalIdentity &&
         terms.Any(term => string.Equals(
             term.Column.Name,
             mapping.PhysicalColumn,

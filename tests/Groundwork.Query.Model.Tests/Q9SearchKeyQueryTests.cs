@@ -74,7 +74,38 @@ public sealed class Q9SearchKeyQueryTests
 
         Assert.DoesNotContain("__groundwork_search_name", result.Rows.Single().Keys);
         var cursor = QueryContinuationToken.Decode(result.NextContinuationToken!, rewritten, options);
-        Assert.Equal("|5D|77", cursor.Single().Value);
+        Assert.Equal(["|5D|77", "Åke"], cursor.Select(value => value.Value));
+    }
+
+    [Fact]
+    public void Non_injective_physical_order_keeps_the_logical_identity_tie_break()
+    {
+        var name = new ColumnRef(Table, "name", QueryType.String, false, 32);
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(name, OrderDirection.Ascending, NullOrder.Last)],
+            Projection.ColumnsOnly(name),
+            Paging.Keyset(1));
+        var options = new QueryRenderOptions(tieBreakColumns: [name])
+        {
+            SearchKeyColumns = new Dictionary<string, QuerySearchKeyColumn>
+            {
+                [name.Name] = new(
+                    name.Name,
+                    "__groundwork_locale_name",
+                    QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase,
+                    64,
+                    orderByPhysicalColumn: true,
+                    supportsPrefixPredicates: false)
+            }
+        };
+
+        var execution = QueryRequestExecution.ForProviderPage(request, options);
+
+        Assert.Equal(
+            ["__groundwork_locale_name", name.Name],
+            options.GetEffectiveOrder(execution).Select(term => term.Column.Name));
     }
 
     [Fact]
