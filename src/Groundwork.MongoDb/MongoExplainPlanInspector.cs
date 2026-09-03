@@ -7,6 +7,9 @@ internal static class MongoExplainPlanInspector
     internal static bool ChoseIndex(BsonDocument explain, string physicalIndex) =>
         FindWinningPlans(explain).Any(plan => ContainsIndexScan(plan, physicalIndex));
 
+    internal static bool WinningPlanContainsStage(BsonDocument explain, string stage) =>
+        FindWinningPlans(explain).Any(plan => ContainsStage(plan, stage));
+
     private static IEnumerable<BsonValue> FindWinningPlans(BsonValue value)
     {
         if (value is BsonDocument document)
@@ -38,5 +41,17 @@ internal static class MongoExplainPlanInspector
             return document.Any(element => ContainsIndexScan(element.Value, physicalIndex));
         }
         return value is BsonArray array && array.Any(item => ContainsIndexScan(item, physicalIndex));
+    }
+
+    private static bool ContainsStage(BsonValue value, string expectedStage)
+    {
+        if (value is BsonDocument document)
+        {
+            if (document.TryGetValue("stage", out var stage) && stage.IsString &&
+                string.Equals(stage.AsString, expectedStage, StringComparison.Ordinal))
+                return true;
+            return document.Any(element => ContainsStage(element.Value, expectedStage));
+        }
+        return value is BsonArray array && array.Any(item => ContainsStage(item, expectedStage));
     }
 }

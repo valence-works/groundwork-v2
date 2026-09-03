@@ -368,15 +368,7 @@ public sealed record QueryRenderOptions
         {
             foreach (var column in request.Projection.Columns)
             {
-                var orderedByProjectedValue = terms.Any(term => ColumnRefIdentity.SameName(term.Column, column)) ||
-                    SearchKeyColumns.TryGetValue(column.Name, out var mapping) &&
-                    string.Equals(mapping.SourceColumn, column.Name, StringComparison.Ordinal) &&
-                    mapping.OrderByPhysicalColumn &&
-                    terms.Any(term => string.Equals(
-                        term.Column.Name,
-                        mapping.PhysicalColumn,
-                        StringComparison.Ordinal));
-                if (orderedByProjectedValue)
+                if (OrdersColumn(terms, column))
                     continue;
                 terms.Add(new OrderTerm(column, OrderDirection.Ascending, NullOrder.First));
             }
@@ -385,12 +377,23 @@ public sealed record QueryRenderOptions
 
         foreach (var tieBreak in TieBreakColumns)
         {
-            if (terms.Any(term => ColumnRefIdentity.SameName(term.Column, tieBreak)))
+            if (OrdersColumn(terms, tieBreak))
                 continue;
             terms.Add(new OrderTerm(tieBreak, OrderDirection.Ascending, NullOrder.First));
         }
         return terms.ToImmutableArray();
     }
+
+    private bool OrdersColumn(IReadOnlyList<OrderTerm> terms, ColumnRef column) =>
+        terms.Any(term => ColumnRefIdentity.SameName(term.Column, column)) ||
+        SearchKeyColumns.TryGetValue(column.Name, out var mapping) &&
+        string.Equals(mapping.SourceColumn, column.Name, StringComparison.Ordinal) &&
+        mapping.OrderByPhysicalColumn &&
+        mapping.PreservesOrdinalIdentity &&
+        terms.Any(term => string.Equals(
+            term.Column.Name,
+            mapping.PhysicalColumn,
+            StringComparison.Ordinal));
 
     private static bool IsPortableProjectedOrderColumn(ColumnRef column) => column.Type switch
     {

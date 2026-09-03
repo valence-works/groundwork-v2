@@ -78,7 +78,7 @@ public sealed class MongoQueryRenderer
                 throw new QueryRenderException("GW-QUERY-013", "The keyset continuation token is invalid: " + exception.Message);
             }
             if (!request.Result.IncludesTotalCount && request.LatestPerKey is null && !request.Distinct)
-                filter = And(filter, RenderContinuation(order, cursor));
+                filter = And(filter, RenderContinuation(order, cursor, options));
         }
 
         var selectedIndex = options.FindPinnedIndex();
@@ -517,7 +517,7 @@ public sealed class MongoQueryRenderer
             AppendReductionOrder(pipeline, order, static (term, index) =>
                 "$__groundwork_distinct_order_" + index.ToString(System.Globalization.CultureInfo.InvariantCulture));
             if (cursor is not null)
-                pipeline.Add(new BsonDocument("$match", RenderContinuation(order, cursor, fieldPath)));
+                pipeline.Add(new BsonDocument("$match", RenderContinuation(order, cursor, options, fieldPath)));
 
             var cleanup = new BsonDocument { { "_id", 0 }, { reductionPath, 1 } };
             pipeline.Add(new BsonDocument("$project", cleanup));
@@ -797,19 +797,36 @@ public sealed class MongoQueryRenderer
             mapping.PhysicalColumn != mapping.SourceColumn &&
             string.Equals(mapping.PhysicalColumn, range.Column.Name, StringComparison.Ordinal));
 
+    private static bool UsesPersistedOrderKey(ColumnRef column, QueryRenderOptions options) =>
+        column.Type == QueryType.String &&
+        options.SearchKeyColumns.Values.Any(mapping =>
+            mapping.OrderByPhysicalColumn &&
+            string.Equals(mapping.PhysicalColumn, column.Name, StringComparison.Ordinal));
+
+    private static bool SelectedIndexProvesNonNull(
+        ColumnRef column,
+        QueryRenderOptions options,
+        bool joinedFields)
+    {
+        var selectedIndex = options.FindSelectedIndex();
+        return !joinedFields && selectedIndex is not null &&
+            selectedIndex.Columns.Contains(column.Name, StringComparer.Ordinal) &&
+            !selectedIndex.NullableColumns.Contains(column.Name);
+    }
+
     private BsonDocument RenderContinuation(
         IReadOnlyList<OrderTerm> order,
         IReadOnlyList<QueryConstant> cursor,
+        QueryRenderOptions options,
         Func<ColumnRef, string>? fieldPath = null)
     {
-        fieldPath ??= static column => column.Name;
         var alternatives = new List<BsonDocument>();
         for (var boundary = 0; boundary < order.Count; boundary++)
         {
             var conjunction = new List<BsonDocument>();
             for (var prefix = 0; prefix < boundary; prefix++)
-                conjunction.Add(RenderCursorEquality(order[prefix], cursor[prefix], fieldPath));
-            conjunction.Add(RenderAfter(order[boundary], cursor[boundary], fieldPath));
+                conjunction.Add(RenderCursorEquality(order[prefix], cursor[prefix], options, fieldPath));
+            conjunction.Add(RenderAfter(order[boundary], cursor[boundary], options, fieldPath));
             alternatives.Add(conjunction.Count == 1
                 ? conjunction[0]
                 : new BsonDocument("$and", new BsonArray(conjunction)));
@@ -822,11 +839,14 @@ public sealed class MongoQueryRenderer
     private BsonDocument RenderCursorEquality(
         OrderTerm term,
         QueryConstant value,
+        QueryRenderOptions options,
         Func<ColumnRef, string>? fieldPath = null)
     {
         fieldPath ??= static column => column.Name;
         var path = fieldPath(term.Column);
-        if (term.Column.Type == QueryType.String && value.Kind != QueryConstantKind.Null)
+        if (term.Column.Type == QueryType.String &&
+            value.Kind != QueryConstantKind.Null &&
+            !UsesPersistedOrderKey(term.Column, options))
             return new BsonDocument("$expr", new BsonDocument("$eq", new BsonArray
             {
                 RenderOrdinalKey("$" + path), RenderOrdinalKey(value)
@@ -860,8 +880,10 @@ public sealed class MongoQueryRenderer
     private BsonDocument RenderAfter(
         OrderTerm term,
         QueryConstant value,
+        QueryRenderOptions options,
         Func<ColumnRef, string>? fieldPath = null)
     {
+        var joinedFields = fieldPath is not null;
         fieldPath ??= static column => column.Name;
         var path = fieldPath(term.Column);
         if (term.NullOrder is not (NullOrder.First or NullOrder.Last))
@@ -872,7 +894,7 @@ public sealed class MongoQueryRenderer
                 : MatchNone();
 
         BsonDocument strict;
-        if (term.Column.Type == QueryType.String)
+        if (term.Column.Type == QueryType.String && !UsesPersistedOrderKey(term.Column, options))
         {
             var operation = term.Direction == OrderDirection.Ascending ? "$gt" : "$lt";
             strict = new BsonDocument("$expr", new BsonDocument("$and", new BsonArray
@@ -884,7 +906,7 @@ public sealed class MongoQueryRenderer
         else
             strict = new BsonDocument(path, new BsonDocument(
                 term.Direction == OrderDirection.Ascending ? "$gt" : "$lt", ToBson(value)));
-        if (term.NullOrder == NullOrder.Last)
+        if (term.NullOrder == NullOrder.Last && !SelectedIndexProvesNonNull(term.Column, options, joinedFields))
             return new BsonDocument("$or", new BsonArray
             {
                 strict,
@@ -1020,7 +1042,7 @@ public sealed class MongoQueryRenderer
         var orderInternalFields = new List<string>();
         BsonDocument? distinctContinuationMatch = null;
         if (cursor is not null && !distinct)
-            data.Add(new BsonDocument("$match", RenderContinuation(order, cursor, fieldPath)));
+            data.Add(new BsonDocument("$match", RenderContinuation(order, cursor, options, fieldPath)));
         var sort = new BsonDocument();
         for (var index = 0; index < order.Count; index++)
         {
@@ -1028,26 +1050,36 @@ public sealed class MongoQueryRenderer
             if (term.NullOrder is not (NullOrder.First or NullOrder.Last))
                 throw new QueryRenderException("GW-SEM-ORDER-004", "Mongo aggregation ordering requires explicit null ordering.");
 
-            var rankName = "_groundwork_null_rank_" + index.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            var nullRank = term.NullOrder == NullOrder.First ? 0 : 1;
-            var nonNullRank = term.NullOrder == NullOrder.First ? 1 : 0;
-            data.Add(new BsonDocument("$set", new BsonDocument(rankName,
-                new BsonDocument("$cond", new BsonArray
-                {
-                    new BsonDocument("$eq", new BsonArray { "$" + fieldPath(term.Column), BsonNull.Value }),
-                    nullRank,
-                    nonNullRank
-                }))));
-            sort.Add(rankName, 1);
             var valuePath = fieldPath(term.Column);
-            var orderName = term.Column.Type == QueryType.String
+            var provesNonNull = SelectedIndexProvesNonNull(term.Column, options, joinedFields);
+            if (!provesNonNull)
+            {
+                var rankName = "_groundwork_null_rank_" + index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                var nullRank = term.NullOrder == NullOrder.First ? 0 : 1;
+                var nonNullRank = term.NullOrder == NullOrder.First ? 1 : 0;
+                data.Add(new BsonDocument("$set", new BsonDocument(rankName,
+                    new BsonDocument("$cond", new BsonArray
+                    {
+                        new BsonDocument("$eq", new BsonArray { "$" + valuePath, BsonNull.Value }),
+                        nullRank,
+                        nonNullRank
+                    }))));
+                sort.Add(rankName, 1);
+                orderInternalFields.Add(rankName);
+            }
+
+            var usesPersistedOrderKey = UsesPersistedOrderKey(term.Column, options);
+            var orderName = term.Column.Type == QueryType.String && !usesPersistedOrderKey
                 ? "_groundwork_ordinal_key_" + index.ToString(System.Globalization.CultureInfo.InvariantCulture)
                 : joinedFields && !string.Equals(valuePath, term.Column.Name, StringComparison.Ordinal)
                     ? "_groundwork_order_value_" + index.ToString(System.Globalization.CultureInfo.InvariantCulture)
                     : valuePath;
-            if (term.Column.Type == QueryType.String)
+            if (term.Column.Type == QueryType.String && !usesPersistedOrderKey)
+            {
                 data.Add(new BsonDocument("$set", new BsonDocument(orderName,
                     RenderOrdinalKey("$" + valuePath))));
+                orderInternalFields.Add(orderName);
+            }
             else if (joinedFields && !string.Equals(orderName, valuePath, StringComparison.Ordinal))
                 data.Add(new BsonDocument("$set", new BsonDocument(orderName, "$" + valuePath)));
             if (joinedFields)
@@ -1096,7 +1128,7 @@ public sealed class MongoQueryRenderer
                 data.Add(new BsonDocument("$sort", sort.DeepClone().AsBsonDocument));
             if (cursor is not null)
             {
-                distinctContinuationMatch = new BsonDocument("$match", RenderContinuation(order, cursor, fieldPath));
+                distinctContinuationMatch = new BsonDocument("$match", RenderContinuation(order, cursor, options, fieldPath));
                 data.Add(distinctContinuationMatch);
             }
         }
@@ -1125,15 +1157,10 @@ public sealed class MongoQueryRenderer
         else if (order.Count != 0 || latestInternalFields.Count != 0)
         {
             var cleanup = new BsonDocument();
-            for (var index = 0; index < order.Count; index++)
-            {
-                cleanup.Add("_groundwork_null_rank_" + index.ToString(System.Globalization.CultureInfo.InvariantCulture), 0);
-                if (order[index].Column.Type == QueryType.String)
-                    cleanup.Add("_groundwork_ordinal_key_" + index.ToString(System.Globalization.CultureInfo.InvariantCulture), 0);
-            }
             foreach (var field in orderInternalFields.Concat(latestInternalFields).Distinct(StringComparer.Ordinal))
                 cleanup.Add(field, 0);
-            data.Add(new BsonDocument("$project", cleanup));
+            if (cleanup.ElementCount != 0)
+                data.Add(new BsonDocument("$project", cleanup));
         }
         if (paging.Offset is int offset)
             data.Add(new BsonDocument("$skip", offset));

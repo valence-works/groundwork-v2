@@ -1648,6 +1648,128 @@ public sealed class MongoProviderIntegrationTests
     }
 
     [SkippableFact]
+    public void Ordered_page_uses_the_optimizer_selected_non_null_ordinal_identity_index_without_a_hint()
+    {
+        var connectionString = LiveMongo.ConnectionString;
+        Skip.If(string.IsNullOrWhiteSpace(connectionString),
+            "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB explain proofs.");
+        var previousFlag = Environment.GetEnvironmentVariable("GW_EXPLAIN_ASSERT");
+        var previousDirectory = Environment.GetEnvironmentVariable("GW_EXPLAIN_ARTIFACT_DIR");
+        var artifactDirectory = Path.Combine(Path.GetTempPath(), "groundwork-order-mongo-" + Guid.NewGuid().ToString("N"));
+        Environment.SetEnvironmentVariable("GW_EXPLAIN_ASSERT", "1");
+        Environment.SetEnvironmentVariable("GW_EXPLAIN_ARTIFACT_DIR", artifactDirectory);
+        try
+        {
+            using var connection = new MongoDbProviderFactory().Create(connectionString!);
+            var unit = new StorageUnit
+            {
+                Id = new StorageUnitId("mongo-order-explain-" + Guid.NewGuid().ToString("N")),
+                Name = "MongoOrderExplain_" + Guid.NewGuid().ToString("N"),
+                Columns =
+                [
+                    new()
+                    {
+                        Name = "id",
+                        Type = PortableType.String,
+                        MaxLength = 32,
+                        IsNullable = false,
+                        OrdinalIdentity = new OrdinalIdentityDefinition
+                        {
+                            PhysicalColumn = "__groundwork_ordinal_identity_id"
+                        }
+                    },
+                    new() { Name = "lastSeen", Type = PortableType.Int64, IsNullable = false }
+                ],
+                Key = new KeyDefinition { Columns = ["id"] },
+                Indexes =
+                [
+                    new IndexDefinition
+                    {
+                        Name = "by_last_seen",
+                        Columns =
+                        [
+                            new IndexColumn("lastSeen", Groundwork.Kernel.SortDirection.Descending),
+                            new IndexColumn("id")
+                        ],
+                        UseOrdinalIdentities = true
+                    }
+                ]
+            };
+            Assert.True(connection.Schema.Apply(unit).Applied);
+            var session = connection.OpenSession(unit, MongoStorageAccess.Global);
+            for (var value = 0; value < 2_000; value++)
+            {
+                session.Insert(new MongoStorageValues(new Dictionary<string, object?>
+                {
+                    ["id"] = "resource-" + value.ToString("D4", System.Globalization.CultureInfo.InvariantCulture),
+                    ["lastSeen"] = 10_000L - value / 4
+                }));
+            }
+
+            var table = new TableId(unit.Name);
+            var id = new ColumnRef(table, "id", QueryType.String, false, 32,
+                stringComparison: QueryStringComparisonPolicy.Ordinal);
+            var lastSeen = new ColumnRef(table, "lastSeen", QueryType.Int64, false);
+            var options = new QueryRenderOptions(
+                [new QueryIndexDeclaration(
+                    "by_last_seen",
+                    [
+                        new QueryIndexColumn("lastSeen", false, QueryType.Int64),
+                        new QueryIndexColumn("id", false, QueryType.String)
+                    ],
+                    QueryIndexPinning.ProviderDefault)],
+                selectedIndex: "by_last_seen");
+            var result = session.Query(new QueryRequest(
+                table,
+                Predicate.AlwaysTrue.Instance,
+                [
+                    new OrderTerm(lastSeen, OrderDirection.Descending, NullOrder.Last),
+                    new OrderTerm(id, OrderDirection.Ascending, NullOrder.Last)
+                ],
+                Projection.ColumnsOnly(lastSeen, id),
+                Paging.Keyset(127)), options);
+
+            Assert.Equal("by_last_seen", result.SelectedIndex);
+            Assert.Equal(127, result.Rows.Count);
+            Assert.Equal("resource-0000", result.Rows[0]["id"]);
+            Assert.NotNull(result.NextContinuationToken);
+
+            var next = session.Query(new QueryRequest(
+                table,
+                Predicate.AlwaysTrue.Instance,
+                [
+                    new OrderTerm(lastSeen, OrderDirection.Descending, NullOrder.Last),
+                    new OrderTerm(id, OrderDirection.Ascending, NullOrder.Last)
+                ],
+                Projection.ColumnsOnly(lastSeen, id),
+                Paging.Continuation(result.NextContinuationToken!, 127)), options);
+            Assert.Equal(127, next.Rows.Count);
+            Assert.Equal("resource-0127", next.Rows[0]["id"]);
+            Assert.Empty(result.Rows.Select(row => row["id"]).Intersect(next.Rows.Select(row => row["id"])));
+
+            var artifacts = Directory.GetFiles(artifactDirectory, "*.json");
+            Assert.Equal(2, artifacts.Length);
+            foreach (var artifact in artifacts)
+            {
+                Assert.Contains("optimizer-selected", Path.GetFileName(artifact), StringComparison.Ordinal);
+                var plan = File.ReadAllText(artifact);
+                Assert.Contains("IXSCAN", plan, StringComparison.OrdinalIgnoreCase);
+                Assert.Contains("by_last_seen", plan, StringComparison.Ordinal);
+                Assert.False(MongoExplainPlanInspector.WinningPlanContainsStage(
+                    BsonDocument.Parse(plan),
+                    "SORT"));
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("GW_EXPLAIN_ASSERT", previousFlag);
+            Environment.SetEnvironmentVariable("GW_EXPLAIN_ARTIFACT_DIR", previousDirectory);
+            if (Directory.Exists(artifactDirectory))
+                Directory.Delete(artifactDirectory, recursive: true);
+        }
+    }
+
+    [SkippableFact]
     public void Composite_declared_key_prefix_uses_the_Mongo_native_index_without_a_hint()
     {
         var connectionString = LiveMongo.ConnectionString;
