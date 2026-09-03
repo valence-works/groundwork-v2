@@ -170,21 +170,6 @@ public static class StorageAccessValidation
     }
 
     /// <summary>
-    /// Emits the legacy one-shot event. New provider implementations should use
-    /// <see cref="BeginPrivilegedQuery"/> and record the final outcome.
-    /// </summary>
-    [Obsolete("Use BeginPrivilegedQuery and complete the returned lifecycle with Success or Failure.")]
-    public static void ObservePrivilegedQuery(StorageAccess access, StorageUnit unit)
-    {
-        var audit = RequireAudit(access, unit);
-        audit.Observer!.Observe(new StorageAccessEvent(
-            unit.Id,
-            "query-across-scopes",
-            audit.Identity,
-            audit.Purpose));
-    }
-
-    /// <summary>
     /// Records a privileged-query attempt and returns the lifecycle handle a provider must complete
     /// with <see cref="StorageAccessAuditOperation.Success"/> or
     /// <see cref="StorageAccessAuditOperation.Failure(Exception)"/>.
