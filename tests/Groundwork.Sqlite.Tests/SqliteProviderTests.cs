@@ -2010,7 +2010,7 @@ public sealed class SqliteProviderTests
 
         using var cancellation = new CancellationTokenSource();
         Task<long> pending;
-        lock (((SqliteProviderConnection)connection).Gate)
+        using (((SqliteProviderConnection)connection).EnterGate())
         {
             pending = Task.Run(() => Scanned(table).CountAsync(executor, cancellation.Token));
             Thread.Sleep(250);
@@ -2119,7 +2119,7 @@ public sealed class SqliteProviderTests
         var session = connection.OpenSession(unit, StorageAccess.Global);
 
         Task<WriteOutcome> pending;
-        lock (((SqliteProviderConnection)connection).Gate)
+        using (((SqliteProviderConnection)connection).EnterGate())
         {
             pending = Task.Run(() =>
                 session.InsertAsync(new StorageValues(new Dictionary<string, object?> { ["Id"] = "a" })).AsTask());
@@ -2164,6 +2164,206 @@ public sealed class SqliteProviderTests
         var session = connection.OpenSession(unit, StorageAccess.Global);
         var committed = await session.ReadAsync(new StorageKey(new Dictionary<string, object?> { ["Id"] = "a" }));
         Assert.Equal("staged", committed?.Values.Values["Value"]);
+    }
+
+    [Theory]
+    [InlineData("commit")]
+    [InlineData("rollback")]
+    [InlineData("dispose")]
+    public async Task Unit_of_work_holds_the_provider_gate_until_its_terminal_path(string terminalPath)
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString + ";Default Timeout=0");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("uow-gate"),
+            Name = "uow_gate",
+            Columns = [new() { Name = "id", Type = PortableType.String, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        using var first = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
+        var owner = Assert.IsType<SqliteProviderConnection>(connection);
+        using var probeStarted = new ManualResetEventSlim();
+        var gateProbe = Task.Factory.StartNew(
+            () =>
+            {
+                probeStarted.Set();
+                using (owner.EnterGate()) { }
+            },
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
+        using var secondStarted = new ManualResetEventSlim();
+        var second = Task.Factory.StartNew(
+            () =>
+            {
+                secondStarted.Set();
+                using var candidate = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
+            },
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
+
+        Assert.True(probeStarted.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(secondStarted.Wait(TimeSpan.FromSeconds(5)));
+        await Task.Delay(TimeSpan.FromMilliseconds(100));
+        var probeWasPending = !gateProbe.IsCompleted;
+        var secondWasPending = !second.IsCompleted;
+
+        switch (terminalPath)
+        {
+            case "commit":
+                Assert.True(first.CommitWithOutcomes().IsSuccessful);
+                break;
+            case "rollback":
+                first.Rollback();
+                break;
+            case "dispose":
+                first.Dispose();
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(terminalPath), terminalPath, null);
+        }
+
+        await gateProbe.WaitAsync(TimeSpan.FromSeconds(5));
+        await second.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(probeWasPending, "The provider gate should be held until the first unit of work reaches a terminal path.");
+        Assert.True(secondWasPending, "The second unit of work should wait while the first unit of work is active.");
+    }
+
+    [Fact]
+    public void Unit_of_work_creation_failure_releases_the_provider_gate()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString + ";Default Timeout=0");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("uow-creation-failure"),
+            Name = "uow_creation_failure",
+            Columns = [new() { Name = "id", Type = PortableType.String, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        var invalid = unit with { Name = "uow creation failure" };
+        Assert.Throws<InvalidOperationException>(() =>
+            connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, invalid));
+
+        using var recovered = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
+        recovered.Rollback();
+    }
+
+    [Fact]
+    public async Task Provider_disposal_does_not_wait_forever_for_an_open_unit_of_work()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderConnection(store.ConnectionString);
+        var unit = Model(includePriority: false, includeUniqueIndex: false) with
+        {
+            Id = new StorageUnitId("uow-provider-disposal"),
+            Name = "uow_provider_disposal"
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
+
+        await Task.Run(connection.Dispose).WaitAsync(TimeSpan.FromSeconds(5));
+        work.Rollback();
+
+        Assert.Throws<ObjectDisposedException>(() => connection.OpenSession(unit, StorageAccess.Global));
+        Assert.Equal(System.Data.ConnectionState.Closed, connection.Connection.State);
+    }
+
+    [Fact]
+    public void Command_observer_can_reenter_the_provider_outside_a_unit_of_work()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderConnection(store.ConnectionString);
+        var unit = Model(includePriority: false, includeUniqueIndex: false) with
+        {
+            Id = new StorageUnitId("observer-reentry"),
+            Name = "observer_reentry"
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var observedIndexes = Array.Empty<ProviderIndex>();
+        var observer = new CallbackObserver(_ =>
+            observedIndexes = connection.Catalog.ReadIndexes(unit.Id).ToArray());
+        var session = connection.OpenSession(unit, StorageAccess.Global, observer);
+
+        Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(new StorageValues(
+            new Dictionary<string, object?>
+            {
+                ["id"] = "one",
+                ["value"] = "value",
+                ["uniqueValue"] = "unique"
+            })).Status);
+
+        Assert.Contains(observedIndexes, index => index.Name == "by_value");
+    }
+
+    [Fact]
+    public void Command_observer_refuses_a_reentrant_unit_of_work_instead_of_deadlocking()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderConnection(store.ConnectionString);
+        var unit = Model(includePriority: false, includeUniqueIndex: false) with
+        {
+            Id = new StorageUnitId("observer-uow-reentry"),
+            Name = "observer_uow_reentry"
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var observer = new CallbackObserver(command =>
+        {
+            if (command.Operation == "sqlite.insert")
+                connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
+        });
+        var session = connection.OpenSession(unit, StorageAccess.Global, observer);
+
+        var refusal = Assert.Throws<InvalidOperationException>(() => session.Insert(new StorageValues(
+            new Dictionary<string, object?>
+            {
+                ["id"] = "one",
+                ["value"] = "value",
+                ["uniqueValue"] = "unique"
+            })));
+
+        Assert.Contains("cannot begin a unit of work", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Unit_of_work_command_observer_reentry_is_refused_instead_of_deadlocking()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderConnection(store.ConnectionString);
+        var unit = Model(includePriority: false, includeUniqueIndex: false) with
+        {
+            Id = new StorageUnitId("uow-observer-reentry"),
+            Name = "uow_observer_reentry"
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var observer = new CallbackObserver(command =>
+        {
+            if (command.Operation == "sqlite.insert")
+                connection.Catalog.ReadIndexes(unit.Id);
+        });
+        using var work = connection.BeginUnitOfWork(
+            StorageAccess.Global,
+            BatchWriteOptions.Exact,
+            observer,
+            unit);
+        var session = work.OpenSession(unit);
+
+        var refusal = Assert.Throws<InvalidOperationException>(() => session.Insert(new StorageValues(
+            new Dictionary<string, object?>
+            {
+                ["id"] = "one",
+                ["value"] = "value",
+                ["uniqueValue"] = "unique"
+            })));
+
+        Assert.Contains("observer cannot re-enter", refusal.Message, StringComparison.Ordinal);
+        work.Rollback();
     }
 
     [Fact]
@@ -2704,6 +2904,11 @@ public sealed class SqliteProviderTests
             DisposalAttempted.Dispose();
             Release.Dispose();
         }
+    }
+
+    private sealed class CallbackObserver(Action<ProviderCommandEvent> callback) : IProviderCommandObserver
+    {
+        public void Observe(ProviderCommandEvent command) => callback(command);
     }
 
     private sealed class RecordingAccessObserver : IStorageAccessObserver

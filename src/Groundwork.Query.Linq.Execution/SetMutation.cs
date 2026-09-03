@@ -554,12 +554,13 @@ internal static class RuntimeCoverage
         QueryAdmissionProfile? admission)
     {
         ArgumentNullException.ThrowIfNull(session);
+        var catalogIndexes = (session as IProviderBoundStorageSession)?.RuntimeCatalogIndexes;
         if (session.Access.IsPrivilegedAcrossScopes)
         {
             // A cross-scope query cannot bind the physical scope prefix. Do not hand provider-owned
             // candidates to the checker: its nearest-index and suggested-declaration diagnostics
             // must never expose the hidden scope column to a caller who cannot spell it.
-            return Create(session.Unit, [], connection, admission, []);
+            return Create(session.Unit, [], connection, admission, [], catalogIndexes);
         }
 
         var isScopedQuery = session.Unit.Scope == ScopePolicy.Scoped &&
@@ -573,17 +574,24 @@ internal static class RuntimeCoverage
             admission,
             isScopedQuery
                 ? StorageUnitCoverage.ScopedQueryKeyColumns(session.Unit)
-                : session.Unit.Key.Columns.ToImmutableArray());
+                : session.Unit.Key.Columns.ToImmutableArray(),
+            catalogIndexes);
     }
 
     public static RuntimeCoverageGate ForMutation(IStorageSession session)
     {
         ArgumentNullException.ThrowIfNull(session);
-        var connection = (session as IProviderBoundStorageSession)?.ProviderConnection;
-        return ForMutation(session.Unit, connection);
+        var bound = session as IProviderBoundStorageSession;
+        return ForMutation(session.Unit, bound?.ProviderConnection, bound?.RuntimeCatalogIndexes);
     }
 
     public static RuntimeCoverageGate ForMutation(StorageUnit unit, IStorageProviderConnection? connection)
+        => ForMutation(unit, connection, catalogIndexes: null);
+
+    private static RuntimeCoverageGate ForMutation(
+        StorageUnit unit,
+        IStorageProviderConnection? connection,
+        IReadOnlyList<ProviderIndex>? catalogIndexes)
     {
         ArgumentNullException.ThrowIfNull(unit);
         return Create(
@@ -591,7 +599,8 @@ internal static class RuntimeCoverage
             StorageUnitCoverage.PortableDeclaredIndexes(unit),
             connection,
             admission: null,
-            StorageUnitCoverage.PortableKeyColumns(unit));
+            StorageUnitCoverage.PortableKeyColumns(unit),
+            catalogIndexes);
     }
 
     private static RuntimeCoverageGate Create(
@@ -599,13 +608,16 @@ internal static class RuntimeCoverage
         ImmutableArray<CoverageIndex> declared,
         IStorageProviderConnection? connection,
         QueryAdmissionProfile? admission,
-        ImmutableArray<string> key)
+        ImmutableArray<string> key,
+        IReadOnlyList<ProviderIndex>? catalogIndexes = null)
     {
         var declaredCandidates = CoverageCandidates.Derive(key, declared);
-        var deployedNames = connection?.Catalog.ReadIndexes(unit.Id)
+        var deployedNames = catalogIndexes is not null
+            ? catalogIndexes.Select(index => index.Name).ToHashSet(StringComparer.Ordinal)
+            : connection?.Catalog.ReadIndexes(unit.Id)
             .Select(index => index.Name)
             .ToHashSet(StringComparer.Ordinal);
-        var deployed = connection is null
+        var deployed = deployedNames is null
             ? declared
             : declared.Where(index => deployedNames!.Contains(index.Name))
                 .ToImmutableArray();

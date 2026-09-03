@@ -197,6 +197,34 @@ public sealed class SqliteSetMutationTests
     }
 
     [Fact]
+    public void Unit_of_work_mutation_uses_the_catalog_snapshot_when_a_declared_index_is_missing()
+    {
+        using var connection = Open();
+        var unit = Unit();
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        connection.OpenSession(unit, StorageAccess.Global).Insert(Row("a", "open", "one"));
+
+        // Admission is cached by the first session open. BeginUnitOfWork must still capture the
+        // current physical catalog, rather than treating every declared index as deployed.
+        using (var raw = new SqliteConnection(((SqliteProviderConnection)connection).Connection.ConnectionString))
+        {
+            raw.Open();
+            using var command = raw.CreateCommand();
+            command.CommandText = $"DROP INDEX \"{SqliteDialect.PhysicalIndexName(unit.Name, "by_status")}\";";
+            command.ExecuteNonQuery();
+        }
+
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Default, unit);
+        var session = work.OpenSession(unit);
+        var refusal = Assert.Throws<QueryCoverageException>(() => session.UpdateWhere(
+            Status(unit, "open"),
+            new Dictionary<string, object?> { ["label"] = "updated" },
+            SetMutationOptions.Aggregate));
+        Assert.Equal("GW-COVER-006", refusal.Code);
+        work.Rollback();
+    }
+
+    [Fact]
     public void A_privileged_cross_scope_session_cannot_mutate_a_set()
     {
         using var connection = Open();

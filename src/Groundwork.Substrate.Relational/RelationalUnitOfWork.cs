@@ -17,6 +17,8 @@ public sealed class RelationalUnitOfWork : IUnitOfWork
     private readonly BatchContext batch;
     private bool terminal;
 
+    internal bool IsTerminal => terminal;
+
     public RelationalUnitOfWork(
         IEnumerable<StorageUnit> declarations,
         BatchWriteOptions options,
