@@ -2132,11 +2132,13 @@ public sealed class QueryRendererTests
         var request = Request(
             Predicate.AlwaysTrue.Instance,
             [new OrderTerm(requestName, OrderDirection.Descending, NullOrder.Last)],
-            Paging.Keyset(10),
+            Paging.Keyset(1),
             ResultShape.Rows.Instance,
             Projection.ColumnsOnly(requestName));
 
-        var command = new MongoQueryRenderer().Render(request, options);
+        var command = new MongoQueryRenderer().Render(
+            QueryRequestExecution.ForProviderPage(request, options),
+            options);
         var pipeline = string.Join("\n", command.Pipeline.Select(stage => stage.ToString()));
         var sort = command.Pipeline.Single(stage => stage.Contains("$sort"))["$sort"].AsBsonDocument;
 
@@ -2145,6 +2147,38 @@ public sealed class QueryRendererTests
         Assert.DoesNotContain("_groundwork_ordinal_key_", pipeline, StringComparison.Ordinal);
         Assert.DoesNotContain("$function", pipeline, StringComparison.Ordinal);
         Assert.Equal(ordinalIdentity, Assert.Single(command.AppliedOrder));
+
+        var page = QueryResultMaterializer.Materialize(
+            request,
+            options,
+            [
+                new Dictionary<string, object?>
+                {
+                    [requestName.Name] = "alpha",
+                    [ordinalIdentity] = "alpha"
+                },
+                new Dictionary<string, object?>
+                {
+                    [requestName.Name] = "aardvark",
+                    [ordinalIdentity] = "aardvark"
+                }
+            ],
+            sourceIncludesContinuation: true);
+        var token = Assert.IsType<string>(page.NextContinuationToken);
+        var nextPage = Request(
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(requestName, OrderDirection.Descending, NullOrder.Last)],
+            Paging.Continuation(token, 1),
+            ResultShape.Rows.Instance,
+            Projection.ColumnsOnly(requestName));
+        var nextCommand = new MongoQueryRenderer().Render(
+            QueryRequestExecution.ForProviderPage(nextPage, options),
+            options);
+        var nextPipeline = string.Join("\n", nextCommand.Pipeline.Select(stage => stage.ToString()));
+
+        Assert.DoesNotContain("$function", nextPipeline, StringComparison.Ordinal);
+        Assert.Contains(ordinalIdentity, nextCommand.Filter.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("$or", nextCommand.Filter.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]

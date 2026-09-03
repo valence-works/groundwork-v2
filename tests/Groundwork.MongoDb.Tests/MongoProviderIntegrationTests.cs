@@ -1732,11 +1732,33 @@ public sealed class MongoProviderIntegrationTests
             Assert.Equal("by_last_seen", result.SelectedIndex);
             Assert.Equal(127, result.Rows.Count);
             Assert.Equal("resource-0000", result.Rows[0]["id"]);
-            var artifact = Assert.Single(Directory.GetFiles(artifactDirectory, "*.json"));
-            Assert.Contains("optimizer-selected", Path.GetFileName(artifact), StringComparison.Ordinal);
-            var plan = File.ReadAllText(artifact);
-            Assert.Contains("IXSCAN", plan, StringComparison.OrdinalIgnoreCase);
-            Assert.Contains("by_last_seen", plan, StringComparison.Ordinal);
+            Assert.NotNull(result.NextContinuationToken);
+
+            var next = session.Query(new QueryRequest(
+                table,
+                Predicate.AlwaysTrue.Instance,
+                [
+                    new OrderTerm(lastSeen, OrderDirection.Descending, NullOrder.Last),
+                    new OrderTerm(id, OrderDirection.Ascending, NullOrder.Last)
+                ],
+                Projection.ColumnsOnly(lastSeen, id),
+                Paging.Continuation(result.NextContinuationToken!, 127)), options);
+            Assert.Equal(127, next.Rows.Count);
+            Assert.Equal("resource-0127", next.Rows[0]["id"]);
+            Assert.Empty(result.Rows.Select(row => row["id"]).Intersect(next.Rows.Select(row => row["id"])));
+
+            var artifacts = Directory.GetFiles(artifactDirectory, "*.json");
+            Assert.Equal(2, artifacts.Length);
+            foreach (var artifact in artifacts)
+            {
+                Assert.Contains("optimizer-selected", Path.GetFileName(artifact), StringComparison.Ordinal);
+                var plan = File.ReadAllText(artifact);
+                Assert.Contains("IXSCAN", plan, StringComparison.OrdinalIgnoreCase);
+                Assert.Contains("by_last_seen", plan, StringComparison.Ordinal);
+                Assert.False(MongoExplainPlanInspector.WinningPlanContainsStage(
+                    BsonDocument.Parse(plan),
+                    "SORT"));
+            }
         }
         finally
         {

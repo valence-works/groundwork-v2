@@ -43,7 +43,11 @@ public sealed class ExplainPlanInspectorTests
     {
         var plan = BsonDocument.Parse("""{"queryPlanner":{"winningPlan":{"stage":"FETCH","inputStage":{"stage":"IXSCAN","indexName":"ix_expected"}}},"executionStats":{"executionStages":{"stage":"COLLSCAN"}}}""");
         Assert.True(MongoExplainPlanInspector.ChoseIndex(plan, "ix_expected"));
+        Assert.False(MongoExplainPlanInspector.WinningPlanContainsStage(plan, "SORT"));
         Assert.False(MongoExplainPlanInspector.ChoseIndex(plan, "ix_other"));
         Assert.False(MongoExplainPlanInspector.ChoseIndex(BsonDocument.Parse("""{"queryPlanner":{"winningPlan":{"stage":"COLLSCAN"}}}"""), "ix_expected"));
+
+        var sorted = BsonDocument.Parse("""{"queryPlanner":{"winningPlan":{"stage":"SORT","inputStage":{"stage":"IXSCAN","indexName":"ix_expected"}}}}""");
+        Assert.True(MongoExplainPlanInspector.WinningPlanContainsStage(sorted, "SORT"));
     }
 }
