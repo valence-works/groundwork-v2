@@ -67,15 +67,21 @@ public sealed class NuGetPublishingTests
     }
 
     [Fact]
-    public void The_feedz_preview_channel_is_left_alone()
+    public void The_feedz_preview_channel_is_release_or_manual_only()
     {
         var root = RepositoryRoot.Find();
         var feedz = File.ReadAllText(Path.Combine(root, ".github/workflows/publish-feedz.yml"));
 
-        // The two channels stay separate: the preview feed keeps its main and published-release
-        // triggers, while nuget.org remains manual-only.
-        Assert.Contains("push:\n    branches: [main]", feedz, StringComparison.Ordinal);
+        // The two channels stay separate: Feedz publishes on a published release or an explicit
+        // manual dispatch, while nuget.org remains manual-only.
+        var triggers = feedz[feedz.IndexOf("\non:", StringComparison.Ordinal)..feedz.IndexOf("\npermissions:", StringComparison.Ordinal)];
+        var triggerKeys = Regex.Matches(triggers, @"(?m)^  ([a-z][a-z0-9_-]*):")
+            .Select(match => match.Groups[1].Value)
+            .ToArray();
+
+        Assert.Equal(new[] { "release", "workflow_dispatch" }, triggerKeys);
         Assert.Contains("release:\n    types: [published]", feedz, StringComparison.Ordinal);
+        Assert.Contains("workflow_dispatch:", feedz, StringComparison.Ordinal);
         Assert.Contains("https://f.feedz.io/valence-works/groundwork/nuget/index.json", feedz, StringComparison.Ordinal);
         Assert.DoesNotContain("api.nuget.org", feedz, StringComparison.Ordinal);
         Assert.DoesNotContain("push:", Workflow(), StringComparison.Ordinal);
