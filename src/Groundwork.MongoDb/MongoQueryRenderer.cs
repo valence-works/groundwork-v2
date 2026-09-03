@@ -1018,6 +1018,7 @@ public sealed class MongoQueryRenderer
 
         var data = new List<BsonDocument>();
         var orderInternalFields = new List<string>();
+        var selectedIndex = options.FindSelectedIndex();
         BsonDocument? distinctContinuationMatch = null;
         if (cursor is not null && !distinct)
             data.Add(new BsonDocument("$match", RenderContinuation(order, cursor, fieldPath)));
@@ -1028,26 +1029,41 @@ public sealed class MongoQueryRenderer
             if (term.NullOrder is not (NullOrder.First or NullOrder.Last))
                 throw new QueryRenderException("GW-SEM-ORDER-004", "Mongo aggregation ordering requires explicit null ordering.");
 
-            var rankName = "_groundwork_null_rank_" + index.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            var nullRank = term.NullOrder == NullOrder.First ? 0 : 1;
-            var nonNullRank = term.NullOrder == NullOrder.First ? 1 : 0;
-            data.Add(new BsonDocument("$set", new BsonDocument(rankName,
-                new BsonDocument("$cond", new BsonArray
-                {
-                    new BsonDocument("$eq", new BsonArray { "$" + fieldPath(term.Column), BsonNull.Value }),
-                    nullRank,
-                    nonNullRank
-                }))));
-            sort.Add(rankName, 1);
             var valuePath = fieldPath(term.Column);
-            var orderName = term.Column.Type == QueryType.String
+            var provesNonNull = !joinedFields && selectedIndex is not null &&
+                selectedIndex.Columns.Contains(term.Column.Name, StringComparer.Ordinal) &&
+                !selectedIndex.NullableColumns.Contains(term.Column.Name);
+            if (!provesNonNull)
+            {
+                var rankName = "_groundwork_null_rank_" + index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                var nullRank = term.NullOrder == NullOrder.First ? 0 : 1;
+                var nonNullRank = term.NullOrder == NullOrder.First ? 1 : 0;
+                data.Add(new BsonDocument("$set", new BsonDocument(rankName,
+                    new BsonDocument("$cond", new BsonArray
+                    {
+                        new BsonDocument("$eq", new BsonArray { "$" + valuePath, BsonNull.Value }),
+                        nullRank,
+                        nonNullRank
+                    }))));
+                sort.Add(rankName, 1);
+                orderInternalFields.Add(rankName);
+            }
+
+            var usesPersistedOrderKey = term.Column.Type == QueryType.String &&
+                options.SearchKeyColumns.Values.Any(mapping =>
+                    mapping.OrderByPhysicalColumn &&
+                    string.Equals(mapping.PhysicalColumn, term.Column.Name, StringComparison.Ordinal));
+            var orderName = term.Column.Type == QueryType.String && !usesPersistedOrderKey
                 ? "_groundwork_ordinal_key_" + index.ToString(System.Globalization.CultureInfo.InvariantCulture)
                 : joinedFields && !string.Equals(valuePath, term.Column.Name, StringComparison.Ordinal)
                     ? "_groundwork_order_value_" + index.ToString(System.Globalization.CultureInfo.InvariantCulture)
                     : valuePath;
-            if (term.Column.Type == QueryType.String)
+            if (term.Column.Type == QueryType.String && !usesPersistedOrderKey)
+            {
                 data.Add(new BsonDocument("$set", new BsonDocument(orderName,
                     RenderOrdinalKey("$" + valuePath))));
+                orderInternalFields.Add(orderName);
+            }
             else if (joinedFields && !string.Equals(orderName, valuePath, StringComparison.Ordinal))
                 data.Add(new BsonDocument("$set", new BsonDocument(orderName, "$" + valuePath)));
             if (joinedFields)
@@ -1125,15 +1141,10 @@ public sealed class MongoQueryRenderer
         else if (order.Count != 0 || latestInternalFields.Count != 0)
         {
             var cleanup = new BsonDocument();
-            for (var index = 0; index < order.Count; index++)
-            {
-                cleanup.Add("_groundwork_null_rank_" + index.ToString(System.Globalization.CultureInfo.InvariantCulture), 0);
-                if (order[index].Column.Type == QueryType.String)
-                    cleanup.Add("_groundwork_ordinal_key_" + index.ToString(System.Globalization.CultureInfo.InvariantCulture), 0);
-            }
             foreach (var field in orderInternalFields.Concat(latestInternalFields).Distinct(StringComparer.Ordinal))
                 cleanup.Add(field, 0);
-            data.Add(new BsonDocument("$project", cleanup));
+            if (cleanup.ElementCount != 0)
+                data.Add(new BsonDocument("$project", cleanup));
         }
         if (paging.Offset is int offset)
             data.Add(new BsonDocument("$skip", offset));

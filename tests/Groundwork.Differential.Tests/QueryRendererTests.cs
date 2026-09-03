@@ -2082,6 +2082,7 @@ public sealed class QueryRendererTests
         var postgres = new PostgreSqlQueryRenderer().Render(request, options);
         var sqlServer = new SqlServerQueryRenderer().Render(request, options);
         var mySql = new MySqlQueryRenderer().Render(request, options);
+        var mongo = new MongoQueryRenderer().Render(request, options);
 
         Assert.DoesNotContain(" IS NULL THEN", sqlite.CommandText, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(" IS NULL THEN", postgres.CommandText, StringComparison.OrdinalIgnoreCase);
@@ -2093,6 +2094,57 @@ public sealed class QueryRendererTests
         Assert.Contains("CONVERT(char(36)", sqlServer.CommandText, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("HEX(CONVERT", mySql.CommandText, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("ORDER BY", sqlite.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(mongo.Pipeline, stage =>
+            stage.ToString().Contains("_groundwork_null_rank_", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Mongo_orders_a_persisted_ordinal_identity_directly_through_the_selected_index()
+    {
+        var ordinalIdentity = "__groundwork_ordinal_identity_name";
+        var requestName = new ColumnRef(
+            Table,
+            "name",
+            QueryType.String,
+            isNullable: false,
+            maxLength: 100,
+            stringComparison: QueryStringComparisonPolicy.Ordinal);
+        var options = new QueryRenderOptions(
+            [new QueryIndexDeclaration(
+                "ix_name_identity",
+                [new QueryIndexColumn(ordinalIdentity, isNullable: false, QueryType.String)],
+                QueryIndexPinning.ProviderDefault)],
+            selectedIndex: "ix_name_identity",
+            tieBreakColumns: [requestName])
+        {
+            SearchKeyColumns = new Dictionary<string, QuerySearchKeyColumn>(StringComparer.Ordinal)
+            {
+                [requestName.Name] = new(
+                    requestName.Name,
+                    ordinalIdentity,
+                    QuerySearchKeyPolicy.Ordinal,
+                    maxLength: 200,
+                    orderByPhysicalColumn: true,
+                    supportsPrefixPredicates: false,
+                    preservesOrdinalIdentity: true)
+            }
+        };
+        var request = Request(
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(requestName, OrderDirection.Descending, NullOrder.Last)],
+            Paging.Keyset(10),
+            ResultShape.Rows.Instance,
+            Projection.ColumnsOnly(requestName));
+
+        var command = new MongoQueryRenderer().Render(request, options);
+        var pipeline = string.Join("\n", command.Pipeline.Select(stage => stage.ToString()));
+        var sort = command.Pipeline.Single(stage => stage.Contains("$sort"))["$sort"].AsBsonDocument;
+
+        Assert.Equal(-1, sort[ordinalIdentity].AsInt32);
+        Assert.DoesNotContain("_groundwork_null_rank_", pipeline, StringComparison.Ordinal);
+        Assert.DoesNotContain("_groundwork_ordinal_key_", pipeline, StringComparison.Ordinal);
+        Assert.DoesNotContain("$function", pipeline, StringComparison.Ordinal);
+        Assert.Equal(ordinalIdentity, Assert.Single(command.AppliedOrder));
     }
 
     [Fact]
@@ -2122,6 +2174,10 @@ public sealed class QueryRendererTests
             new MySqlQueryRenderer().Render(request, options)
         })
             Assert.Contains(" IS NULL THEN", command.CommandText, StringComparison.OrdinalIgnoreCase);
+
+        var mongo = new MongoQueryRenderer().Render(request, options);
+        Assert.Contains(mongo.Pipeline, stage =>
+            stage.ToString().Contains("_groundwork_null_rank_", StringComparison.Ordinal));
     }
 
     [Fact]
