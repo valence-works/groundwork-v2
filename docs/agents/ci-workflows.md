@@ -5,14 +5,15 @@ does not remove checks.
 
 ## Release publication
 
-`publish-feedz.yml` publishes Feedz-only previews when a GitHub release is published. The separate
+`publish-feedz.yml` publishes Feedz-only previews when a GitHub release is published, or when a
+maintainer explicitly dispatches it. It does not run on pushes to `main`. The separate
 `publish-nuget.yml` workflow is manual-only, so publishing that same GitHub release does not start a
 nuget.org run. To intentionally publish an exact version to nuget.org, dispatch it against the
 release tag and repeat the version in both inputs:
 
 ```bash
-gh workflow run publish-nuget.yml --ref v0.4.0-preview.8 \
-  -f version=0.4.0-preview.8 -f publish=true -f confirm=0.4.0-preview.8
+gh workflow run publish-nuget.yml --ref v0.4.0-preview.9 \
+  -f version=0.4.0-preview.9 -f publish=true -f confirm=0.4.0-preview.9
 ```
 
 The dispatch still runs the full package/test, layout, clean-room, integrity, credential, symbol,
