@@ -472,6 +472,39 @@ public sealed class LinqExecutorTests
         Assert.Equal("GW-COVER-006", refusal.Code);
     }
 
+    [Fact]
+    public void Set_mutation_refuses_a_declared_index_a_pinned_catalog_snapshot_does_not_carry()
+    {
+        using var fixture = Fixture.Open();
+        IStorageSession session = new PassThroughSession(
+            fixture.Session,
+            fixture.Connection,
+            runtimeCatalogIndexes: []);
+
+        var refusal = Assert.Throws<QueryCoverageException>(() => session.DeleteWhere(
+            StatusPredicate(Fixture.TableName, "open")));
+
+        Assert.Equal("GW-COVER-006", refusal.Code);
+    }
+
+    [Fact]
+    public async Task Query_refuses_a_declared_index_a_pinned_catalog_snapshot_does_not_carry()
+    {
+        using var fixture = Fixture.Open();
+        IStorageSession session = new PassThroughSession(
+            fixture.Session,
+            fixture.Connection,
+            runtimeCatalogIndexes: []);
+        var executor = new GwLinqExecutor(session, fixture.Connection);
+
+        var refusal = await Assert.ThrowsAsync<QueryCoverageException>(() =>
+            new GwQueryDatabase(executor).Table(Fixture.Model).Query
+                .Where(ticket => ticket.Status == "open")
+                .ToListAsync(executor));
+
+        Assert.Equal("GW-COVER-006", refusal.Code);
+    }
+
     [Theory]
     [InlineData(2_100, true)]
     [InlineData(65_535, false)]
@@ -553,12 +586,14 @@ public sealed class LinqExecutorTests
     /// <summary>Forwards the session contract and deliberately advertises no optional capability.</summary>
     private sealed class PassThroughSession(
         IStorageSession inner,
-        IStorageProviderConnection? providerConnection = null)
+        IStorageProviderConnection? providerConnection = null,
+        IReadOnlyList<ProviderIndex>? runtimeCatalogIndexes = null)
         : IStorageSession, ISetMutationStorageSession, IProviderBoundStorageSession
     {
         public StorageUnit Unit => inner.Unit;
         public StorageAccess Access => inner.Access;
         IStorageProviderConnection? IProviderBoundStorageSession.ProviderConnection => providerConnection;
+        IReadOnlyList<ProviderIndex>? IProviderBoundStorageSession.RuntimeCatalogIndexes => runtimeCatalogIndexes;
         public StoredEntry? Read(StorageKey key) => inner.Read(key);
         public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null) => inner.Query(request, options);
         public AggregationResult Aggregate(AggregationQuery query) => inner.Aggregate(query);

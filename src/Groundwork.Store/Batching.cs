@@ -856,6 +856,9 @@ internal class BatchStorageSession : IStorageSession, IProviderBoundStorageSessi
     IStorageProviderConnection? IProviderBoundStorageSession.ProviderConnection =>
         (inner as IProviderBoundStorageSession)?.ProviderConnection;
 
+    IReadOnlyList<ProviderIndex>? IProviderBoundStorageSession.RuntimeCatalogIndexes =>
+        (inner as IProviderBoundStorageSession)?.RuntimeCatalogIndexes;
+
     public StoredEntry? Read(StorageKey key)
     {
         context.FlushFor(Unit, key);

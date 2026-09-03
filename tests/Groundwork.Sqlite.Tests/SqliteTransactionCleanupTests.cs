@@ -90,7 +90,8 @@ public sealed class SqliteTransactionCleanupTests
 
         using (var unitOfWork = provider.BeginUnitOfWork(StorageAccess.Global, unit))
         {
-            var lifetime = PrivateField<object>(unitOfWork, "lifetime");
+            var relationalUnitOfWork = PrivateField<object>(unitOfWork, "inner");
+            var lifetime = PrivateField<object>(relationalUnitOfWork, "lifetime");
             var connection = PrivateField<SqliteConnection>(lifetime, "connection");
             var transaction = PrivateField<SqliteTransaction>(lifetime, "transaction");
             CreateMarker(connection, transaction);

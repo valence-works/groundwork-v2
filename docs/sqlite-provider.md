@@ -14,12 +14,19 @@ in the exception message.
 
 `IStorageSession`'s asynchronous members are honest about what this provider can do:
 Microsoft.Data.Sqlite completes its asynchronous ADO.NET surface synchronously, and the provider
-serializes every session command on a connection gate that a suspended continuation cannot hold. An
-asynchronous read, write, append, or unit-of-work commit therefore observes cancellation, runs the
-same gated body on the calling thread, and returns an already-completed task — it never yields the
-thread. `QueryAsync` additionally issues its reader on the asynchronous ADO.NET surface so the token
-still interrupts the native statement mid-execution. Use this provider's asynchronous surface for
-source compatibility with hosts written against it, not for thread relief.
+serializes every non-unit-of-work session command on a connection gate, and holds that same gate for
+the complete unit-of-work transaction lifetime. A caller that awaits while keeping a unit of work
+open intentionally keeps other provider work queued. An asynchronous read, write, append, or
+unit-of-work commit checks cancellation before joining the synchronous gate and returns an
+already-completed task once admitted — it never yields the thread. Cancellation cannot interrupt a
+caller already blocked on that synchronous gate. `QueryAsync` checks the token again before issuing
+its reader on the asynchronous ADO.NET surface, where the token can still interrupt the native
+statement mid-execution. Use this provider's asynchronous surface for source compatibility with
+hosts written against it, not for thread relief.
+
+Disposing a provider while one of its units of work is still active never waits on that unit of
+work's gate. The provider refuses new work and releases its remaining handles when the unit of work
+commits, rolls back, or is disposed.
 
 The store owns one `${database}.schema.lock` file handle for its lifetime. A second process or
 connection to the same file is rejected before schema work begins. The handle is not opened and

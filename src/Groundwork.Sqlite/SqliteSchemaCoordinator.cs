@@ -50,8 +50,8 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
 
     private PhysicalSchemaInspectionResult InspectDeployed(PhysicalSchemaTarget target, DbConnection? connection)
     {
-        if (owner.UsesSharedSessionConnection)
-            lock (owner.Gate) return executor.InspectDeployedHistory(target, owner.Connection);
+        if (owner.UsesSharedSessionConnection && connection is null)
+            return executor.InspectDeployedHistory(target, owner.Connection);
         return connection is null
             ? executor.InspectDeployedHistory(target)
             : executor.InspectDeployedHistory(target, connection);
@@ -62,6 +62,7 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
         GroundworkRuntimeSchemaAdmissionOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(desired);
+        using var gateLease = owner.EnterGate();
         lock (applicationGate)
         {
             var physical = Physicalize(desired);
@@ -87,6 +88,7 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
     public SchemaDiff Diff(StorageUnit desired)
     {
         ArgumentNullException.ThrowIfNull(desired);
+        using var gateLease = owner.EnterGate();
         var physical = Physicalize(desired);
         Remember(desired, physical);
         var target = Target(physical);
@@ -99,6 +101,7 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
     public SchemaApplyResult Apply(StorageUnit desired)
     {
         ArgumentNullException.ThrowIfNull(desired);
+        using var gateLease = owner.EnterGate();
         lock (applicationGate)
         {
             var physical = Physicalize(desired);
@@ -211,22 +214,34 @@ internal sealed class SqliteProviderCatalog : IProviderCatalog
     public IReadOnlyList<ProviderIndex> ReadIndexes(StorageUnitId storageUnitId)
     {
         owner.ThrowIfDisposed();
+        using var gateLease = owner.EnterGate();
+        return ReadIndexesWhileHoldingGate(storageUnitId);
+    }
+
+    internal IReadOnlyList<ProviderIndex> ReadIndexesWhileHoldingGate(StorageUnitId storageUnitId)
+    {
+        owner.ThrowIfDisposed();
         var unit = ((SqliteSchemaCoordinator)owner.Schema).Find(storageUnitId)
             ?? throw new InvalidOperationException($"Storage unit '{storageUnitId.Value}' has not been applied by this connection.");
-        lock (owner.Gate)
+        return ReadIndexesWhileHoldingGate(unit);
+    }
+
+    internal IReadOnlyList<ProviderIndex> ReadIndexesWhileHoldingGate(StorageUnit unit)
+    {
+        owner.ThrowIfDisposed();
+        // Catalog evidence must not come from a pooled native handle whose SQLite schema cache
+        // predates the latest application. A fresh handle observes the committed schema cookie.
+        using var catalogConnection = owner.CreateCatalogConnection();
+        var indexes = new List<ProviderIndex>();
+        foreach (var index in unit.Indexes)
         {
-            using var catalogConnection = owner.CreateIndependentConnection();
-            var indexes = new List<ProviderIndex>();
-            foreach (var index in unit.Indexes)
-            {
-                var metadata = dialect.ReadIndex(catalogConnection, null, unit.Name, index.Name);
-                if (metadata is null) continue;
-                indexes.Add(new ProviderIndex(index.Name,
-                    metadata.Columns.Where(column => column.Name != SqliteSchemaCoordinator.ScopeColumn)
-                        .Select(column => new ProviderIndexColumn(column.Name, column.Direction)).ToArray(),
-                    metadata.IsUnique, index.MissingValues, index.SchemaVersion));
-            }
-            return indexes;
+            var metadata = dialect.ReadIndex(catalogConnection, null, unit.Name, index.Name);
+            if (metadata is null) continue;
+            indexes.Add(new ProviderIndex(index.Name,
+                metadata.Columns.Where(column => column.Name != SqliteSchemaCoordinator.ScopeColumn)
+                    .Select(column => new ProviderIndexColumn(column.Name, column.Direction)).ToArray(),
+                metadata.IsUnique, index.MissingValues, index.SchemaVersion));
         }
+        return indexes.ToArray();
     }
 }

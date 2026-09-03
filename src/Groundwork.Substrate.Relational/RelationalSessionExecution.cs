@@ -115,13 +115,6 @@ internal sealed class RelationalSessionExecution
         }
     }
 
-    internal static ValueTask<IDisposable> EnterMonitor(object gate)
-    {
-        ArgumentNullException.ThrowIfNull(gate);
-        Monitor.Enter(gate);
-        return ValueTask.FromResult<IDisposable>(new DelegateScope(() => Monitor.Exit(gate)));
-    }
-
     private async ValueTask<IDisposable?> EnterReadGate(RelationalExecution execution)
     {
         if (ownsConnection || batchFallbackScope.Value ||

@@ -1022,6 +1022,12 @@ public interface IStorageSession
 internal interface IProviderBoundStorageSession
 {
     IStorageProviderConnection? ProviderConnection { get; }
+
+    /// <summary>
+    /// Optional deployed-index snapshot captured while this session's provider serialization lease
+    /// was held. A null value tells runtime coverage to read the connection catalog normally.
+    /// </summary>
+    IReadOnlyList<ProviderIndex>? RuntimeCatalogIndexes => null;
 }
 
 /// <summary>Durable lifecycle evidence for the current storage unit and access scope.</summary>

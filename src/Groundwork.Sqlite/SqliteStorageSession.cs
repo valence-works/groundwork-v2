@@ -25,6 +25,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
     private readonly RelationalSessionSetMutations setMutations;
     private readonly RelationalSessionAppends appends;
     private readonly SchemaSessionLease schemaSession;
+    private readonly IReadOnlyList<ProviderIndex>? runtimeCatalogIndexes;
 
     /// <summary>
     /// True when opened through <c>OpenOwnedSession</c>, so disposal returns this session's connection.
@@ -40,9 +41,11 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         SqliteTransaction? transaction,
         SchemaSessionLease schemaSession,
         IProviderCommandObserver? observer = null,
-        bool ownsConnection = false)
+        bool ownsConnection = false,
+        IReadOnlyList<ProviderIndex>? runtimeCatalogIndexes = null)
     {
         this.ownsConnection = ownsConnection;
+        this.runtimeCatalogIndexes = runtimeCatalogIndexes;
         commandObserver = observer;
         this.owner = owner;
         Unit = unit;
@@ -128,6 +131,8 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
     internal bool IsConnectionOpen => connection.State == ConnectionState.Open;
 
     IStorageProviderConnection IProviderBoundStorageSession.ProviderConnection => owner;
+
+    IReadOnlyList<ProviderIndex>? IProviderBoundStorageSession.RuntimeCatalogIndexes => runtimeCatalogIndexes;
 
     /// <summary>Maps every declared logical index name to the physical name the catalog carries.</summary>
     private IReadOnlyDictionary<string, string> PhysicalIndexNames() => Unit.Indexes.ToDictionary(
@@ -866,8 +871,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         var registration = OnAppendRetentionCoordinator.Begin(owner, Unit, Access.Scope?.Value);
         try
         {
-            if (commandObserver is IOnAppendRegistrationObserver registrationObserver)
-                registrationObserver.OnAppendRegistered();
+            owner.NotifyOnAppendRegistered(commandObserver);
             return registration;
         }
         catch
@@ -883,13 +887,18 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
     {
         void Cleanup()
         {
+            if (transaction is not null)
+            {
+                owner.ThrowIfDisposed();
+                ApplyRetentionCore(new RetentionExecutionOptions());
+                return;
+            }
+
             if (owner.UsesSharedSessionConnection)
             {
-                lock (owner.Gate)
-                {
-                    owner.ThrowIfDisposed();
-                    ApplyRetentionCore(new RetentionExecutionOptions());
-                }
+                using var gateLease = owner.EnterGate();
+                owner.ThrowIfDisposed();
+                ApplyRetentionCore(new RetentionExecutionOptions());
                 return;
             }
 
@@ -1280,7 +1289,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
             // attempt another write against that handle before it is retired.
             execution.Close();
             if (owner.UsesSharedSessionConnection)
-                owner.Dispose();
+                owner.DisposeWhileHoldingGate();
             else
                 connection.Close();
             throw;
@@ -1675,7 +1684,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         }
 
         public ValueTask<IDisposable> EnterGate(RelationalExecution execution) =>
-            RelationalSessionExecution.EnterMonitor(owner.Gate);
+            owner.EnterGate(execution);
 
         public ValueTask<DbTransaction> BeginWrite(RelationalExecution execution) =>
             ValueTask.FromResult<DbTransaction>(

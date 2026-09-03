@@ -574,7 +574,7 @@ internal sealed class StorageProviderConcurrencyConnection : IConcurrencyProvide
 
     public IConcurrencyProviderSession OpenSession() =>
         new StorageProviderConcurrencySession(
-            connection.OpenSession(declaration, StorageAccess.Global),
+            connection.OpenOwnedSession(declaration, StorageAccess.Global),
             declaration,
             logicalVersions,
             commitThroughUnitOfWork ? connection : null);
@@ -584,14 +584,14 @@ internal sealed class StorageProviderConcurrencyConnection : IConcurrencyProvide
 
 internal sealed class StorageProviderConcurrencySession : IConcurrencyProviderSession
 {
-    private readonly IStorageSession session;
+    private readonly IOwnedStorageSession session;
     private readonly StorageUnit declaration;
     private readonly ConcurrentDictionary<string, long> logicalVersions;
     private readonly IStorageProviderConnection? committing;
     private bool disposed;
 
     internal StorageProviderConcurrencySession(
-        IStorageSession session,
+        IOwnedStorageSession session,
         StorageUnit declaration,
         ConcurrentDictionary<string, long> logicalVersions,
         IStorageProviderConnection? committing = null)
@@ -719,7 +719,13 @@ internal sealed class StorageProviderConcurrencySession : IConcurrencyProviderSe
         return new ConcurrencyStoredRow(key, value as string, timestamp, version);
     }
 
-    public void Dispose() => disposed = true;
+    public void Dispose()
+    {
+        if (disposed)
+            return;
+        disposed = true;
+        session.Dispose();
+    }
 
     private void ThrowIfDisposed()
     {
