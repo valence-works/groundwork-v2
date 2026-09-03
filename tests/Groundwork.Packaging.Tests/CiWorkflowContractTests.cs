@@ -306,7 +306,7 @@ public sealed class CiWorkflowContractTests
     }
 
     [Fact]
-    public void SqlServer_w2_captures_hang_diagnostics_before_the_job_timeout()
+    public void SqlServer_w2_reports_each_matrix_shape_and_captures_hang_diagnostics_before_the_job_timeout()
     {
         var workflow = ReadWorkflow("concurrency.yml");
         var correctness = ReadWorkflow("ci.yml");
@@ -344,21 +344,22 @@ public sealed class CiWorkflowContractTests
             "W2_concurrency_harness_holds_every_named_invariant_for_the_full_matrix\"",
             job,
             StringComparison.Ordinal);
+        Assert.Contains("expectedShapes=8", job, StringComparison.Ordinal);
         Assert.Contains(
             "results=\"artifacts/sqlserver-w2/$TFM/sqlserver-w2-$TFM.trx\"",
             job,
             StringComparison.Ordinal);
         Assert.Contains(
-            "if [ \"$passed\" -ne 1 ] || [ \"$notExecuted\" -ne 0 ] || " +
-            "[ \"$observed\" -ne 1 ]; then",
+            "if [ \"$passed\" -ne \"$expectedShapes\" ] || [ \"$notExecuted\" -ne 0 ] || " +
+            "[ \"$observed\" -ne \"$expectedShapes\" ]; then",
             job,
             StringComparison.Ordinal);
 
         var exactHead = job.IndexOf("bash eng/verify-exact-head.sh", StringComparison.Ordinal);
         var test = job.IndexOf("--blame-hang", StringComparison.Ordinal);
-        var exactOnce = job.IndexOf("Refuse a run whose SQL Server W2 proof", StringComparison.Ordinal);
+        var shapeGuard = job.IndexOf("Refuse a run whose SQL Server W2 proof", StringComparison.Ordinal);
         var upload = job.IndexOf("Upload SQL Server W2 diagnostics", StringComparison.Ordinal);
-        Assert.True(exactHead >= 0 && exactHead < test && test < exactOnce && exactOnce < upload);
+        Assert.True(exactHead >= 0 && exactHead < test && test < shapeGuard && shapeGuard < upload);
     }
 
     [Fact]

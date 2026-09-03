@@ -523,40 +523,40 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
             new StorageKey(new Dictionary<string, object?> { ["id"] = "marker" })));
     }
 
-    [SkippableFact]
+    [SkippableTheory]
     [Trait("Category", "Concurrency")]
-    public void W2_concurrency_harness_holds_every_named_invariant_for_the_full_matrix()
+    [InlineData(1, false, false)]
+    [InlineData(1, false, true)]
+    [InlineData(1, true, false)]
+    [InlineData(1, true, true)]
+    [InlineData(1000, false, false)]
+    [InlineData(1000, false, true)]
+    [InlineData(1000, true, false)]
+    [InlineData(1000, true, true)]
+    public void W2_concurrency_harness_holds_every_named_invariant_for_the_full_matrix(
+        int keyCount,
+        bool includePartialUniqueIndex,
+        bool optimistic)
     {
-        foreach (var (keyCount, includePartialUniqueIndex, optimistic) in W2Shapes())
-        {
-            var connectionString = fixture.Reset();
-            var report = ConcurrencyHarness.Run(
-                new StorageProviderConcurrencyFactory("sqlserver", new SqlServerProviderFactory()),
-                connectionString,
-                new ConcurrencyProbeOptions
-                {
-                    WriterCount = 32,
-                    KeyCount = keyCount,
-                    RepeatCount = 2,
-                    Seed = 5245 + (keyCount == 1000 ? 1000 : 0) +
-                        (includePartialUniqueIndex ? 100 : 0) + (optimistic ? 10 : 0),
-                    Concurrency = optimistic ? ConcurrencyKind.Optimistic : ConcurrencyKind.None,
-                    IncludePartialUniqueIndex = includePartialUniqueIndex
-                });
+        var connectionString = fixture.Reset();
+        var report = ConcurrencyHarness.Run(
+            new StorageProviderConcurrencyFactory("sqlserver", new SqlServerProviderFactory()),
+            connectionString,
+            new ConcurrencyProbeOptions
+            {
+                WriterCount = 32,
+                KeyCount = keyCount,
+                RepeatCount = 2,
+                Seed = 5245 + (keyCount == 1000 ? 1000 : 0) +
+                    (includePartialUniqueIndex ? 100 : 0) + (optimistic ? 10 : 0),
+                Concurrency = optimistic ? ConcurrencyKind.Optimistic : ConcurrencyKind.None,
+                IncludePartialUniqueIndex = includePartialUniqueIndex
+            });
 
-            var shape = $"M={keyCount}, partial={includePartialUniqueIndex}, optimistic={optimistic}";
-            Assert.True(report.Passed, $"{shape}{Environment.NewLine}{Describe(report)}");
-            Assert.All(report.Scenarios.SelectMany(scenario => scenario.Invariants), invariant =>
-                Assert.True(invariant.Passed, $"{shape}: {invariant.Name}: {invariant.Detail}"));
-        }
-    }
-
-    private static IEnumerable<(int KeyCount, bool IncludePartialUniqueIndex, bool Optimistic)> W2Shapes()
-    {
-        foreach (var keyCount in new[] { 1, 1000 })
-        foreach (var includePartialUniqueIndex in new[] { false, true })
-        foreach (var optimistic in new[] { false, true })
-            yield return (keyCount, includePartialUniqueIndex, optimistic);
+        var shape = $"M={keyCount}, partial={includePartialUniqueIndex}, optimistic={optimistic}";
+        Assert.True(report.Passed, $"{shape}{Environment.NewLine}{Describe(report)}");
+        Assert.All(report.Scenarios.SelectMany(scenario => scenario.Invariants), invariant =>
+            Assert.True(invariant.Passed, $"{shape}: {invariant.Name}: {invariant.Detail}"));
     }
 
     [SkippableFact]
