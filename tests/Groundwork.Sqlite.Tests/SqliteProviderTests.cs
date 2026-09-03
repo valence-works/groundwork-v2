@@ -2441,6 +2441,32 @@ public sealed class SqliteProviderTests
     }
 
     [Fact]
+    public void Catalog_reads_current_indexes_after_an_older_native_handle_was_pooled()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var sqlite = Assert.IsType<SqliteProviderConnection>(connection);
+        var warmed = Enumerable.Range(0, 8)
+            .Select(_ => sqlite.CreateIndependentConnection())
+            .ToArray();
+        foreach (var handle in warmed)
+            handle.Dispose();
+
+        var unit = StorageUnit.Declare("catalog-pool", "catalog_pool")
+            .String("id", 32, column => column.Required())
+            .String("status", 32, column => column.Required())
+            .Key("id")
+            .Index("by_status", "status")
+            .Build();
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        Assert.Equal("by_status", Assert.Single(connection.Catalog.ReadIndexes(unit.Id)).Name);
+
+        _ = connection.OpenSession(unit, StorageAccess.Global);
+
+        Assert.Equal("by_status", Assert.Single(connection.Catalog.ReadIndexes(unit.Id)).Name);
+    }
+
+    [Fact]
     public void Folded_schema_migration_backfills_and_partial_updates_preserve_the_key()
     {
         using var store = TemporaryStore.Create();

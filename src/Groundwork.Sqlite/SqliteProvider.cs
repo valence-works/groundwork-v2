@@ -155,6 +155,15 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
     internal SqliteConnection CreateIndependentConnection() =>
         CreateOpenConnection(connection.ConnectionString);
 
+    internal SqliteConnection CreateCatalogConnection()
+    {
+        var builder = new SqliteConnectionStringBuilder(connection.ConnectionString)
+        {
+            Pooling = false
+        };
+        return CreateOpenConnection(builder.ConnectionString);
+    }
+
     internal SchemaSessionLease CaptureSchemaSession(StorageUnit physicalUnit) =>
         schemaSessions.Capture(SqliteSchemaCoordinator.Target(physicalUnit));
 

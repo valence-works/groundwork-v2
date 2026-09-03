@@ -229,7 +229,9 @@ internal sealed class SqliteProviderCatalog : IProviderCatalog
     internal IReadOnlyList<ProviderIndex> ReadIndexesWhileHoldingGate(StorageUnit unit)
     {
         owner.ThrowIfDisposed();
-        using var catalogConnection = owner.CreateIndependentConnection();
+        // Catalog evidence must not come from a pooled native handle whose SQLite schema cache
+        // predates the latest application. A fresh handle observes the committed schema cookie.
+        using var catalogConnection = owner.CreateCatalogConnection();
         var indexes = new List<ProviderIndex>();
         foreach (var index in unit.Indexes)
         {
