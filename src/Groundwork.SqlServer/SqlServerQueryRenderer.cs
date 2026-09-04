@@ -74,6 +74,8 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
         var rendered = base.RenderOrderTerm(term);
         if (term.Column.Type != QueryType.String)
             return rendered;
+        if (IsOrdinalIdentityColumn(term.Column))
+            return rendered;
         var direction = term.Direction == OrderDirection.Ascending ? "ASC" : "DESC";
         return rendered + ", DATALENGTH(" + RenderColumn(term.Column) + ") " + direction;
     }
@@ -212,6 +214,14 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
         ICollection<QueryRenderParameter> parameters,
         ref int parameterIndex)
     {
+        if (IsOrdinalIdentityColumn(column))
+        {
+            var expression = RenderColumn(column);
+            if (value.Kind == QueryConstantKind.Null)
+                return expression + " IS NULL";
+            var identityParameter = AddParameter(column, value, parameters, ref parameterIndex);
+            return "(" + expression + " IS NOT NULL AND " + expression + " = @" + identityParameter + ")";
+        }
         if (column.Type == QueryType.String)
             return RenderEquality(column, value, parameters, ref parameterIndex);
         if (column.Type != QueryType.Guid || value.Kind == QueryConstantKind.Null)
@@ -246,6 +256,13 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
         var parameter = AddParameter(term.Column, value, parameters, ref parameterIndex);
         var comparison = term.Direction == OrderDirection.Ascending ? ">" : "<";
         var lengthComparison = term.Direction == OrderDirection.Ascending ? ">" : "<";
+        if (IsOrdinalIdentityColumn(term.Column))
+        {
+            var intrinsicStrict = "(" + expression + " IS NOT NULL AND " + expression + " " + comparison + " @" + parameter + ")";
+            return term.NullOrder == NullOrder.First
+                ? intrinsicStrict
+                : "(" + intrinsicStrict + " OR " + expression + " IS NULL)";
+        }
         var strict = "((" + expression + " IS NOT NULL AND " + expression + " " + comparison + " @" + parameter + ") OR (" +
             expression + " = @" + parameter + " AND DATALENGTH(" + expression + ") " + lengthComparison + " DATALENGTH(@" + parameter + ")))";
         return term.NullOrder == NullOrder.First
@@ -258,6 +275,12 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
 
     internal static string RenderGuidOrderKey(string expression) =>
         "CONVERT(char(36), " + expression + ") COLLATE Latin1_General_100_BIN2";
+
+    private static bool IsOrdinalIdentityColumn(ColumnRef column) =>
+        // The persisted ordinal representation is injective and already carries the source
+        // value's trailing-space identity, so its physical key needs no length pathkey.
+        column.Type == QueryType.String &&
+        column.Name.StartsWith(SearchKeyProjection.OrdinalIdentityPrefix, StringComparison.Ordinal);
 
     protected override string RenderEndsWith(string expression, string parameter) =>
         "(DATALENGTH(@" + parameter + ") = 0 OR (DATALENGTH(RIGHT(" + expression + ", DATALENGTH(@" + parameter + ") / 2)) = DATALENGTH(@" + parameter + ") AND RIGHT(" + expression + ", DATALENGTH(@" + parameter + ") / 2) = @" + parameter + "))";
