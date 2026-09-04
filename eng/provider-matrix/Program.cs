@@ -175,8 +175,23 @@ static string RenderProviderMatrix(MatrixDocument document)
     builder.AppendLine("| Capability ID | Meaning | Evidence-gated | Additional provider commands/write |");
     builder.AppendLine("| --- | --- | --- | --- |");
     foreach (var capability in allCapabilities)
-        builder.AppendLine($"| `{capability.Id}` | {EscapeTableCell(capability.Description)} | {(capability.EvidenceGatedByDefault ? "yes" : "no")} | {capability.AdditionalProviderCommandsPerWrite} |");
+        builder.AppendLine($"| `{capability.Id}` | {EscapeTableCell(capability.Description)} | {(capability.EvidenceGatedByDefault ? "yes" : "no")} | {FormatAdditionalProviderCommandCost(document, capability.Id.Value)} |");
     return builder.ToString();
+}
+
+static string FormatAdditionalProviderCommandCost(MatrixDocument document, string capabilityId)
+{
+    var costs = document.Providers
+        .SelectMany(provider => provider.Capabilities)
+        .Where(capability => capability.Id == capabilityId)
+        .Select(capability => capability.AdditionalCommandsPerWrite)
+        .Distinct()
+        .Order()
+        .ToArray();
+
+    return costs.Length == 1
+        ? costs[0].ToString()
+        : $"{costs[0]}-{costs[^1]} (provider-specific; see JSON profiles)";
 }
 
 static CapabilityDescriptor DescribeCapability(string id)

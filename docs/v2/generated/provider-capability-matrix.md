@@ -19,7 +19,7 @@ The two batch columns are intentionally separate: staged unit-of-work and per-ro
 
 | Capability ID | Meaning | Evidence-gated | Additional provider commands/write |
 | --- | --- | --- | --- |
-| `groundwork.column.provider-sequence` | Relational providers monotonically allocate a durable Int64 key through provider-native writes; concurrent commit order may differ, and exact append may amortize allocation and durable high-water commands across a batch. | no | 0 |
+| `groundwork.column.provider-sequence` | Relational providers monotonically allocate a durable Int64 key through provider-native writes; concurrent commit order may differ, and exact append may amortize allocation and durable high-water commands across a batch. | no | 0-1 (provider-specific; see JSON profiles) |
 | `groundwork.operational.atomic-commit` | Commits all staged writes across the declared storage units in one provider transaction. | yes | 0 |
 | `groundwork.schema.enforced-constraints` | The deployment enforces declared physical foreign keys and portable check constraints in its native catalog. | no | 0 |
 | `groundwork.storage.append-idempotency` | Records caller-supplied append operation nonces in a kernel-owned durable ledger and commits the ledger entry with the payload atomically. | no | 0 |
