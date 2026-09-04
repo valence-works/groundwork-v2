@@ -529,12 +529,156 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         return outcome;
     }
 
-    private async ValueTask<RowWriteOutcome> InsertAppendSequence(RowWrite write, RelationalExecution mode)
+    private async ValueTask<IReadOnlyList<RowWriteOutcome>> InsertAppendSequenceBatch(
+        IReadOnlyList<RowWrite> writes,
+        RelationalExecution mode)
     {
-        var values = new StorageValues(SearchKeyProjection.Populate(Unit, write.Values!.Values));
-        RelationalSessionPolicy.ValidateValues(Unit, UserColumns, "PostgreSQL", values.Values, requireAllNonNullable: true);
-        return new RowWriteOutcome(write, await InsertCore(values, mode).ConfigureAwait(false));
+        ArgumentNullException.ThrowIfNull(writes);
+        if (writes.Count == 0)
+            return [];
+
+        var prepared = writes.Select(write =>
+        {
+            var values = new StorageValues(SearchKeyProjection.Populate(Unit, write.Values!.Values));
+            RelationalSessionPolicy.ValidateValues(Unit, UserColumns, "PostgreSQL", values.Values, requireAllNonNullable: true);
+            return (Write: write, Values: values);
+        }).ToArray();
+        var outcomes = new List<RowWriteOutcome>(writes.Count);
+        long? highWater = null;
+
+        for (var start = 0; start < prepared.Length;)
+        {
+            var columns = SequencePhysicalColumns(prepared[start].Values);
+            var end = start + 1;
+            while (end < prepared.Length &&
+                   SequencePhysicalColumns(prepared[end].Values).Select(column => column.Name)
+                       .SequenceEqual(columns.Select(column => column.Name), StringComparer.Ordinal))
+                end++;
+
+            var maxRows = Math.Max(1, Math.Min(1_000, 32_000 / (columns.Count + 1)));
+            foreach (var chunk in prepared[start..end].Chunk(maxRows))
+            {
+                var result = await InsertAppendSequenceBatchChunk(chunk, columns, mode).ConfigureAwait(false);
+                outcomes.AddRange(result.Outcomes);
+                if (result.HighWater is { } value)
+                    highWater = highWater is null ? value : Math.Max(highWater.Value, value);
+                if (result.HighWater is null)
+                    return outcomes;
+            }
+
+            start = end;
+        }
+
+        if (highWater is { } finalHighWater)
+            await RecordHighWaterBatch(finalHighWater, mode).ConfigureAwait(false);
+        return outcomes;
     }
+
+    private async ValueTask<(long? HighWater, IReadOnlyList<RowWriteOutcome> Outcomes)> InsertAppendSequenceBatchChunk(
+        IReadOnlyList<(RowWrite Write, StorageValues Values)> writes,
+        IReadOnlyList<ColumnDefinition> columns,
+        RelationalExecution mode)
+    {
+        // RETURNING does not expose an INSERT...SELECT source ordinal. Allocate identity values in a
+        // set-based statement that returns the ordinal explicitly, then insert those values through
+        // the BY DEFAULT identity column. This keeps correlation independent of provider row order.
+        var generated = await AllocateSequenceRange(writes.Count, mode).ConfigureAwait(false);
+        var insertColumns = new[] { SequenceColumn! }.Concat(columns).ToArray();
+        using var command = Command(string.Empty);
+        var rows = new List<string>(writes.Count);
+        for (var row = 0; row < writes.Count; row++)
+        {
+            var physical = PhysicalValues(writes[row].Values.Values, includeVersion: VersionColumn is not null);
+            var parameters = new List<string>(insertColumns.Length);
+            foreach (var column in insertColumns)
+            {
+                var name = $"r{row}_{column.Name}";
+                parameters.Add("@" + name);
+                var value = column == SequenceColumn
+                    ? generated[row]
+                    : physical[column.Name];
+                Add(command, name, value, column.Name);
+            }
+            rows.Add($"({string.Join(", ", parameters)})");
+        }
+
+        command.CommandText = $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", insertColumns.Select(column => Quote(column.Name)))}) VALUES {string.Join(", ", rows)};";
+        commandObserver?.Observe(new ProviderCommandEvent("postgresql.generated-sequence-batch", "PostgreSQL correlated generated-sequence INSERT", ProviderCommandKind.Write, IsProbe: false));
+        try
+        {
+            if (await mode.ExecuteNonQuery(command).ConfigureAwait(false) != writes.Count)
+                throw new InvalidOperationException("PostgreSQL generated-sequence batch did not insert every allocated row.");
+            return (generated.Max(), writes.Select((write, index) => new RowWriteOutcome(
+                write.Write,
+                new WriteOutcome(
+                    WriteOutcomeStatus.Inserted,
+                    VersionColumn is null ? null : 1,
+                    generatedValues: new Dictionary<string, object?>(StringComparer.Ordinal)
+                    {
+                        [SequenceColumn!.Name] = generated[index]
+                    }))).ToArray());
+        }
+        catch (DbException exception) when (new PostgreSqlDialect().TryMapUniqueViolation(exception, out var indexName))
+        {
+            return (null, writes.Select(write => new RowWriteOutcome(
+                write.Write,
+                new WriteOutcome(WriteOutcomeStatus.UniqueViolation, null, LogicalIndexName(indexName)))).ToArray());
+        }
+    }
+
+    private async ValueTask<long[]> AllocateSequenceRange(int count, RelationalExecution mode)
+    {
+        using var command = Command(string.Empty);
+        var rows = new List<string>(count);
+        for (var row = 0; row < count; row++)
+        {
+            var name = "sequence_ordinal_" + row;
+            rows.Add("(@" + name + ")");
+            AddTyped(command, name, row, NpgsqlDbType.Integer);
+        }
+        AddTyped(command, "sequence_table", Quote(Unit.Name), NpgsqlDbType.Text);
+        AddTyped(command, "sequence_column", SequenceColumn!.Name, NpgsqlDbType.Text);
+        command.CommandText = $"SELECT source.{Quote("ordinal")}, nextval(pg_get_serial_sequence(@sequence_table, @sequence_column)) " +
+            $"FROM (VALUES {string.Join(", ", rows)}) AS source ({Quote("ordinal")}) ORDER BY source.{Quote("ordinal")};";
+        commandObserver?.Observe(new ProviderCommandEvent("postgresql.generated-sequence-allocation", "PostgreSQL correlated generated-sequence allocation", ProviderCommandKind.Write, IsProbe: false));
+
+        var generated = new long[count];
+        var seen = new bool[count];
+        await using var readerScope = await mode.ExecuteReader(command).ConfigureAwait(false);
+        var reader = readerScope.Reader;
+        var returned = 0;
+        while (await mode.Read(reader).ConfigureAwait(false))
+        {
+            var ordinal = Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture);
+            var value = Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture);
+            if (ordinal < 0 || ordinal >= count || seen[ordinal])
+                throw new InvalidOperationException("PostgreSQL generated-sequence allocation returned an invalid input ordinal.");
+            seen[ordinal] = true;
+            generated[ordinal] = value;
+            returned++;
+        }
+        if (returned != count || seen.Any(item => !item))
+            throw new InvalidOperationException("PostgreSQL generated-sequence allocation did not return every input ordinal.");
+        return generated;
+    }
+
+    private async ValueTask RecordHighWaterBatch(long generatedValue, RelationalExecution mode)
+    {
+        if (SequenceColumn is null)
+            return;
+        await EnsureHighWaterTable(mode).ConfigureAwait(false);
+        using var command = Command($"INSERT INTO {Quote(HighWaterTable)} ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(HighWaterValue)}) VALUES (@unit, @scope, @value) ON CONFLICT ({Quote(LedgerUnit)}, {Quote(LedgerScope)}) DO UPDATE SET {Quote(HighWaterValue)}=GREATEST({Quote(HighWaterTable)}.{Quote(HighWaterValue)}, EXCLUDED.{Quote(HighWaterValue)});");
+        AddTyped(command, "unit", Unit.Id.Value, NpgsqlDbType.Text);
+        AddTyped(command, "scope", Access.Scope?.Value ?? string.Empty, NpgsqlDbType.Text);
+        AddTyped(command, "value", generatedValue, NpgsqlDbType.Bigint);
+        commandObserver?.Observe(new ProviderCommandEvent("postgresql.generated-sequence-high-water", "PostgreSQL generated-sequence high-water", ProviderCommandKind.Write, IsProbe: false));
+        await mode.ExecuteNonQuery(command).ConfigureAwait(false);
+    }
+
+    private IReadOnlyList<ColumnDefinition> SequencePhysicalColumns(StorageValues values) =>
+        PhysicalValues(values.Values, includeVersion: VersionColumn is not null)
+            .Keys.Select(Column)
+            .ToArray();
 
     private async ValueTask EnsureLedgerTable(string table, RelationalExecution mode)
     {
@@ -1298,6 +1442,12 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
             parameter.NpgsqlDbType = NpgsqlDbType.Jsonb;
     }
 
+    private static void AddTyped(NpgsqlCommand command, string name, object? value, NpgsqlDbType type)
+    {
+        var parameter = command.Parameters.AddWithValue(name, value ?? DBNull.Value);
+        parameter.NpgsqlDbType = type;
+    }
+
     private static object? ConvertValue(object? value, ColumnDefinition definition) =>
         new PostgreSqlDialect().ConvertValue(value, definition);
 
@@ -1435,10 +1585,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
             if (session.SequenceColumn is null)
                 return await session.ApplyBatchCore(writes, execution).ConfigureAwait(false);
 
-            var outcomes = new List<RowWriteOutcome>(writes.Length);
-            foreach (var write in writes)
-                outcomes.Add(await session.InsertAppendSequence(write, execution).ConfigureAwait(false));
-            return outcomes;
+            return await session.InsertAppendSequenceBatch(writes, execution).ConfigureAwait(false);
         }
 
         public async ValueTask<bool> CompleteLedger(

@@ -594,11 +594,155 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
         return outcome;
     }
 
-    private async ValueTask<RowWriteOutcome> InsertAppendSequence(RowWrite write, RelationalExecution mode)
+    private async ValueTask<IReadOnlyList<RowWriteOutcome>> InsertAppendSequenceBatch(
+        IReadOnlyList<RowWrite> writes,
+        RelationalExecution mode)
     {
-        var values = new StorageValues(SearchKeyProjection.Populate(Unit, write.Values!.Values));
-        RelationalSessionPolicy.ValidateValues(Unit, UserColumns, "SQL Server", values.Values, requireAllNonNullable: true);
-        return new RowWriteOutcome(write, await InsertCore(values.Values, mode, WriteOutcomeStatus.Inserted).ConfigureAwait(false));
+        ArgumentNullException.ThrowIfNull(writes);
+        if (writes.Count == 0)
+            return [];
+
+        var prepared = writes.Select(write =>
+        {
+            var values = new StorageValues(SearchKeyProjection.Populate(Unit, write.Values!.Values));
+            RelationalSessionPolicy.ValidateValues(Unit, UserColumns, "SQL Server", values.Values, requireAllNonNullable: true);
+            return (Write: write, Values: values);
+        }).ToArray();
+        var outcomes = new List<RowWriteOutcome>(writes.Count);
+        long? highWater = null;
+
+        for (var start = 0; start < prepared.Length;)
+        {
+            var columns = SequencePhysicalColumns(prepared[start].Values);
+            var end = start + 1;
+            while (end < prepared.Length &&
+                   SequencePhysicalColumns(prepared[end].Values).Select(column => column.Name)
+                       .SequenceEqual(columns.Select(column => column.Name), StringComparer.Ordinal))
+                end++;
+
+            var maxRows = Math.Max(1, Math.Min(1_000, 2_000 / (columns.Count + 1)));
+            foreach (var chunk in prepared[start..end].Chunk(maxRows))
+            {
+                var result = await InsertAppendSequenceBatchChunk(chunk, columns, mode).ConfigureAwait(false);
+                outcomes.AddRange(result.Outcomes);
+                if (result.HighWater is { } value)
+                    highWater = highWater is null ? value : Math.Max(highWater.Value, value);
+                if (result.HighWater is null)
+                    return outcomes;
+            }
+
+            start = end;
+        }
+
+        if (highWater is { } finalHighWater)
+            await RecordHighWaterBatch(finalHighWater, mode).ConfigureAwait(false);
+        return outcomes;
+    }
+
+    private async ValueTask<(long? HighWater, IReadOnlyList<RowWriteOutcome> Outcomes)> InsertAppendSequenceBatchChunk(
+        IReadOnlyList<(RowWrite Write, StorageValues Values)> writes,
+        IReadOnlyList<ColumnDefinition> columns,
+        RelationalExecution mode)
+    {
+        // SQL Server does not guarantee OUTPUT row order. Keep the source ordinal in the MERGE
+        // source and return it with the generated identity so outcomes can be reconstructed safely.
+        using var command = Command(string.Empty);
+        var rows = new List<string>(writes.Count);
+        for (var row = 0; row < writes.Count; row++)
+        {
+            var parameters = new List<string>(columns.Count + 1);
+            var ordinalName = $"@r{row}_ordinal";
+            parameters.Add(ordinalName);
+            command.Parameters.Add(ordinalName, SqlDbType.Int).Value = row;
+            foreach (var column in columns)
+            {
+                var name = $"@r{row}_{column.Name}";
+                parameters.Add(name);
+                var value = column.Name == SqlServerSchemaCoordinator.VersionColumn
+                    ? 1L
+                    : column.Name == SqlServerSchemaCoordinator.ScopeColumn
+                        ? Access.Scope!.Value
+                        : writes[row].Values.Values[column.Name];
+                SqlServerProviderConnection.AddParameter(command, name, value, column);
+            }
+            rows.Add($"({string.Join(", ", parameters)})");
+        }
+
+        var sourceColumns = string.Join(", ", new[] { Quote(GeneratedSequenceOrdinal) }.Concat(columns.Select(column => Quote(column.Name))));
+        var insert = columns.Count == 0
+            ? "DEFAULT VALUES"
+            : $"INSERT ({string.Join(", ", columns.Select(column => Quote(column.Name)))}) VALUES ({string.Join(", ", columns.Select(column => $"source.{Quote(column.Name)}"))})";
+        var sql = $"MERGE {Quote(Unit.Name)} WITH (HOLDLOCK) AS target USING (VALUES {string.Join(", ", rows)}) AS source ({sourceColumns}) ON 1=0 " +
+                  $"WHEN NOT MATCHED BY TARGET THEN {insert} " +
+                  $"OUTPUT source.{Quote(GeneratedSequenceOrdinal)}, inserted.{Quote(SequenceColumnDefinition!.Name)};";
+        command.CommandText = sql;
+        commandObserver?.Observe(new ProviderCommandEvent("sqlserver.generated-sequence-batch", "SQL Server correlated generated-sequence MERGE", ProviderCommandKind.Write, IsProbe: false));
+        try
+        {
+            var generated = await ReadGeneratedSequenceOutcomes(command, writes.Count, mode).ConfigureAwait(false);
+            return (generated.Values.Max(), writes.Select((write, index) => new RowWriteOutcome(
+                write.Write,
+                new WriteOutcome(
+                    WriteOutcomeStatus.Inserted,
+                    VersionColumnDefinition is null ? null : 1,
+                    generatedValues: new Dictionary<string, object?>(StringComparer.Ordinal)
+                    {
+                        [SequenceColumnDefinition!.Name] = generated[index]
+                    }))).ToArray());
+        }
+        catch (SqlException exception) when (dialect.TryMapUniqueViolation(exception, out var indexName))
+        {
+            return (null, writes.Select(write => new RowWriteOutcome(
+                write.Write,
+                new WriteOutcome(WriteOutcomeStatus.UniqueViolation, null, LogicalIndexName(indexName)))).ToArray());
+        }
+    }
+
+    private async ValueTask<Dictionary<int, long>> ReadGeneratedSequenceOutcomes(
+        SqlCommand command,
+        int expected,
+        RelationalExecution mode)
+    {
+        var generated = new Dictionary<int, long>(expected);
+        await using var readerScope = await mode.ExecuteReader(command).ConfigureAwait(false);
+        var reader = readerScope.Reader;
+        while (await mode.Read(reader).ConfigureAwait(false))
+        {
+            var ordinal = Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture);
+            var value = Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture);
+            if (ordinal < 0 || ordinal >= expected || !generated.TryAdd(ordinal, value))
+                throw new InvalidOperationException("SQL Server generated-sequence output returned an invalid input ordinal.");
+        }
+        if (generated.Count != expected)
+            throw new InvalidOperationException("SQL Server generated-sequence output did not return every input ordinal.");
+        return generated;
+    }
+
+    private async ValueTask RecordHighWaterBatch(long generatedValue, RelationalExecution mode)
+    {
+        if (SequenceColumnDefinition is null)
+            return;
+        await EnsureHighWaterTable(mode).ConfigureAwait(false);
+        using var command = Command($"MERGE {Quote(HighWaterTable)} WITH (HOLDLOCK) AS target " +
+            $"USING (SELECT @unit AS {Quote(LedgerUnit)}, @scope AS {Quote(LedgerScope)}, @value AS {Quote(HighWaterValue)}) AS source " +
+            $"ON target.{Quote(LedgerUnit)}=source.{Quote(LedgerUnit)} AND target.{Quote(LedgerScope)}=source.{Quote(LedgerScope)} " +
+            $"WHEN MATCHED THEN UPDATE SET {Quote(HighWaterValue)}=CASE WHEN target.{Quote(HighWaterValue)} < source.{Quote(HighWaterValue)} THEN source.{Quote(HighWaterValue)} ELSE target.{Quote(HighWaterValue)} END " +
+            $"WHEN NOT MATCHED THEN INSERT ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(HighWaterValue)}) VALUES (source.{Quote(LedgerUnit)}, source.{Quote(LedgerScope)}, source.{Quote(HighWaterValue)}); ");
+        AddLedgerParameter(command, "unit", Unit.Id.Value);
+        AddLedgerParameter(command, "scope", Access.Scope?.Value ?? string.Empty);
+        AddLedgerParameter(command, "value", generatedValue);
+        commandObserver?.Observe(new ProviderCommandEvent("sqlserver.generated-sequence-high-water", "SQL Server generated-sequence high-water", ProviderCommandKind.Write, IsProbe: false));
+        await mode.ExecuteNonQuery(command).ConfigureAwait(false);
+    }
+
+    private IReadOnlyList<ColumnDefinition> SequencePhysicalColumns(StorageValues values)
+    {
+        var columns = UserColumns.Where(column => values.Values.ContainsKey(column.Name)).ToList();
+        if (VersionColumnDefinition is not null)
+            columns.Add(VersionColumnDefinition);
+        if (ScopeColumnDefinition is not null)
+            columns.Add(ScopeColumnDefinition);
+        return columns;
     }
 
     private async ValueTask EnsureLedgerTable(string table, RelationalExecution mode)
@@ -1448,6 +1592,7 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
     private const string LedgerResult = "exact_result";
     private const string HighWaterTable = "__groundwork_sequence_high_waters";
     private const string HighWaterValue = "high_water";
+    private const string GeneratedSequenceOrdinal = "__groundwork_generated_sequence_ordinal";
     private const string BinaryIdentityCollation = "Latin1_General_100_BIN2";
     private const string LifecycleSchemaDiagnosticCode = "GW-SQLSERVER-LIFECYCLE-001";
     private ColumnDefinition? SequenceColumnDefinition => UserColumns.FirstOrDefault(column => column.Generation == ColumnGeneration.ProviderSequence);
@@ -1567,10 +1712,7 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
             if (session.SequenceColumnDefinition is null)
                 return await session.ApplyBatchCore(writes, execution).ConfigureAwait(false);
 
-            var outcomes = new List<RowWriteOutcome>(writes.Length);
-            foreach (var write in writes)
-                outcomes.Add(await session.InsertAppendSequence(write, execution).ConfigureAwait(false));
-            return outcomes;
+            return await session.InsertAppendSequenceBatch(writes, execution).ConfigureAwait(false);
         }
 
         public async ValueTask<bool> CompleteLedger(
