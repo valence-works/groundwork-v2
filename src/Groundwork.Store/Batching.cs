@@ -365,11 +365,12 @@ public sealed class RowWrite
 
     internal string Identity => IdentityFor(Unit, Key?.Values ?? Values!.Values);
 
-    internal RowWrite PopulateSearchKeyValues()
+    internal RowWrite PopulateSearchKeyValues(StorageUnit physicalUnit)
     {
+        ArgumentNullException.ThrowIfNull(physicalUnit);
         if (Values is null)
             return this;
-        var values = SearchKeyProjection.Populate(Unit, Values.Values);
+        var values = SearchKeyProjection.Populate(physicalUnit, Values.Values);
         return Mode switch
         {
             RowWriteMode.Insert => Insert(Unit, new StorageValues(values), Options),

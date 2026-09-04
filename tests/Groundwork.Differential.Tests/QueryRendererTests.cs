@@ -1103,6 +1103,101 @@ public sealed class QueryRendererTests
         Assert.Contains("[id]", command.CommandText, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(OrderDirection.Ascending, "ASC NULLS FIRST")]
+    [InlineData(OrderDirection.Descending, "DESC NULLS LAST")]
+    public void PostgreSql_selected_ordinal_identity_order_uses_the_persisted_pathkey(
+        OrderDirection direction,
+        string sqlDirection)
+    {
+        var publicRequest = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(RequiredName, direction, NullOrder.Last)],
+            Projection.ColumnsOnly(RequiredName),
+            Paging.OffsetLimit(0, 2));
+        var options = SelectedOrdinalIdentityOrderOptions();
+        var command = new PostgreSqlQueryRenderer().Render(
+            QueryRequestExecution.ForProviderPage(publicRequest, options),
+            options);
+
+        Assert.Contains(
+            "\"__groundwork_ordinal_required_name\" COLLATE \"C\") " + sqlDirection,
+            command.CommandText,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("string_agg", command.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("unnest(", command.CommandText, StringComparison.OrdinalIgnoreCase);
+
+        var ordinary = new PostgreSqlQueryRenderer().Render(publicRequest);
+        Assert.Contains("string_agg", ordinary.CommandText, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(OrderDirection.Ascending, ">")]
+    [InlineData(OrderDirection.Descending, "<")]
+    public void PostgreSql_selected_ordinal_identity_continuation_uses_the_persisted_pathkey(
+        OrderDirection direction,
+        string sqlComparison)
+    {
+        var firstPage = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(RequiredName, direction, NullOrder.Last)],
+            Projection.ColumnsOnly(RequiredName),
+            Paging.Keyset(2));
+        var options = SelectedOrdinalIdentityOrderOptions();
+        var execution = QueryRequestExecution.ForProviderPage(firstPage, options);
+        var token = QueryContinuationToken.Encode(
+            execution,
+            options,
+            [QueryConstant.Of(PersistedOrdinalIdentityName, "A"), QueryConstant.Of(Id, 42L)]);
+        var nextPage = new QueryRequest(
+            firstPage.Table,
+            firstPage.Where,
+            firstPage.Order,
+            firstPage.Projection,
+            Paging.Continuation(token, 2));
+
+        var command = new PostgreSqlQueryRenderer().Render(
+            QueryRequestExecution.ForProviderPage(nextPage, options),
+            options);
+
+        Assert.Contains(
+            "\"__groundwork_ordinal_required_name\" COLLATE \"C\") " + sqlComparison + " @p0",
+            command.CommandText,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("string_agg", command.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("unnest(", command.CommandText, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void PostgreSql_does_not_trust_an_ordinal_identity_prefix_without_the_mapping_marker()
+    {
+        var options = new QueryRenderOptions
+        {
+            SearchKeyColumns = new Dictionary<string, QuerySearchKeyColumn>(StringComparer.Ordinal)
+            {
+                [RequiredName.Name] = new(
+                    RequiredName.Name,
+                    "__groundwork_ordinal_unmarked",
+                    QuerySearchKeyPolicy.Ordinal,
+                    maxLength: 500,
+                    orderByPhysicalColumn: true)
+            }
+        };
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(RequiredName, OrderDirection.Ascending, NullOrder.Last)],
+            Projection.ColumnsOnly(RequiredName),
+            Paging.None);
+
+        var command = new PostgreSqlQueryRenderer().Render(request, options);
+
+        Assert.Contains("string_agg", command.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("unnest(", command.CommandText, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Fact]
     public void Ordinal_identity_equality_uses_the_physical_key_across_native_renderers()
     {

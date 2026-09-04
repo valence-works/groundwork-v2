@@ -1616,7 +1616,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         // Keep the logical RowWrite for outcome correlation and physicalize exactly once for
         // the native command. Fallback and exact paths delegate to single-row methods, which
         // perform their own physicalization.
-        var physicalWrites = writes.Select(write => write.PopulateSearchKeyValues()).ToArray();
+        var physicalWrites = writes.Select(write => write.PopulateSearchKeyValues(Unit)).ToArray();
 
         // BulkWrite can acknowledge each model but cannot identify whether each
         // upsert inserted or updated. CommitWithOutcomes requests that exact evidence;

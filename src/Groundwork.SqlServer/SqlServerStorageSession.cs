@@ -887,7 +887,7 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
         if (writes[0].Mode is not (RowWriteMode.Insert or RowWriteMode.Upsert))
             return await ApplyBatchFallback(writes, mode).ConfigureAwait(false);
 
-        var physicalWrites = writes.Select(write => write.PopulateSearchKeyValues()).ToArray();
+        var physicalWrites = writes.Select(write => write.PopulateSearchKeyValues(Unit)).ToArray();
 
         var columns = PhysicalBatchColumns(physicalWrites[0]);
         foreach (var write in physicalWrites)

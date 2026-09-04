@@ -62,11 +62,11 @@
     },
     "Groundwork.PostgreSql|lib/net10.0/Groundwork.PostgreSql.dll": {
       "maximumUndocumentedMembers": 81,
-      "publicApiMembers": 91
+      "publicApiMembers": 94
     },
     "Groundwork.PostgreSql|lib/net8.0/Groundwork.PostgreSql.dll": {
       "maximumUndocumentedMembers": 81,
-      "publicApiMembers": 91
+      "publicApiMembers": 94
     },
     "Groundwork.Query.Linq.Execution|lib/net10.0/Groundwork.Query.Linq.Execution.dll": {
       "maximumUndocumentedMembers": 10,
@@ -158,11 +158,11 @@
     },
     "Groundwork.Substrate.Relational|lib/net10.0/Groundwork.Substrate.Relational.dll": {
       "maximumUndocumentedMembers": 445,
-      "publicApiMembers": 552
+      "publicApiMembers": 555
     },
     "Groundwork.Substrate.Relational|lib/net8.0/Groundwork.Substrate.Relational.dll": {
       "maximumUndocumentedMembers": 445,
-      "publicApiMembers": 552
+      "publicApiMembers": 555
     },
     "Groundwork.Testing|lib/net10.0/Groundwork.Testing.dll": {
       "maximumUndocumentedMembers": 196,
@@ -182,8 +182,8 @@
     }
   },
   "publicApiSnapshots": {
-    "net10.0": "584e1bd830b74c56aa6084e1f7f1c69c0716201bed7053f03e9ae1da6e4c5e6e",
-    "net8.0": "7473a9323e6bae268a2919d8936393230b86852b6954935389635c2ac40f98af"
+    "net10.0": "690a5621385e927fe84942299834e913c056af55552e5eaff5e95e596ad60193",
+    "net8.0": "fd36eaf2805c7b18551e8058e3f6f7bd32cb79c0b92275c3f6aee18ad8aa3ee8"
   },
   "schemaVersion": 1
 }
