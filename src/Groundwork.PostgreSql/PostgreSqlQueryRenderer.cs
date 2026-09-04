@@ -51,25 +51,32 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
         {
             var guidExpression = RenderColumn(term.Column);
             var guidKey = "(" + guidExpression + "::text COLLATE \"C\")";
-            var guidDirection = term.Direction == OrderDirection.Ascending ? "ASC" : "DESC";
             if (!term.Column.IsNullable)
-                return guidKey + " " + guidDirection;
+                return RenderNonNullableOrder(guidKey, term.Direction);
+            var guidDirection = term.Direction == OrderDirection.Ascending ? "ASC" : "DESC";
             var guidNullRank = term.NullOrder == NullOrder.First ? "0" : "1";
             var guidNonNullRank = term.NullOrder == NullOrder.First ? "1" : "0";
             return "CASE WHEN " + guidExpression + " IS NULL THEN " + guidNullRank + " ELSE " + guidNonNullRank + " END ASC, " + guidKey + " " + guidDirection;
         }
         if (term.Column.Type != QueryType.String)
-            return base.RenderOrderTerm(term);
+            return term.Column.IsNullable
+                ? base.RenderOrderTerm(term)
+                : RenderNonNullableOrder(RenderColumn(term.Column), term.Direction);
 
         var expression = RenderColumn(term.Column);
         var key = RenderOrdinalKey(expression);
         var direction = term.Direction == OrderDirection.Ascending ? "ASC" : "DESC";
         if (!term.Column.IsNullable)
-            return key + " " + direction;
+            return RenderNonNullableOrder(key, term.Direction);
         var nullRank = term.NullOrder == NullOrder.First ? "0" : "1";
         var nonNullRank = term.NullOrder == NullOrder.First ? "1" : "0";
         return "CASE WHEN " + expression + " IS NULL THEN " + nullRank + " ELSE " + nonNullRank + " END ASC, " + key + " " + direction;
     }
+
+    private static string RenderNonNullableOrder(string expression, OrderDirection direction) =>
+        expression + (direction == OrderDirection.Ascending
+            ? " ASC NULLS FIRST"
+            : " DESC NULLS LAST");
 
     protected override string RenderRange(
         Predicate.Range range,

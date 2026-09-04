@@ -98,6 +98,69 @@ public sealed class PostgreSqlExplainPlanTests
         Assert.Contains("\"value\"", plan, StringComparison.Ordinal);
     }
 
+    [SkippableFact]
+    public void Explain_assertion_selects_a_declared_index_for_bounded_non_nullable_ordering()
+    {
+        using var environment = new ExplainEnvironment();
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        using var connection = new PostgreSqlProviderFactory().Create(database.ConnectionString);
+        var name = "pg_explain_order_" + Guid.NewGuid().ToString("N");
+        var unit = StorageUnit.Declare(name, name)
+            .String("traceKey", 64, column => column.Required())
+            .Int64("startTime", column => column.Required())
+            .String("payload", 1_024, column => column.Required())
+            .Key("traceKey")
+            .Index("by_start_time", index => index
+                .Descending("startTime")
+                .Ascending("traceKey"))
+            .Scoped()
+            .Build();
+
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        using (var seed = new NpgsqlConnection(database.ConnectionString))
+        {
+            seed.Open();
+            using var command = seed.CreateCommand();
+            command.CommandText =
+                $"INSERT INTO \"{name}\" (\"traceKey\", \"startTime\", \"payload\", \"__groundwork_scope\") " +
+                "SELECT lpad(value::text, 64, '0'), value, repeat('p', 512), 'scope-a' " +
+                "FROM generate_series(1, 100000) AS value; " +
+                $"ANALYZE \"{name}\";";
+            command.ExecuteNonQuery();
+        }
+
+        using var session = connection.OpenOwnedSession(
+            unit,
+            StorageAccess.Scoped(new StorageScope("scope-a")));
+        var table = new TableId(name);
+        var traceKey = new ColumnRef(table, "traceKey", QueryType.String, isNullable: false, maxLength: 64);
+        var startTime = new ColumnRef(table, "startTime", QueryType.Int64, isNullable: false);
+        var request = new QueryRequest(
+            table,
+            Predicate.AlwaysTrue.Instance,
+            [
+                new OrderTerm(startTime, OrderDirection.Descending, NullOrder.First),
+                new OrderTerm(traceKey, OrderDirection.Ascending, NullOrder.Last)
+            ],
+            Projection.All,
+            Paging.Keyset(127));
+        var options = new QueryRenderOptions(
+            [new QueryIndexDeclaration(
+                "by_start_time",
+                [
+                    new QueryIndexColumn("startTime", isNullable: false, QueryType.Int64),
+                    new QueryIndexColumn("traceKey", isNullable: false, QueryType.String)
+                ],
+                QueryIndexPinning.ProviderDefault)],
+            selectedIndex: "by_start_time");
+
+        var result = session.Query(request, options);
+
+        Assert.Equal(127, result.Rows.Count);
+        Assert.Equal(100_000L, result.Rows[0]["startTime"]);
+        Assert.Single(Directory.GetFiles(environment.ArtifactDirectory, "*.json"));
+    }
+
     private sealed class ExplainEnvironment : IDisposable
     {
         private readonly string? previousFlag = Environment.GetEnvironmentVariable("GW_EXPLAIN_ASSERT");
