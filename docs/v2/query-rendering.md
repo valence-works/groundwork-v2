@@ -114,11 +114,13 @@ dotnet test tests/Groundwork.Differential.Tests
 
 The diagnostic mode is off by default and adds no plan command to normal query execution. When enabled, the
 provider executes the query normally and then obtains its native plan: PostgreSQL uses
-`EXPLAIN (FORMAT JSON)`, SQL Server uses showplan XML, SQLite uses `EXPLAIN QUERY PLAN`, and
-MongoDB uses `explain` with `executionStats`. The assertion requires the exact resolved physical
-index name on an `Index Scan`/`Index Only Scan`, `Index Seek`, `USING INDEX` (including SQLite's
-equivalent `USING COVERING INDEX`), or winning-plan `IXSCAN`, respectively. Match-none queries do
-not perform a provider read and therefore have no chosen index to assert.
+`EXPLAIN (VERBOSE, FORMAT JSON)`, SQL Server uses showplan XML, SQLite uses `EXPLAIN QUERY PLAN`,
+and MongoDB uses `explain` with `executionStats`. PostgreSQL's verbose JSON retains the output
+expressions alongside the exact resolved physical index evidence, so diagnostics can bind a
+SubPlan to its source column and transformation. The assertion requires the exact resolved
+physical index name on an `Index Scan`/`Index Only Scan`, `Index Seek`, `USING INDEX` (including
+SQLite's equivalent `USING COVERING INDEX`), or winning-plan `IXSCAN`, respectively. Match-none
+queries do not perform a provider read and therefore have no chosen index to assert.
 
 Each assertion writes the unmodified JSON, XML, or text plan to `GW_EXPLAIN_ARTIFACT_DIR`; when the
 variable is omitted, artifacts go to `TestResults/groundwork-explain`. Test output labels the proof
