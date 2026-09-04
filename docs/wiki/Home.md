@@ -28,7 +28,7 @@ Swap `SqliteProviderFactory` for `PostgreSqlProviderFactory`, `SqlServerProvider
 `MongoProviderFactory`, or `MySqlProviderFactory` and nothing above changes. Tests can use the same
 declaration with `InMemoryProviderFactory`.
 
-> **Status: pre-1.0 preview.** The current published release is **`0.4.0-preview.9`**. Packages are
+> **Status: pre-1.0 preview.** The current published release is **`0.4.0-preview.10`**. Packages are
 > published to a public Feedz source, not nuget.org. Read
 > [Versioning & Support](Versioning-and-Support) and [Installation](Installation) before adopting.
 
