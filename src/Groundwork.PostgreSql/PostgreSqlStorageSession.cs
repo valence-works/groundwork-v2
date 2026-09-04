@@ -183,7 +183,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         var plans = new List<string>(query.Statements.Length);
         foreach (var statement in query.Statements)
         {
-            using var explain = Command("EXPLAIN (FORMAT JSON) " + statement.TrimEnd().TrimEnd(';'));
+            using var explain = Command(ExplainCommandText(statement));
             RelationalQueryResultReader.AddParameters(explain, query);
             plans.Add(Convert.ToString(
                 await mode.ExecuteScalar(explain).ConfigureAwait(false),
@@ -194,6 +194,9 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
             "PostgreSQL", logicalIndex, physicalIndex, query.IndexHintApplied, rawPlan,
             plans.All(plan => PostgreSqlExplainPlanInspector.ChoseIndex(plan, physicalIndex)));
     }
+
+    internal static string ExplainCommandText(string statement) =>
+        "EXPLAIN (VERBOSE, FORMAT JSON) " + statement.TrimEnd().TrimEnd(';');
 
     public StoredEntry? Read(StorageKey key) =>
         ReadEntry(key, RelationalExecution.Synchronous).GetAwaiter().GetResult();
