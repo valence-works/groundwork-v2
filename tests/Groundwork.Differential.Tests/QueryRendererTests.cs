@@ -2088,6 +2088,8 @@ public sealed class QueryRendererTests
         Assert.DoesNotContain(" IS NULL THEN", postgres.CommandText, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(" IS NULL THEN", sqlServer.CommandText, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(" IS NULL THEN", mySql.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("\"id\" DESC NULLS LAST", postgres.CommandText, StringComparison.Ordinal);
+        Assert.Contains("ASC NULLS FIRST", postgres.CommandText, StringComparison.Ordinal);
         Assert.Contains("string_agg", postgres.CommandText, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("::text COLLATE \"C\"", postgres.CommandText, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("DATALENGTH", sqlServer.CommandText, StringComparison.OrdinalIgnoreCase);
