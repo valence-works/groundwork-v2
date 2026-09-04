@@ -21,6 +21,8 @@ public sealed class QueryRendererTests
     private static readonly ColumnRef Amount = new(Table, "amount", QueryType.Int32, isNullable: true);
     private static readonly ColumnRef RequiredName = new(Table, "requiredName", QueryType.String, isNullable: false, maxLength: 100);
     private static readonly ColumnRef NameOrdinalKey = new(Table, "nameOrdinalKey", QueryType.String, isNullable: false, maxLength: 500);
+    private static readonly ColumnRef PersistedOrdinalIdentityName = new(
+        Table, "__groundwork_ordinal_required_name", QueryType.String, isNullable: false, maxLength: 500);
 
     [Fact]
     public void All_native_renderers_emit_the_declared_inner_join()
@@ -1025,6 +1027,82 @@ public sealed class QueryRendererTests
         Assert.DoesNotContain("DATALENGTH", commands[2].CommandText, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Theory]
+    [InlineData(OrderDirection.Ascending, "ASC")]
+    [InlineData(OrderDirection.Descending, "DESC")]
+    public void Sql_server_selected_ordinal_identity_order_omits_redundant_length_tie_break(
+        OrderDirection direction,
+        string sqlDirection)
+    {
+        var publicRequest = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(RequiredName, direction, NullOrder.Last)],
+            Projection.ColumnsOnly(RequiredName),
+            Paging.OffsetLimit(0, 2));
+        var options = SelectedOrdinalIdentityOrderOptions();
+        var execution = QueryRequestExecution.ForProviderPage(publicRequest, options);
+
+        var command = new SqlServerQueryRenderer().Render(execution, options);
+
+        Assert.Contains(
+            "[__groundwork_ordinal_required_name] COLLATE Latin1_General_100_BIN2 " + sqlDirection,
+            command.CommandText,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "DATALENGTH([__groundwork_ordinal_required_name]",
+            command.CommandText,
+            StringComparison.Ordinal);
+
+        var logical = new SqlServerQueryRenderer().Render(new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(Name, direction, NullOrder.Last)],
+            Projection.ColumnsOnly(Name),
+            Paging.OffsetLimit(0, 2)));
+        Assert.Contains("DATALENGTH([name] COLLATE Latin1_General_100_BIN2)", logical.CommandText, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(OrderDirection.Ascending, ">")]
+    [InlineData(OrderDirection.Descending, "<")]
+    public void Sql_server_selected_ordinal_identity_continuation_omits_redundant_length_comparisons(
+        OrderDirection direction,
+        string sqlComparison)
+    {
+        var firstPage = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(RequiredName, direction, NullOrder.Last)],
+            Projection.ColumnsOnly(RequiredName),
+            Paging.Keyset(2));
+        var options = SelectedOrdinalIdentityOrderOptions();
+        var execution = QueryRequestExecution.ForProviderPage(firstPage, options);
+        var token = QueryContinuationToken.Encode(
+            execution,
+            options,
+            [QueryConstant.Of(PersistedOrdinalIdentityName, "A"), QueryConstant.Of(Id, 42L)]);
+        var nextPage = new QueryRequest(
+            firstPage.Table,
+            firstPage.Where,
+            firstPage.Order,
+            firstPage.Projection,
+            Paging.Continuation(token, 2));
+
+        var command = new SqlServerQueryRenderer().Render(
+            QueryRequestExecution.ForProviderPage(nextPage, options),
+            options);
+
+        Assert.DoesNotContain("DATALENGTH", command.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(
+            "[__groundwork_ordinal_required_name] COLLATE Latin1_General_100_BIN2 " + sqlComparison + " @p0",
+            command.CommandText,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("= @p0", command.CommandText, StringComparison.Ordinal);
+        Assert.Contains("__groundwork_ordinal_required_name", command.CommandText, StringComparison.Ordinal);
+        Assert.Contains("[id]", command.CommandText, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Ordinal_identity_equality_uses_the_physical_key_across_native_renderers()
     {
@@ -1177,6 +1255,31 @@ public sealed class QueryRendererTests
                     NameOrdinalKey.Name,
                     QuerySearchKeyPolicy.Ordinal,
                     NameOrdinalKey.MaxLength,
+                    orderByPhysicalColumn: true,
+                    supportsPrefixPredicates: false,
+                    preservesOrdinalIdentity: true)
+            }
+        };
+
+    private static QueryRenderOptions SelectedOrdinalIdentityOrderOptions() =>
+        new QueryRenderOptions(
+            [new QueryIndexDeclaration(
+                "ix_required_name_ordinal",
+                [
+                    new QueryIndexColumn(PersistedOrdinalIdentityName.Name, isNullable: false, QueryType.String),
+                    new QueryIndexColumn(Id.Name, isNullable: false, QueryType.Int64)
+                ],
+                QueryIndexPinning.ProviderDefault)],
+            selectedIndex: "ix_required_name_ordinal",
+            tieBreakColumns: [Id])
+        {
+            SearchKeyColumns = new Dictionary<string, QuerySearchKeyColumn>(StringComparer.Ordinal)
+            {
+                [RequiredName.Name] = new(
+                    RequiredName.Name,
+                    PersistedOrdinalIdentityName.Name,
+                    QuerySearchKeyPolicy.Ordinal,
+                    PersistedOrdinalIdentityName.MaxLength,
                     orderByPhysicalColumn: true,
                     supportsPrefixPredicates: false,
                     preservesOrdinalIdentity: true)
