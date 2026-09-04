@@ -497,6 +497,63 @@ public sealed class PostgreSqlDialectTests
             ["content"] = content
         });
 
+    [SkippableTheory]
+    [InlineData(RowWriteMode.Insert)]
+    [InlineData(RowWriteMode.Upsert)]
+    public void Mixed_shape_public_batch_fallback_projects_ordinal_values_only_once(RowWriteMode mode)
+    {
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        using var connection = new PostgreSqlProviderFactory().Create(database.ConnectionString);
+        var unit = OrdinalIdentityBatchUnit();
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        using var session = connection.OpenOwnedSession(unit, StorageAccess.Global);
+        var batched = Assert.IsAssignableFrom<IBatchedStorageSession>(session);
+        var values = new[]
+        {
+            // Keep the logical dictionary order different from the declared physical order. The
+            // PostgreSQL batch shape check must compare provider-ordered physical columns.
+            new StorageValues(new Dictionary<string, object?>
+            {
+                ["name"] = "Ada", ["id"] = 1, ["note"] = "first"
+            }),
+            new StorageValues(new Dictionary<string, object?>
+            {
+                ["id"] = 2, ["name"] = "Grace"
+            })
+        };
+        var writes = values.Select(value => mode == RowWriteMode.Insert
+            ? RowWrite.Insert(unit, value)
+            : RowWrite.Upsert(unit, value)).ToArray();
+
+        var outcomes = batched.ApplyBatch(writes);
+
+        Assert.Equal(2, outcomes.Count);
+        Assert.All(outcomes, outcome => Assert.True(outcome.Outcome.Succeeded));
+        using var raw = new NpgsqlConnection(database.ConnectionString);
+        raw.Open();
+        using var command = raw.CreateCommand();
+        command.CommandText = "SELECT \"id\", \"name\", \"__groundwork_ordinal_name\" FROM \"ordinal_identity_batch\" ORDER BY \"id\";";
+        using var reader = command.ExecuteReader();
+        Assert.True(reader.Read());
+        Assert.Equal(1, reader.GetInt32(0));
+        Assert.Equal("Ada", reader.GetString(1));
+        Assert.Equal(PortableStringComparison.CreateOrdinal("Ada"), reader.GetString(2));
+        Assert.True(reader.Read());
+        Assert.Equal(2, reader.GetInt32(0));
+        Assert.Equal("Grace", reader.GetString(1));
+        Assert.Equal(PortableStringComparison.CreateOrdinal("Grace"), reader.GetString(2));
+        Assert.False(reader.Read());
+    }
+
+    private static StorageUnit OrdinalIdentityBatchUnit() =>
+        StorageUnit.Declare("ordinal-identity-batch", "ordinal_identity_batch")
+            .Int32("id", column => column.Required())
+            .String("name", 32, column => column.Required().OrdinalIdentity("__groundwork_ordinal_name"))
+            .String("note", 32)
+            .Key("id")
+            .Index("by_name", index => index.UseOrdinalIdentities().Column("name"))
+            .Build();
+
     [SkippableFact]
     public void Provider_applies_a_63_byte_storage_unit_name_without_rewriting()
     {

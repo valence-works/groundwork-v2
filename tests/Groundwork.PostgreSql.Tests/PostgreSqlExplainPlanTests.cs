@@ -236,28 +236,30 @@ public sealed class PostgreSqlExplainPlanTests
 
         var artifacts = Directory.GetFiles(environment.ArtifactDirectory, "*.json");
         Assert.Equal(2, artifacts.Length);
+        var physicalIndexName = PostgreSqlDialect.PhysicalIndexName(name, "by_value");
         foreach (var artifact in artifacts)
         {
             var plan = File.ReadAllText(artifact);
-            Assert.Contains("by_value", plan, StringComparison.Ordinal);
             using var document = JsonDocument.Parse(plan);
-            Assert.False(ContainsNodeType(document.RootElement, "Sort"));
+            Assert.False(ContainsPlanProperty(document.RootElement, "Node Type", "Sort"), plan);
+            Assert.False(ContainsPlanProperty(document.RootElement, "Node Type", "Incremental Sort"), plan);
+            Assert.True(ContainsPlanProperty(document.RootElement, "Index Name", physicalIndexName), plan);
         }
     }
 
-    private static bool ContainsNodeType(JsonElement element, string nodeType)
+    private static bool ContainsPlanProperty(JsonElement element, string propertyName, string expected)
     {
         if (element.ValueKind == JsonValueKind.Object)
         {
-            if (element.TryGetProperty("Node Type", out var value) &&
+            if (element.TryGetProperty(propertyName, out var value) &&
                 value.ValueKind == JsonValueKind.String &&
-                string.Equals(value.GetString(), nodeType, StringComparison.Ordinal))
+                string.Equals(value.GetString(), expected, StringComparison.Ordinal))
                 return true;
-            return element.EnumerateObject().Any(property => ContainsNodeType(property.Value, nodeType));
+            return element.EnumerateObject().Any(property => ContainsPlanProperty(property.Value, propertyName, expected));
         }
 
         return element.ValueKind == JsonValueKind.Array &&
-            element.EnumerateArray().Any(item => ContainsNodeType(item, nodeType));
+            element.EnumerateArray().Any(item => ContainsPlanProperty(item, propertyName, expected));
     }
 
     private sealed class ExplainEnvironment : IDisposable

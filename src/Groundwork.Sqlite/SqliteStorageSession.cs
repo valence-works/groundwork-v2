@@ -785,7 +785,21 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
             return ApplyBatchFallback(writes);
         if (RelationalSessionPolicy.HasSecondaryUniqueIndex(writes[0].Unit))
             return ApplyBatchFallback(writes);
+        if (writes[0].Mode is not (RowWriteMode.Insert or RowWriteMode.Upsert))
+            return ApplyBatchFallback(writes);
         var physicalWrites = writes.Select(write => write.PopulateSearchKeyValues(Unit)).ToArray();
+        var columns = UserColumns.Where(column => physicalWrites[0].Values!.Values.ContainsKey(column.Name))
+            .Select(column => column.Name).ToArray();
+        foreach (var write in physicalWrites)
+        {
+            RelationalSessionPolicy.ValidateValues(Unit, UserColumns, "SQLite", write.Values!.Values,
+                requireAllNonNullable: writes[0].Mode == RowWriteMode.Insert);
+            var writeColumns = UserColumns.Where(column => write.Values.Values.ContainsKey(column.Name))
+                .Select(column => column.Name);
+            if (!writeColumns.SequenceEqual(columns, StringComparer.Ordinal))
+                // Single-row writes populate their own derived values; retain the logical input.
+                return ApplyBatchFallback(writes);
+        }
 
         return physicalWrites[0].Mode switch
         {
@@ -807,16 +821,6 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
     private IReadOnlyList<RowWriteOutcome> ApplyInsertBatch(IReadOnlyList<RowWrite> writes)
     {
         var supplied = UserColumns.Where(column => writes[0].Values!.Values.ContainsKey(column.Name)).ToArray();
-        foreach (var write in writes)
-        {
-            RelationalSessionPolicy.ValidateValues(Unit, UserColumns, "SQLite", write.Values!.Values, requireAllNonNullable: true);
-            var writeColumns = UserColumns
-                .Where(column => write.Values!.Values.ContainsKey(column.Name))
-                .Select(column => column.Name)
-                .ToArray();
-            if (!writeColumns.SequenceEqual(supplied.Select(column => column.Name), StringComparer.Ordinal))
-                return ApplyBatchFallback(writes);
-        }
 
         var columns = supplied.ToList();
         if (VersionColumnDefinition is not null)
@@ -866,16 +870,6 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
     private IReadOnlyList<RowWriteOutcome> ApplyUpsertBatch(IReadOnlyList<RowWrite> writes)
     {
         var supplied = UserColumns.Where(column => writes[0].Values!.Values.ContainsKey(column.Name)).ToArray();
-        foreach (var write in writes)
-        {
-            RelationalSessionPolicy.ValidateValues(Unit, UserColumns, "SQLite", write.Values!.Values, requireAllNonNullable: false);
-            var writeColumns = UserColumns
-                .Where(column => write.Values!.Values.ContainsKey(column.Name))
-                .Select(column => column.Name)
-                .ToArray();
-            if (!writeColumns.SequenceEqual(supplied.Select(column => column.Name), StringComparer.Ordinal))
-                return ApplyBatchFallback(writes);
-        }
 
         var columns = supplied.ToList();
         if (VersionColumnDefinition is not null)

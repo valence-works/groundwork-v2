@@ -843,7 +843,18 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
             return ApplyBatchFallback(writes, mode);
         if (RelationalSessionPolicy.HasSecondaryUniqueIndex(writes[0].Unit))
             return ApplyBatchFallback(writes, mode);
+        if (writes[0].Mode is not (RowWriteMode.Insert or RowWriteMode.Upsert))
+            return ApplyBatchFallback(writes, mode);
         var physicalWrites = writes.Select(write => write.PopulateSearchKeyValues(Unit)).ToArray();
+        var columns = PhysicalValues(physicalWrites[0].Values!.Values, includeVersion: VersionColumn is not null).Keys.ToArray();
+        foreach (var write in physicalWrites)
+        {
+            RelationalSessionPolicy.ValidateValues(Unit, UserColumns, "PostgreSQL", write.Values!.Values,
+                requireAllNonNullable: writes[0].Mode == RowWriteMode.Insert);
+            if (!PhysicalValues(write.Values.Values, includeVersion: VersionColumn is not null).Keys.SequenceEqual(columns, StringComparer.Ordinal))
+                // Single-row writes populate their own derived values; retain the logical input.
+                return ApplyBatchFallback(writes, mode);
+        }
         return physicalWrites[0].Mode switch
         {
             RowWriteMode.Insert => ApplyInsertBatch(physicalWrites, mode),
@@ -864,12 +875,6 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
     private async ValueTask<IReadOnlyList<RowWriteOutcome>> ApplyInsertBatch(IReadOnlyList<RowWrite> writes, RelationalExecution mode)
     {
         var columns = PhysicalValues(writes[0].Values!.Values, includeVersion: VersionColumn is not null).Keys.ToArray();
-        foreach (var write in writes)
-        {
-            RelationalSessionPolicy.ValidateValues(Unit, UserColumns, "PostgreSQL", write.Values!.Values, requireAllNonNullable: true);
-            if (!PhysicalValues(write.Values.Values, includeVersion: VersionColumn is not null).Keys.SequenceEqual(columns, StringComparer.Ordinal))
-                return await ApplyBatchFallback(writes, mode).ConfigureAwait(false);
-        }
         var maxRows = Math.Max(1, Math.Min(1_000, 32_000 / columns.Length));
         if (writes.Count > maxRows)
         {
@@ -902,12 +907,6 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
     private async ValueTask<IReadOnlyList<RowWriteOutcome>> ApplyUpsertBatch(IReadOnlyList<RowWrite> writes, RelationalExecution mode)
     {
         var columns = PhysicalValues(writes[0].Values!.Values, includeVersion: VersionColumn is not null).Keys.ToArray();
-        foreach (var write in writes)
-        {
-            RelationalSessionPolicy.ValidateValues(Unit, UserColumns, "PostgreSQL", write.Values!.Values, requireAllNonNullable: false);
-            if (!PhysicalValues(write.Values.Values, includeVersion: VersionColumn is not null).Keys.SequenceEqual(columns, StringComparer.Ordinal))
-                return await ApplyBatchFallback(writes, mode).ConfigureAwait(false);
-        }
         var maxRows = Math.Max(1, Math.Min(1_000, 32_000 / columns.Length));
         if (writes.Count > maxRows)
         {

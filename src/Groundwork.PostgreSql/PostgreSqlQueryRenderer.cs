@@ -48,6 +48,7 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
     protected override string RenderOrderTerm(OrderTerm term) =>
         RenderPostgreSqlOrderTerm(term, persistedOrdinalIdentity: false);
 
+    /// <summary>Renders ordering using the selected physical search-key mappings.</summary>
     protected override string RenderMappedOrderTerm(OrderTerm term, QueryRenderOptions options) =>
         RenderPostgreSqlOrderTerm(term, IsPersistedOrdinalIdentityColumn(term.Column, options));
 
@@ -124,6 +125,7 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
         ref int parameterIndex) =>
         RenderPostgreSqlCursorEquality(column, value, parameters, ref parameterIndex, persistedOrdinalIdentity: false);
 
+    /// <summary>Renders cursor equality using the selected physical search-key mappings.</summary>
     protected override string RenderCursorEquality(
         ColumnRef column,
         QueryConstant value,
@@ -170,6 +172,7 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
         ref int parameterIndex) =>
         RenderPostgreSqlAfter(term, value, parameters, ref parameterIndex, persistedOrdinalIdentity: false);
 
+    /// <summary>Renders a cursor boundary using the selected physical search-key mappings.</summary>
     protected override string RenderAfter(
         OrderTerm term,
         QueryConstant value,
