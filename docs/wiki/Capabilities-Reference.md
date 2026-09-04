@@ -23,9 +23,12 @@ if (!connection.Capabilities.Any(c => c.Id == BatchWriteCapabilities.CompareAndD
 | `OwningModule` | Which module contributed it |
 | `AdditionalProviderCommandsPerWrite` | Extra commands this capability costs per write |
 
-That last field is the interesting one. MongoDB's provider-sequence descriptor reports **1**;
-relational providers report **0**. The library tells you the cost rather than letting you discover it
-in a load test.
+That last field is the interesting one. MongoDB's provider-sequence descriptor reports **1** for
+its counter command. SQLite, PostgreSQL, and SQL Server also report **1** for durable high-water on
+an ordinary generated-key write; exact append amortizes its allocation and high-water commands
+across bounded batches as described by each provider. Providers without an additional per-write
+command report **0**. The library tells you the cost rather than letting you discover it in a load
+test.
 
 ## The capability ids
 

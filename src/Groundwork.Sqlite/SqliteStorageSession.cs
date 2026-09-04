@@ -519,11 +519,150 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         return outcome;
     }
 
-    private RowWriteOutcome InsertAppendSequence(RowWrite write)
+    private IReadOnlyList<RowWriteOutcome> InsertAppendSequenceBatch(IReadOnlyList<RowWrite> writes)
     {
-        var values = new StorageValues(SearchKeyProjection.Populate(Unit, write.Values!.Values));
-        RelationalSessionPolicy.ValidateValues(Unit, UserColumns, "SQLite", values.Values, requireAllNonNullable: true);
-        return new RowWriteOutcome(write, InsertCore(values.Values, WriteOutcomeStatus.Inserted));
+        ArgumentNullException.ThrowIfNull(writes);
+        if (writes.Count == 0)
+            return [];
+
+        var prepared = writes.Select(write =>
+        {
+            var values = new StorageValues(SearchKeyProjection.Populate(Unit, write.Values!.Values));
+            RelationalSessionPolicy.ValidateValues(Unit, UserColumns, "SQLite", values.Values, requireAllNonNullable: true);
+            return (Write: write, Values: values);
+        }).ToArray();
+        var outcomes = new List<RowWriteOutcome>(writes.Count);
+        EnsureSequenceRow();
+        long? highWater = null;
+
+        for (var start = 0; start < prepared.Length;)
+        {
+            var columns = SequencePhysicalColumns(prepared[start].Values);
+            var end = start + 1;
+            while (end < prepared.Length &&
+                   SequencePhysicalColumns(prepared[end].Values).Select(column => column.Name)
+                       .SequenceEqual(columns.Select(column => column.Name), StringComparer.Ordinal))
+                end++;
+
+            var maxRows = Math.Max(1, Math.Min(1_000, SqliteVariableLimit() / (columns.Count + 1)));
+            foreach (var chunk in prepared[start..end].Chunk(maxRows))
+            {
+                var result = InsertAppendSequenceBatchChunk(chunk, columns);
+                outcomes.AddRange(result.Outcomes);
+                if (result.HighWater is { } value)
+                    highWater = highWater is null ? value : Math.Max(highWater.Value, value);
+                if (result.HighWater is null)
+                    return outcomes;
+            }
+
+            start = end;
+        }
+
+        if (highWater is { } finalHighWater)
+            RecordHighWaterBatch(finalHighWater);
+        return outcomes;
+    }
+
+    private (long? HighWater, IReadOnlyList<RowWriteOutcome> Outcomes) InsertAppendSequenceBatchChunk(
+        IReadOnlyList<(RowWrite Write, StorageValues Values)> writes,
+        IReadOnlyList<ColumnDefinition> columns)
+    {
+        // AUTOINCREMENT is backed by sqlite_sequence. Reserve a range while this write transaction
+        // holds SQLite's writer lock, then insert explicit IDs so each input ordinal has a stable key.
+        var count = writes.Count;
+        var last = AllocateSequenceRange(count);
+        var first = checked(last - count + 1L);
+        var insertColumns = new[] { SequenceColumnDefinition! }.Concat(columns).ToArray();
+        var valuesSql = new List<string>(count);
+        using var command = Command(string.Empty);
+        for (var row = 0; row < count; row++)
+        {
+            var parameters = new List<string>(insertColumns.Length);
+            foreach (var column in insertColumns)
+            {
+                var name = $"@r{row}_{column.Name}";
+                parameters.Add(name);
+                var value = column == SequenceColumnDefinition
+                    ? checked(first + row)
+                    : column.Name == SqliteSchemaCoordinator.VersionColumn
+                        ? 1L
+                        : column.Name == SqliteSchemaCoordinator.ScopeColumn
+                            ? Access.Scope!.Value
+                            : ToSqlite(writes[row].Values.Values[column.Name], column) ?? DBNull.Value;
+                command.Parameters.AddWithValue(name, value);
+            }
+            valuesSql.Add($"({string.Join(", ", parameters)})");
+        }
+
+        command.CommandText = $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", insertColumns.Select(column => Quote(column.Name)))}) VALUES {string.Join(", ", valuesSql)};";
+        commandObserver?.Observe(new ProviderCommandEvent("sqlite.generated-sequence-batch", "SQLite correlated generated-sequence INSERT", ProviderCommandKind.Write, IsProbe: false));
+        try
+        {
+            if (command.ExecuteNonQuery() != count)
+                return (null, writes.Select(write => new RowWriteOutcome(
+                    write.Write,
+                    new WriteOutcome(WriteOutcomeStatus.UniqueViolation))).ToArray());
+            return (last, writes.Select((write, index) => new RowWriteOutcome(
+                write.Write,
+                new WriteOutcome(
+                    WriteOutcomeStatus.Inserted,
+                    VersionColumnDefinition is null ? null : 1,
+                    generatedValues: new Dictionary<string, object?>(StringComparer.Ordinal)
+                    {
+                        [SequenceColumnDefinition!.Name] = checked(last - count + index + 1L)
+                    }))).ToArray());
+        }
+        catch (SqliteException exception) when (new SqliteDialect().TryMapUniqueViolation(exception, out var indexName))
+        {
+            return (null, writes.Select(write => new RowWriteOutcome(
+                write.Write,
+                new WriteOutcome(WriteOutcomeStatus.UniqueViolation, null, LogicalIndexName(indexName)))).ToArray());
+        }
+    }
+
+    private void EnsureSequenceRow()
+    {
+        using var command = Command($"INSERT INTO {Quote("sqlite_sequence")} ({Quote("name")}, {Quote("seq")}) " +
+            $"SELECT @name, 0 WHERE NOT EXISTS (SELECT 1 FROM {Quote("sqlite_sequence")} WHERE {Quote("name")}=@name);");
+        command.Parameters.AddWithValue("@name", Unit.Name);
+        commandObserver?.Observe(new ProviderCommandEvent("sqlite.generated-sequence-seed", "SQLite generated-sequence seed", ProviderCommandKind.Write, IsProbe: false));
+        command.ExecuteNonQuery();
+    }
+
+    private long AllocateSequenceRange(int count)
+    {
+        using var command = Command($"UPDATE {Quote("sqlite_sequence")} SET {Quote("seq")}={Quote("seq")}+@count " +
+            $"WHERE {Quote("name")}=@name RETURNING {Quote("seq")};");
+        command.Parameters.AddWithValue("@name", Unit.Name);
+        command.Parameters.AddWithValue("@count", count);
+        commandObserver?.Observe(new ProviderCommandEvent("sqlite.generated-sequence-allocation", "SQLite generated-sequence range allocation", ProviderCommandKind.Write, IsProbe: false));
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+            throw new InvalidOperationException($"SQLite generated-sequence metadata for '{Unit.Name}' was not available.");
+        return Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture);
+    }
+
+    private IReadOnlyList<ColumnDefinition> SequencePhysicalColumns(StorageValues values)
+    {
+        var columns = UserColumns.Where(column => values.Values.ContainsKey(column.Name)).ToList();
+        if (VersionColumnDefinition is not null)
+            columns.Add(VersionColumnDefinition);
+        if (ScopeColumnDefinition is not null)
+            columns.Add(ScopeColumnDefinition);
+        return columns;
+    }
+
+    private void RecordHighWaterBatch(long generatedValue)
+    {
+        if (SequenceColumnDefinition is null)
+            return;
+        EnsureHighWaterTable();
+        using var command = Command($"INSERT INTO {Quote(HighWaterTable)} ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(HighWaterValue)}) VALUES (@unit, @scope, @value) ON CONFLICT ({Quote(LedgerUnit)}, {Quote(LedgerScope)}) DO UPDATE SET {Quote(HighWaterValue)}=MAX({Quote(HighWaterTable)}.{Quote(HighWaterValue)}, excluded.{Quote(HighWaterValue)});");
+        command.Parameters.AddWithValue("@unit", Unit.Id.Value);
+        command.Parameters.AddWithValue("@scope", Access.Scope?.Value ?? string.Empty);
+        command.Parameters.AddWithValue("@value", generatedValue);
+        commandObserver?.Observe(new ProviderCommandEvent("sqlite.generated-sequence-high-water", "SQLite generated-sequence high-water", ProviderCommandKind.Write, IsProbe: false));
+        command.ExecuteNonQuery();
     }
 
     private void EnsureLedgerTable(string table)
@@ -1649,7 +1788,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
                 .Select(value => RowWrite.Insert(logicalUnit, value))
                 .ToArray();
             IReadOnlyList<RowWriteOutcome> outcomes = session.SequenceColumnDefinition is not null
-                ? writes.Select(session.InsertAppendSequence).ToArray()
+                ? session.InsertAppendSequenceBatch(writes)
                 : session.ApplyBatchCore(writes);
             return ValueTask.FromResult(outcomes);
         }

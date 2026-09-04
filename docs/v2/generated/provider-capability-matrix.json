@@ -114,9 +114,9 @@
         {
           "Id": "groundwork.column.provider-sequence",
           "DisplayName": "Provider-assigned monotonic sequence",
-          "Description": "SQLite monotonically allocates a durable Int64 key in the insert command; concurrent commit order may differ and no additional provider command is required.",
+          "Description": "SQLite monotonically allocates a durable Int64 key through provider-native writes; concurrent commit order may differ. Ordinary writes persist durable high-water with one additional command, while exact append amortizes allocation and high-water commands across a batch.",
           "EvidenceGated": false,
-          "AdditionalCommandsPerWrite": 0
+          "AdditionalCommandsPerWrite": 1
         },
         {
           "Id": "groundwork.operational.atomic-commit",
@@ -149,7 +149,7 @@
         {
           "Id": "groundwork.storage.batched-outcomes",
           "DisplayName": "Batched per-row outcomes",
-          "Description": "Returns one outcome per staged row for SQLite; exact evidence cost: one RETURNING result per native batch.",
+          "Description": "Returns one outcome per staged row for SQLite; exact evidence cost: one sequence reservation plus one insert per bounded batch and one high-water update per append.",
           "EvidenceGated": false,
           "AdditionalCommandsPerWrite": 0
         },
@@ -212,9 +212,9 @@
         {
           "Id": "groundwork.column.provider-sequence",
           "DisplayName": "Provider-assigned monotonic sequence",
-          "Description": "PostgreSQL monotonically allocates a durable Int64 key in the insert command; concurrent commit order may differ and no additional provider command is required.",
+          "Description": "PostgreSQL monotonically allocates a durable Int64 key through provider-native writes; concurrent commit order may differ. Ordinary writes persist durable high-water with one additional command, while exact append amortizes allocation and high-water commands across a batch.",
           "EvidenceGated": false,
-          "AdditionalCommandsPerWrite": 0
+          "AdditionalCommandsPerWrite": 1
         },
         {
           "Id": "groundwork.operational.atomic-commit",
@@ -247,7 +247,7 @@
         {
           "Id": "groundwork.storage.batched-outcomes",
           "DisplayName": "Batched per-row outcomes",
-          "Description": "Returns one outcome per staged row for PostgreSQL; exact evidence cost: one RETURNING result per native batch.",
+          "Description": "Returns one outcome per staged row for PostgreSQL; exact evidence cost: one sequence-allocation result plus one insert per bounded batch and one high-water update per append.",
           "EvidenceGated": false,
           "AdditionalCommandsPerWrite": 0
         },
@@ -310,9 +310,9 @@
         {
           "Id": "groundwork.column.provider-sequence",
           "DisplayName": "Provider-assigned monotonic sequence",
-          "Description": "SQL Server monotonically allocates a durable Int64 key in the insert command; concurrent commit order may differ and no additional provider command is required.",
+          "Description": "SQL Server monotonically allocates a durable Int64 key through provider-native writes; concurrent commit order may differ. Ordinary writes persist durable high-water with one additional command, while exact append amortizes allocation and high-water commands across a batch.",
           "EvidenceGated": false,
-          "AdditionalCommandsPerWrite": 0
+          "AdditionalCommandsPerWrite": 1
         },
         {
           "Id": "groundwork.operational.atomic-commit",
@@ -345,7 +345,7 @@
         {
           "Id": "groundwork.storage.batched-outcomes",
           "DisplayName": "Batched per-row outcomes",
-          "Description": "Returns one outcome per staged row for SQL Server; exact evidence cost: one OUTPUT result per MERGE batch.",
+          "Description": "Returns one outcome per staged row for SQL Server; exact evidence cost: one OUTPUT-bearing MERGE per bounded batch and one high-water update per append.",
           "EvidenceGated": false,
           "AdditionalCommandsPerWrite": 0
         },
@@ -408,7 +408,7 @@
         {
           "Id": "groundwork.column.provider-sequence",
           "DisplayName": "Provider-assigned monotonic sequence",
-          "Description": "MySQL/MariaDB monotonically allocates a durable Int64 key in the insert command; concurrent commit order may differ and no additional provider command is required.",
+          "Description": "MySQL/MariaDB monotonically allocates a durable Int64 key through provider-native writes; concurrent commit order may differ and no additional provider command is required per write.",
           "EvidenceGated": false,
           "AdditionalCommandsPerWrite": 0
         },
@@ -478,7 +478,7 @@
         {
           "Id": "groundwork.column.provider-sequence",
           "DisplayName": "Provider-assigned monotonic sequence",
-          "Description": "the in-memory provider monotonically allocates a durable Int64 key in the insert command; concurrent commit order may differ and no additional provider command is required.",
+          "Description": "the in-memory provider monotonically allocates a durable Int64 key through provider-native writes; concurrent commit order may differ and no additional provider command is required per write.",
           "EvidenceGated": false,
           "AdditionalCommandsPerWrite": 0
         },
