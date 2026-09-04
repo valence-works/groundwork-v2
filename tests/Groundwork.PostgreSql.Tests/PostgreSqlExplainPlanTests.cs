@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Text.Json;
 using Groundwork.Diagnostics;
 using Groundwork.Kernel;
 using Groundwork.PostgreSql;
@@ -159,6 +161,103 @@ public sealed class PostgreSqlExplainPlanTests
         Assert.Equal(127, result.Rows.Count);
         Assert.Equal(100_000L, result.Rows[0]["startTime"]);
         Assert.Single(Directory.GetFiles(environment.ArtifactDirectory, "*.json"));
+    }
+
+    [SkippableFact]
+    public void Explain_assertion_selects_the_ordinal_identity_index_without_a_sort_for_keyset_pages()
+    {
+        using var environment = new ExplainEnvironment();
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        using var connection = new PostgreSqlProviderFactory().Create(database.ConnectionString);
+        var name = "pg_explain_ordinal_" + Guid.NewGuid().ToString("N");
+        const string identityName = "__groundwork_ordinal_value";
+        var unit = StorageUnit.Declare(name, name)
+            .Int64("id", column => column.Required())
+            .String("value", 32, column => column.Required().OrdinalIdentity(identityName))
+            .Key("id")
+            .Index("by_value", index => index
+                .UseOrdinalIdentities()
+                .Column("value")
+                .Column("id"))
+            .Build();
+
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var rows = Enumerable.Range(1, 10_000)
+            .Select(value => (id: (long)value, text: value.ToString("D8", CultureInfo.InvariantCulture)))
+            .ToArray();
+        // Use the public batch-write path so the provider owns persisted ordinal-identity
+        // projection; the direct SQL below is fixture-only statistics maintenance.
+        using (var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit))
+        {
+            foreach (var row in rows)
+            {
+                work.Stage(RowWrite.Insert(unit, new StorageValues(new Dictionary<string, object?>
+                {
+                    ["id"] = row.id,
+                    ["value"] = row.text
+                })));
+            }
+            Assert.True(work.CommitWithOutcomes().IsSuccessful);
+        }
+
+        using (var seed = new NpgsqlConnection(database.ConnectionString))
+        {
+            seed.Open();
+            using var command = seed.CreateCommand();
+            command.CommandText = $"ANALYZE \"{name}\";";
+            command.ExecuteNonQuery();
+        }
+
+        using var session = connection.OpenOwnedSession(unit, StorageAccess.Global);
+        var table = new TableId(name);
+        var id = new ColumnRef(table, "id", QueryType.Int64, isNullable: false);
+        var valueColumn = new ColumnRef(table, "value", QueryType.String, isNullable: false, maxLength: 32);
+        var request = new QueryRequest(
+            table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(valueColumn, OrderDirection.Ascending, NullOrder.Last)],
+            Projection.ColumnsOnly(id, valueColumn),
+            Paging.Keyset(127));
+        var options = unit.CreateQueryRenderOptions("by_value");
+
+        var firstPage = session.Query(request, options);
+
+        Assert.Equal(127, firstPage.Rows.Count);
+        Assert.NotNull(firstPage.NextContinuationToken);
+        var nextPage = session.Query(
+            new QueryRequest(
+                table,
+                request.Where,
+                request.Order,
+                request.Projection,
+                Paging.Continuation(firstPage.NextContinuationToken!, 127)),
+            options);
+        Assert.Equal(127, nextPage.Rows.Count);
+
+        var artifacts = Directory.GetFiles(environment.ArtifactDirectory, "*.json");
+        Assert.Equal(2, artifacts.Length);
+        foreach (var artifact in artifacts)
+        {
+            var plan = File.ReadAllText(artifact);
+            Assert.Contains("by_value", plan, StringComparison.Ordinal);
+            using var document = JsonDocument.Parse(plan);
+            Assert.False(ContainsNodeType(document.RootElement, "Sort"));
+        }
+    }
+
+    private static bool ContainsNodeType(JsonElement element, string nodeType)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            if (element.TryGetProperty("Node Type", out var value) &&
+                value.ValueKind == JsonValueKind.String &&
+                string.Equals(value.GetString(), nodeType, StringComparison.Ordinal))
+                return true;
+            return element.EnumerateObject().Any(property => ContainsNodeType(property.Value, nodeType));
+        }
+
+        return element.ValueKind == JsonValueKind.Array &&
+            element.EnumerateArray().Any(item => ContainsNodeType(item, nodeType));
     }
 
     private sealed class ExplainEnvironment : IDisposable
