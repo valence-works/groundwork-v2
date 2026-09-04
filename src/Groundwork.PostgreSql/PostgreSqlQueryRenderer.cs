@@ -45,7 +45,13 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
     protected override bool RequiresExplicitSelection(ColumnRef column) =>
         string.Equals(column.Name, CrossScopeQueryMaterializer.ScopeTokenColumn, StringComparison.Ordinal);
 
-    protected override string RenderMappedOrderTerm(OrderTerm term, QueryRenderOptions options)
+    protected override string RenderOrderTerm(OrderTerm term) =>
+        RenderPostgreSqlOrderTerm(term, persistedOrdinalIdentity: false);
+
+    protected override string RenderMappedOrderTerm(OrderTerm term, QueryRenderOptions options) =>
+        RenderPostgreSqlOrderTerm(term, IsPersistedOrdinalIdentityColumn(term.Column, options));
+
+    private string RenderPostgreSqlOrderTerm(OrderTerm term, bool persistedOrdinalIdentity)
     {
         if (term.Column.Type == QueryType.Guid)
         {
@@ -64,7 +70,7 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
                 : RenderNonNullableOrder(RenderColumn(term.Column), term.Direction);
 
         var expression = RenderColumn(term.Column);
-        if (IsPersistedOrdinalIdentityColumn(term.Column, options))
+        if (persistedOrdinalIdentity)
         {
             var directDirection = term.Direction == OrderDirection.Ascending ? "ASC" : "DESC";
             if (!term.Column.IsNullable)
@@ -115,8 +121,28 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
         ColumnRef column,
         QueryConstant value,
         ICollection<QueryRenderParameter> parameters,
+        ref int parameterIndex) =>
+        RenderPostgreSqlCursorEquality(column, value, parameters, ref parameterIndex, persistedOrdinalIdentity: false);
+
+    protected override string RenderCursorEquality(
+        ColumnRef column,
+        QueryConstant value,
+        ICollection<QueryRenderParameter> parameters,
         ref int parameterIndex,
-        QueryRenderOptions options)
+        QueryRenderOptions options) =>
+        RenderPostgreSqlCursorEquality(
+            column,
+            value,
+            parameters,
+            ref parameterIndex,
+            IsPersistedOrdinalIdentityColumn(column, options));
+
+    private string RenderPostgreSqlCursorEquality(
+        ColumnRef column,
+        QueryConstant value,
+        ICollection<QueryRenderParameter> parameters,
+        ref int parameterIndex,
+        bool persistedOrdinalIdentity)
     {
         if (column.Type == QueryType.Guid)
         {
@@ -132,7 +158,7 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
         if (value.Kind == QueryConstantKind.Null)
             return expression + " IS NULL";
         var name = AddParameter(column, value, parameters, ref parameterIndex);
-        if (IsPersistedOrdinalIdentityColumn(column, options))
+        if (persistedOrdinalIdentity)
             return "(" + expression + " IS NOT NULL AND " + expression + " = @" + name + ")";
         return "(" + expression + " IS NOT NULL AND " + RenderOrdinalKey(expression) + " = " + RenderOrdinalKey("@" + name) + ")";
     }
@@ -141,8 +167,28 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
         OrderTerm term,
         QueryConstant value,
         ICollection<QueryRenderParameter> parameters,
+        ref int parameterIndex) =>
+        RenderPostgreSqlAfter(term, value, parameters, ref parameterIndex, persistedOrdinalIdentity: false);
+
+    protected override string RenderAfter(
+        OrderTerm term,
+        QueryConstant value,
+        ICollection<QueryRenderParameter> parameters,
         ref int parameterIndex,
-        QueryRenderOptions options)
+        QueryRenderOptions options) =>
+        RenderPostgreSqlAfter(
+            term,
+            value,
+            parameters,
+            ref parameterIndex,
+            IsPersistedOrdinalIdentityColumn(term.Column, options));
+
+    private string RenderPostgreSqlAfter(
+        OrderTerm term,
+        QueryConstant value,
+        ICollection<QueryRenderParameter> parameters,
+        ref int parameterIndex,
+        bool persistedOrdinalIdentity)
     {
         if (term.Column.Type == QueryType.Guid)
         {
@@ -161,7 +207,7 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
             return term.NullOrder == NullOrder.First ? expression + " IS NOT NULL" : "1 = 0";
         var name = AddParameter(term.Column, value, parameters, ref parameterIndex);
         var comparison = term.Direction == OrderDirection.Ascending ? ">" : "<";
-        if (IsPersistedOrdinalIdentityColumn(term.Column, options))
+        if (persistedOrdinalIdentity)
         {
             var directStrict = "(" + expression + " IS NOT NULL AND " + expression + " " + comparison + " @" + name + ")";
             return term.NullOrder == NullOrder.First

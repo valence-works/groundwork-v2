@@ -785,7 +785,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
             return ApplyBatchFallback(writes);
         if (RelationalSessionPolicy.HasSecondaryUniqueIndex(writes[0].Unit))
             return ApplyBatchFallback(writes);
-        var physicalWrites = writes.Select(write => write.PopulateSearchKeyValues()).ToArray();
+        var physicalWrites = writes.Select(write => write.PopulateSearchKeyValues(Unit)).ToArray();
 
         return physicalWrites[0].Mode switch
         {

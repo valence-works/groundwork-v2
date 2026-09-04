@@ -843,7 +843,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
             return ApplyBatchFallback(writes, mode);
         if (RelationalSessionPolicy.HasSecondaryUniqueIndex(writes[0].Unit))
             return ApplyBatchFallback(writes, mode);
-        var physicalWrites = writes.Select(write => write.PopulateSearchKeyValues()).ToArray();
+        var physicalWrites = writes.Select(write => write.PopulateSearchKeyValues(Unit)).ToArray();
         return physicalWrites[0].Mode switch
         {
             RowWriteMode.Insert => ApplyInsertBatch(physicalWrites, mode),

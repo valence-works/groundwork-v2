@@ -2648,6 +2648,52 @@ public sealed class SqliteProviderTests
         }
     }
 
+    [Theory]
+    [InlineData(RowWriteMode.Insert)]
+    [InlineData(RowWriteMode.Upsert)]
+    public void Public_batch_writes_project_ordinal_identity_from_the_physical_unit(RowWriteMode mode)
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = StorageUnit.Declare("ordinal-identity-batch", "ordinal_identity_batch")
+            .Int32("id", column => column.Required())
+            .String("name", 32, column => column.Required().OrdinalIdentity("__groundwork_ordinal_name"))
+            .Key("id")
+            .Index("by_name", index => index.UseOrdinalIdentities().Column("name"))
+            .Build();
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
+        foreach (var (id, name) in new[] { (1, "Ada"), (2, "Grace") })
+        {
+            var values = new StorageValues(new Dictionary<string, object?>
+            {
+                ["id"] = id,
+                ["name"] = name
+            });
+            work.Stage(mode == RowWriteMode.Insert
+                ? RowWrite.Insert(unit, values)
+                : RowWrite.Upsert(unit, values));
+        }
+
+        Assert.True(work.CommitWithOutcomes().IsSuccessful);
+
+        using var raw = new SqliteConnection(store.ConnectionString);
+        raw.Open();
+        using var command = raw.CreateCommand();
+        command.CommandText = "SELECT \"id\", \"name\", \"__groundwork_ordinal_name\" FROM \"ordinal_identity_batch\" ORDER BY \"id\";";
+        using var reader = command.ExecuteReader();
+        Assert.True(reader.Read());
+        Assert.Equal(1, reader.GetInt32(0));
+        Assert.Equal("Ada", reader.GetString(1));
+        Assert.Equal(PortableStringComparison.CreateOrdinal("Ada"), reader.GetString(2));
+        Assert.True(reader.Read());
+        Assert.Equal(2, reader.GetInt32(0));
+        Assert.Equal("Grace", reader.GetString(1));
+        Assert.Equal(PortableStringComparison.CreateOrdinal("Grace"), reader.GetString(2));
+        Assert.False(reader.Read());
+    }
+
     [Fact]
     public void Selected_non_nullable_order_index_is_used_without_a_temporary_sort()
     {
