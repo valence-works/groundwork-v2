@@ -21,11 +21,11 @@
     <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
     <Deterministic>true</Deterministic>
     <VersionPrefix>0.4.0</VersionPrefix>
-    <VersionSuffix>preview.10</VersionSuffix>
+    <VersionSuffix>preview.11</VersionSuffix>
     <!-- The most recently published release. Documentation pins this version, and
          docs/v2/releases/<version>.md must exist. On release, bump this together with
          VersionPrefix/VersionSuffix above; Groundwork.Packaging.Tests enforces consistency. -->
-    <GroundworkCurrentRelease>0.4.0-preview.9</GroundworkCurrentRelease>
+    <GroundworkCurrentRelease>0.4.0-preview.10</GroundworkCurrentRelease>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/valence-works/groundwork-v2</PackageProjectUrl>
     <RepositoryUrl>https://github.com/valence-works/groundwork-v2.git</RepositoryUrl>
