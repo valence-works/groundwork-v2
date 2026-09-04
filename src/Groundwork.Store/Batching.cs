@@ -11,7 +11,7 @@ public static class BatchWriteCapabilities
     public static CapabilityDescriptor ProviderSequenceDescriptor { get; } = new(
         ProviderSequence,
         "Provider-assigned monotonic sequence",
-        "Relational providers monotonically allocate a durable Int64 key in the insert command; concurrent commit order may differ and no additional provider command is required.",
+        "Relational providers monotonically allocate a durable Int64 key through provider-native writes; concurrent commit order may differ, and exact append may amortize allocation and durable high-water commands across a batch.",
         AdditionalProviderCommandsPerWrite: 0);
 
     public static CapabilityId StagedUnitOfWork { get; } = new("groundwork.storage.batched-unit-of-work");
@@ -125,11 +125,16 @@ public static class BatchWriteCapabilities
         string? setMutation = null,
         bool exactRetentionAffectedKeys = false)
     {
+        var persistsRelationalHighWater = nativeBatch && durableHighWaterInspection;
+        var providerSequenceDescription = persistsRelationalHighWater
+            ? $"{provider} monotonically allocates a durable Int64 key through provider-native writes; concurrent commit order may differ. Ordinary writes persist durable high-water with one additional command, while exact append amortizes allocation and high-water commands across a batch."
+            : $"{provider} monotonically allocates a durable Int64 key through provider-native writes; concurrent commit order may differ and no additional provider command is required per write.";
         var descriptors = new List<CapabilityDescriptor>
         {
             ProviderSequenceDescriptor with
             {
-                Description = $"{provider} monotonically allocates a durable Int64 key in the insert command; concurrent commit order may differ and no additional provider command is required."
+                Description = providerSequenceDescription,
+                AdditionalProviderCommandsPerWrite = persistsRelationalHighWater ? 1 : 0
             },
             StagedUnitOfWorkDescriptor with
             {

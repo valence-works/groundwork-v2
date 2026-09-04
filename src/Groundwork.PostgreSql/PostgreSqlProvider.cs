@@ -92,7 +92,7 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
     public IReadOnlyList<CapabilityDescriptor> Capabilities => SchemaCapabilityAdmission.AdvertiseEnforcedConstraints(
         BatchWriteCapabilities.ForProvider(
             "PostgreSQL", nativeBatch: true,
-            exactOutcomeCost: "one RETURNING result per native batch",
+            exactOutcomeCost: "one sequence-allocation result plus one insert per bounded batch and one high-water update per append",
             batchCost: "uses multi-row INSERT/ON CONFLICT with a 32,000-parameter safety limit; secondary unique declarations use the row-attributed fallback",
             exactAppendOutcomes: true,
             durableHighWaterInspection: true,

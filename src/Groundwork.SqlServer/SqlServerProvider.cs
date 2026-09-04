@@ -56,7 +56,7 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
     public IReadOnlyList<CapabilityDescriptor> Capabilities => SchemaCapabilityAdmission.AdvertiseEnforcedConstraints(
         BatchWriteCapabilities.ForProvider(
             "SQL Server", nativeBatch: true,
-            exactOutcomeCost: "one OUTPUT result per MERGE batch",
+            exactOutcomeCost: "one OUTPUT-bearing MERGE per bounded batch and one high-water update per append",
             batchCost: "uses one durable table-valued-parameter MERGE batch; VALUES is a compatibility fallback",
             exactAppendOutcomes: true,
             durableHighWaterInspection: true,

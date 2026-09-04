@@ -75,7 +75,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
     public IReadOnlyList<CapabilityDescriptor> Capabilities => SchemaCapabilityAdmission.AdvertiseEnforcedConstraints(
         BatchWriteCapabilities.ForProvider(
             "SQLite", nativeBatch: true,
-            exactOutcomeCost: "one RETURNING result per native batch",
+            exactOutcomeCost: "one sequence reservation plus one insert per bounded batch and one high-water update per append",
             batchCost: "uses variable-limit-aware multi-row INSERT/UPSERT commands; secondary unique declarations use the row-attributed fallback",
             exactAppendOutcomes: true,
             durableHighWaterInspection: true,

@@ -1,6 +1,7 @@
 using Groundwork.LiveDatabases;
 using Groundwork.Kernel;
 using Groundwork.PostgreSql;
+using Groundwork.Query.Model;
 using Groundwork.SqlServer;
 using Groundwork.Sqlite;
 using Groundwork.Store;
@@ -70,11 +71,7 @@ public sealed class GeneratedSequenceAppendBatchTests
         var generated = committed.Outcomes.Select(outcome => outcome.GeneratedValue<long>("sequence")).ToArray();
         Assert.Equal(RowCount, generated.Distinct().Count());
         Assert.All(generated, sequence => Assert.True(sequence > 0));
-        foreach (var (sequence, index) in generated.Select((sequence, index) => (sequence, index)))
-        {
-            var stored = session.Read(new StorageKey(new Dictionary<string, object?> { ["sequence"] = sequence }));
-            Assert.Equal($"payload-{index}", stored!.Values.Values["payload"]);
-        }
+        AssertStoredPayloads(connection, session, unit, generated, "payload-");
         Assert.InRange(generatedCommands.Length, 1, 32);
         Assert.Single(appendCommands.Where(command => command.Operation.EndsWith("generated-sequence-high-water", StringComparison.Ordinal)));
         Assert.DoesNotContain(appendCommands, command => command.Operation == provider + ".insert");
@@ -98,6 +95,59 @@ public sealed class GeneratedSequenceAppendBatchTests
             [Values("payload-next", DateTimeOffset.UnixEpoch)]);
         Assert.Equal(WriteOutcomeStatus.Inserted, next.Status);
         Assert.DoesNotContain(next.Outcomes[0].GeneratedValue<long>("sequence"), generated);
+
+        var beforeFailureHighWater = session.Inspect().LifetimeCommittedSequenceHighWater;
+        var failedOperation = new OperationId(DateTimeOffset.UtcNow, "generated-sequence-batch-failure");
+        var failedValues = Enumerable.Range(0, RowCount + 1)
+            .Select(index => Values(
+                index == RowCount ? "failure-payload-0" : $"failure-payload-{index}",
+                DateTimeOffset.UnixEpoch.AddMinutes(index)))
+            .ToArray();
+        Assert.Throws<InvalidOperationException>(() => exact.AppendWithOutcomes(failedOperation, failedValues));
+        Assert.Equal(beforeFailureHighWater, session.Inspect().LifetimeCommittedSequenceHighWater);
+        var failedPayloads = session.BatchRead(
+            new KeyedBatchReadRequest(
+                new TableId(unit.Name),
+                new ColumnRef("payload", QueryType.String, isNullable: false, maxLength: 450),
+                Enumerable.Range(0, RowCount).Select(index => (object?)$"failure-payload-{index}").ToArray()),
+            connection);
+        Assert.Empty(failedPayloads.Rows);
+        Assert.Equal(RowCount, failedPayloads.MissingKeys.Count);
+
+        // A changed-fingerprint retry with the same nonce can succeed only if the failed ledger
+        // claim and every payload chunk were rolled back together.
+        var retryValues = Enumerable.Range(0, RowCount + 1)
+            .Select(index => Values($"retry-payload-{index}", DateTimeOffset.UnixEpoch.AddHours(index)))
+            .ToArray();
+        var retried = exact.AppendWithOutcomes(failedOperation, retryValues);
+        Assert.Equal(WriteOutcomeStatus.Inserted, retried.Status);
+        Assert.Equal(retryValues.Length, retried.Outcomes.Count);
+        AssertStoredPayloads(
+            connection,
+            session,
+            unit,
+            retried.Outcomes.Select(outcome => outcome.GeneratedValue<long>("sequence")).ToArray(),
+            "retry-payload-");
+    }
+
+    private static void AssertStoredPayloads(
+        IStorageProviderConnection connection,
+        IStorageSession session,
+        StorageUnit unit,
+        IReadOnlyList<long> sequences,
+        string payloadPrefix)
+    {
+        var stored = session.BatchRead(
+            new KeyedBatchReadRequest(
+                new TableId(unit.Name),
+                new ColumnRef("sequence", QueryType.Int64, isNullable: false),
+                sequences.Select(sequence => (object?)sequence).ToArray()),
+            connection);
+
+        Assert.Empty(stored.MissingKeys);
+        Assert.Equal(sequences.Count, stored.Rows.Count);
+        foreach (var (row, index) in stored.Rows.Select((row, index) => (row, index)))
+            Assert.Equal($"{payloadPrefix}{index}", row.Values["payload"]);
     }
 
     private static StorageValues Values(string payload, DateTimeOffset occurredAt) => new(new Dictionary<string, object?>
@@ -117,6 +167,15 @@ public sealed class GeneratedSequenceAppendBatchTests
             new() { Name = "occurredAt", Type = PortableType.DateTimeOffset, IsNullable = false }
         ],
         Key = new KeyDefinition { Columns = ["sequence"] },
+        Indexes =
+        [
+            new IndexDefinition
+            {
+                Name = "unique_payload",
+                Columns = [new IndexColumn("payload")],
+                IsUnique = true
+            }
+        ],
         AppendIdempotency = new AppendIdempotencyDeclaration { Window = TimeSpan.FromMinutes(10) }
     };
 }
