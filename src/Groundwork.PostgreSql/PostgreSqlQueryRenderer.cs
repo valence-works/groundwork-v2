@@ -94,6 +94,32 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
         if (selectedIndex is null)
             return false;
 
+        // The native tuple fast path is eligible only for the ordered key segment that the
+        // selected index actually exposes. Equality-prefix columns may precede that segment,
+        // but a permutation or a gap cannot describe one contiguous native key range.
+        var segmentStart = -1;
+        for (var candidate = 0; candidate <= selectedIndex.Columns.Length - order.Count; candidate++)
+        {
+            var matches = true;
+            for (var index = 0; index < order.Count; index++)
+            {
+                if (!string.Equals(selectedIndex.Columns[candidate + index], order[index].Column.Name, StringComparison.Ordinal))
+                {
+                    matches = false;
+                    break;
+                }
+            }
+
+            if (matches)
+            {
+                segmentStart = candidate;
+                break;
+            }
+        }
+
+        if (segmentStart < 0)
+            return false;
+
         var direction = order[0].Direction;
         for (var index = 0; index < order.Count; index++)
         {
@@ -104,7 +130,6 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
                 value.Kind == QueryConstantKind.Null ||
                 value.Type is not { } valueType ||
                 valueType != term.Column.Type ||
-                !selectedIndex.Columns.Contains(term.Column.Name, StringComparer.Ordinal) ||
                 selectedIndex.NullableColumns.Contains(term.Column.Name) ||
                 !selectedIndex.ColumnTypes.TryGetValue(term.Column.Name, out var declaredType) ||
                 declaredType != term.Column.Type)

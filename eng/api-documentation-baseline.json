@@ -182,8 +182,8 @@
     }
   },
   "publicApiSnapshots": {
-    "net10.0": "690a5621385e927fe84942299834e913c056af55552e5eaff5e95e596ad60193",
-    "net8.0": "fd36eaf2805c7b18551e8058e3f6f7bd32cb79c0b92275c3f6aee18ad8aa3ee8"
+    "net10.0": "5704ef8b50effa368eb2f71cedbc86549a99d526fe12c53cbfc392c6ce1a7582",
+    "net8.0": "a2d036a81390a10b1c3f3409a03a393d2450d64158a4e441da4ba0651c463e07"
   },
   "schemaVersion": 1
 }

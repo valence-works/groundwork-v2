@@ -1293,6 +1293,43 @@ public sealed class QueryRendererTests
     }
 
     [Fact]
+    public void PostgreSql_tuple_continuation_requires_a_contiguous_selected_index_segment()
+    {
+        var first = new ColumnRef(Table, "tupleSegmentFirst", QueryType.Int64, isNullable: false);
+        var second = new ColumnRef(Table, "tupleSegmentSecond", QueryType.Int64, isNullable: false);
+        var third = new ColumnRef(Table, "tupleSegmentThird", QueryType.Int64, isNullable: false);
+        var order = new[] { first, second, third };
+
+        foreach (var indexColumns in new[]
+        {
+            new[] { first.Name, third.Name, second.Name },
+            new[] { first.Name, "tupleSegmentGap", second.Name, third.Name }
+        })
+        {
+            var command = RenderPostgreSqlTupleContinuation(order, indexColumns);
+
+            Assert.Contains(" OR ", command.CommandText, StringComparison.Ordinal);
+            Assert.DoesNotContain(") > (@p0, @p1, @p2)", command.CommandText, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void PostgreSql_tuple_continuation_allows_an_equality_prefix_before_the_selected_index_segment()
+    {
+        var first = new ColumnRef(Table, "tuplePrefixFirst", QueryType.Int64, isNullable: false);
+        var second = new ColumnRef(Table, "tuplePrefixSecond", QueryType.Int64, isNullable: false);
+        var third = new ColumnRef(Table, "tuplePrefixThird", QueryType.Int64, isNullable: false);
+        var prefix = new ColumnRef(Table, "tuplePrefixScope", QueryType.String, isNullable: false, maxLength: 32);
+        var command = RenderPostgreSqlTupleContinuation(
+            [first, second, third],
+            [prefix.Name, first.Name, second.Name, third.Name],
+            new Predicate.Equal(prefix, QueryConstant.Of(prefix, "scope-a")));
+
+        Assert.Contains(") > (@p1, @p2, @p3)", command.CommandText, StringComparison.Ordinal);
+        Assert.DoesNotContain(" OR ", command.CommandText, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void PostgreSql_tuple_continuation_rejects_a_null_cursor()
     {
         var nullableValue = new ColumnRef(Table, "nullableTupleCursor", QueryType.Int64, isNullable: true);
@@ -2972,6 +3009,46 @@ public sealed class QueryRendererTests
         MongoQueryRenderer mongo => mongo.Render(request),
         _ => throw new ArgumentOutOfRangeException(nameof(renderer))
     };
+
+    private static RelationalQueryCommand RenderPostgreSqlTupleContinuation(
+        IReadOnlyList<ColumnRef> orderColumns,
+        IReadOnlyList<string> indexColumns,
+        Predicate? predicate = null)
+    {
+        var order = orderColumns
+            .Select(column => new OrderTerm(column, OrderDirection.Ascending, NullOrder.Last))
+            .ToArray();
+        var firstPage = Request(
+            predicate ?? Predicate.AlwaysTrue.Instance,
+            order,
+            Paging.Keyset(order.Length),
+            ResultShape.Rows.Instance,
+            Projection.ColumnsOnly(orderColumns.ToArray()));
+        var options = new QueryRenderOptions(
+            [new QueryIndexDeclaration(
+                "ix_tuple_segment",
+                indexColumns.Select(column => new QueryIndexColumn(
+                    column,
+                    isNullable: false,
+                    orderColumns.FirstOrDefault(item => string.Equals(item.Name, column, StringComparison.Ordinal))?.Type ?? QueryType.String)),
+                QueryIndexPinning.ProviderDefault)],
+            selectedIndex: "ix_tuple_segment");
+        var execution = QueryRequestExecution.ForProviderPage(firstPage, options);
+        var token = QueryContinuationToken.Encode(
+            execution,
+            options,
+            order.Select((term, index) => QueryConstant.Of(term.Column, (long)index + 1)));
+        var nextPage = Request(
+            predicate ?? Predicate.AlwaysTrue.Instance,
+            order,
+            Paging.Continuation(token, order.Length),
+            ResultShape.Rows.Instance,
+            Projection.ColumnsOnly(orderColumns.ToArray()));
+
+        return new PostgreSqlQueryRenderer().Render(
+            QueryRequestExecution.ForProviderPage(nextPage, options),
+            options);
+    }
 
     private static object Render(object renderer, QueryRequest request, QueryRenderOptions options) => renderer switch
     {
