@@ -247,6 +247,182 @@ public sealed class PostgreSqlExplainPlanTests
         }
     }
 
+    [SkippableFact]
+    public void Explain_assertion_preserves_three_term_required_keyset_ordering_at_the_captured_late_cursor()
+    {
+        using var environment = new ExplainEnvironment();
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        using var connection = new PostgreSqlProviderFactory().Create(database.ConnectionString);
+        var name = "pg_explain_three_term_" + Guid.NewGuid().ToString("N");
+        const string scope = "scope-a";
+        const string traceKeyValue = "trace-a";
+        const string ordinalIdentity = "__groundwork_ordinal_spanId";
+        const string indexName = "by_trace_order";
+        const int pageSize = 127;
+        const int totalRows = 100_000;
+        const int lateCursorSequence = 98_806;
+        const int warmupOffset = lateCursorSequence - pageSize;
+        var epoch = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var unit = StorageUnit.Declare(name, name)
+            .String("traceKey", 64, column => column.Required())
+            .DateTimeOffset("startTime", column => column.Required())
+            .String("spanId", 64, column => column.Required().OrdinalIdentity(ordinalIdentity))
+            .Int64("sequence", column => column.Required())
+            .String("payload", 768, column => column.Required())
+            .Key("sequence")
+            .Index(indexName, index => index
+                .UseOrdinalIdentities()
+                .Ascending("traceKey")
+                .Ascending("startTime")
+                .Ascending("spanId")
+                .Ascending("sequence"))
+            .Scoped()
+            .Build();
+
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var rows = Enumerable.Range(1, totalRows)
+            .Select(value =>
+            {
+                var group = (value - 1) / 4;
+                return (
+                    sequence: (long)value,
+                    traceKey: traceKeyValue,
+                    startTime: epoch.AddSeconds(group),
+                    spanId: group.ToString("D8", CultureInfo.InvariantCulture),
+                    payload: new string('p', 768));
+            })
+            .ToArray();
+
+        // Use the public batch path so the provider owns both persisted ordinal-identity
+        // projection and logical-value round-tripping. The direct SQL below is only statistics
+        // maintenance, matching the existing explain-plan fixtures in this class.
+        using (var work = connection.BeginUnitOfWork(
+                   StorageAccess.Scoped(new StorageScope(scope)),
+                   BatchWriteOptions.Exact,
+                   unit))
+        {
+            foreach (var row in rows)
+            {
+                work.Stage(RowWrite.Insert(unit, new StorageValues(new Dictionary<string, object?>
+                {
+                    ["traceKey"] = row.traceKey,
+                    ["startTime"] = row.startTime,
+                    ["spanId"] = row.spanId,
+                    ["sequence"] = row.sequence,
+                    ["payload"] = row.payload
+                })));
+            }
+            Assert.True(work.CommitWithOutcomes().IsSuccessful);
+        }
+
+        using (var analyzeConnection = new NpgsqlConnection(database.ConnectionString))
+        {
+            analyzeConnection.Open();
+            using var analyze = analyzeConnection.CreateCommand();
+            analyze.CommandText = $"ANALYZE \"{name}\";";
+            analyze.ExecuteNonQuery();
+        }
+
+        var selectedDeclaration = unit.Indexes.Single(index => index.Name == indexName);
+        Assert.True(selectedDeclaration.UseOrdinalIdentities);
+        Assert.Equal(
+            ["traceKey", "startTime", "spanId", "sequence"],
+            selectedDeclaration.Columns.Select(column => column.Column));
+        var spanDefinition = unit.Columns.Single(column => column.Name == "spanId");
+        Assert.False(spanDefinition.IsNullable);
+        Assert.Equal(ordinalIdentity, spanDefinition.OrdinalIdentity!.PhysicalColumn);
+        var physicalIndex = ProviderOwnedColumns.Physicalize(
+                unit,
+                new ProviderOwnedColumnPolicy { ProviderName = "PostgreSQL" })
+            .Indexes.Single(index => index.Name == indexName);
+        Assert.Contains(ordinalIdentity, physicalIndex.Columns.Select(column => column.Column));
+        Assert.Contains("spanId", physicalIndex.IncludedColumns!);
+
+        using var session = connection.OpenOwnedSession(
+            unit,
+            StorageAccess.Scoped(new StorageScope(scope)));
+        var table = new TableId(name);
+        var traceKey = new ColumnRef(table, "traceKey", QueryType.String, isNullable: false, maxLength: 64);
+        // Keep caller-side metadata nullable to model the diagnostics query shape. The selected
+        // index declaration below is the authoritative required-key proof that the renderer must
+        // carry into its native continuation terms; the old renderer therefore grew impossible
+        // NULL alternatives on the late page.
+        var startTime = new ColumnRef(table, "startTime", QueryType.DateTimeOffset, isNullable: true);
+        var spanId = new ColumnRef(table, "spanId", QueryType.String, isNullable: true, maxLength: 64);
+        var sequence = new ColumnRef(table, "sequence", QueryType.Int64, isNullable: true);
+        var request = new QueryRequest(
+            table,
+            new Predicate.Equal(traceKey, QueryConstant.Of(traceKey, traceKeyValue)),
+            [
+                new OrderTerm(startTime, OrderDirection.Ascending, NullOrder.Last),
+                new OrderTerm(spanId, OrderDirection.Ascending, NullOrder.Last),
+                new OrderTerm(sequence, OrderDirection.Ascending, NullOrder.Last)
+            ],
+            Projection.All,
+            Paging.OffsetLimit(warmupOffset, pageSize));
+        var options = unit.CreateQueryRenderOptions(indexName);
+        var selectedIndex = options.FindSelectedIndex();
+        Assert.NotNull(selectedIndex);
+        Assert.Equal(indexName, selectedIndex!.Name);
+        Assert.Empty(selectedIndex.NullableColumns);
+
+        // The warm-up query is the public source of the continuation token. It ends at the
+        // captured sequence value after 778 complete 127-row pages, so the second query exercises
+        // the same continuation contract at the late page without issuing 778 explain probes.
+        var warmup = session.Query(request, options);
+        Assert.Equal(pageSize, warmup.Rows.Count);
+        Assert.Equal(indexName, warmup.SelectedIndex);
+        Assert.NotNull(warmup.NextContinuationToken);
+        Assert.Equal(lateCursorSequence, Assert.IsType<long>(warmup.Rows[^1]["sequence"]));
+        var latePage = session.Query(
+            new QueryRequest(
+                table,
+                request.Where,
+                request.Order,
+                request.Projection,
+                Paging.Continuation(warmup.NextContinuationToken!, pageSize)),
+            options);
+        Assert.Equal(pageSize, latePage.Rows.Count);
+        Assert.Equal(indexName, latePage.SelectedIndex);
+        Assert.NotNull(latePage.NextContinuationToken);
+        Assert.Equal(lateCursorSequence + 1, Assert.IsType<long>(latePage.Rows[0]["sequence"]));
+
+        var actual = warmup.Rows.Concat(latePage.Rows).ToArray();
+        var expected = rows
+            .OrderBy(row => row.startTime)
+            .ThenBy(row => row.spanId, StringComparer.Ordinal)
+            .ThenBy(row => row.sequence)
+            .Skip(warmupOffset)
+            .Take(actual.Length)
+            .ToArray();
+        Assert.Equal(pageSize * 2, actual.Length);
+        Assert.Equal(actual.Length, actual.Select(row => row["sequence"]).Distinct().Count());
+        for (var index = 0; index < actual.Length; index++)
+        {
+            Assert.Equal(expected[index].traceKey, Assert.IsType<string>(actual[index]["traceKey"]));
+            Assert.Equal(expected[index].startTime, Assert.IsType<DateTimeOffset>(actual[index]["startTime"]));
+            Assert.Equal(expected[index].spanId, Assert.IsType<string>(actual[index]["spanId"]));
+            Assert.Equal(expected[index].sequence, Assert.IsType<long>(actual[index]["sequence"]));
+            Assert.Equal(expected[index].payload, Assert.IsType<string>(actual[index]["payload"]));
+        }
+
+        var artifacts = Directory.GetFiles(environment.ArtifactDirectory, "*.json");
+        Assert.Equal(2, artifacts.Length);
+        var physicalIndexName = PostgreSqlDialect.PhysicalIndexName(name, indexName);
+        foreach (var artifact in artifacts)
+        {
+            var plan = File.ReadAllText(artifact);
+            using var document = JsonDocument.Parse(plan);
+            Assert.False(ContainsPlanProperty(document.RootElement, "Node Type", "Sort"), plan);
+            Assert.False(ContainsPlanProperty(document.RootElement, "Node Type", "Incremental Sort"), plan);
+            Assert.False(ContainsPlanProperty(document.RootElement, "Node Type", "Bitmap Heap Scan"), plan);
+            Assert.False(ContainsPlanProperty(document.RootElement, "Node Type", "Bitmap Index Scan"), plan);
+            Assert.False(ContainsPlanProperty(document.RootElement, "Node Type", "BitmapAnd"), plan);
+            Assert.False(ContainsPlanProperty(document.RootElement, "Node Type", "BitmapOr"), plan);
+            Assert.True(ContainsPlanProperty(document.RootElement, "Index Name", physicalIndexName), plan);
+        }
+    }
+
     private static bool ContainsPlanProperty(JsonElement element, string propertyName, string expected)
     {
         if (element.ValueKind == JsonValueKind.Object)

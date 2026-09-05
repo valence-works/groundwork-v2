@@ -1166,6 +1166,7 @@ public sealed class QueryRendererTests
             "\"__groundwork_ordinal_required_name\" COLLATE \"C\") " + sqlComparison + " @p0",
             command.CommandText,
             StringComparison.Ordinal);
+        Assert.DoesNotContain(" IS NULL", command.CommandText, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("string_agg", command.CommandText, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("unnest(", command.CommandText, StringComparison.OrdinalIgnoreCase);
     }
@@ -2296,6 +2297,258 @@ public sealed class QueryRendererTests
         Assert.Contains("ORDER BY", sqlite.CommandText, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(mongo.Pipeline, stage =>
             stage.ToString().Contains("_groundwork_null_rank_", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(OrderDirection.Ascending, ">")]
+    [InlineData(OrderDirection.Descending, "<")]
+    public void Required_selected_relational_continuation_omits_redundant_null_alternatives_for_string_timestamp_int64_and_guid(
+        OrderDirection direction,
+        string comparison)
+    {
+        var nonNullName = new ColumnRef(Table, "requiredName", QueryType.String, isNullable: false, maxLength: 100);
+        var nonNullTimestamp = new ColumnRef(Table, "requiredTimestamp", QueryType.DateTimeOffset, isNullable: false);
+        var nonNullGuid = new ColumnRef(Table, "requiredGuid", QueryType.Guid, isNullable: false);
+        var order = new[]
+        {
+            new OrderTerm(nonNullName, direction, NullOrder.Last),
+            new OrderTerm(nonNullTimestamp, direction, NullOrder.Last),
+            new OrderTerm(Id, direction, NullOrder.Last),
+            new OrderTerm(nonNullGuid, direction, NullOrder.Last)
+        };
+        var options = new QueryRenderOptions(
+            [new QueryIndexDeclaration(
+                "ix_required_continuation",
+                [
+                    new QueryIndexColumn(nonNullName.Name, isNullable: false, QueryType.String),
+                    new QueryIndexColumn(nonNullTimestamp.Name, isNullable: false, QueryType.DateTimeOffset),
+                    new QueryIndexColumn(Id.Name, isNullable: false, QueryType.Int64),
+                    new QueryIndexColumn(nonNullGuid.Name, isNullable: false, QueryType.Guid)
+                ],
+                QueryIndexPinning.ProviderDefault)],
+            selectedIndex: "ix_required_continuation");
+        var firstPage = Request(
+            Predicate.AlwaysTrue.Instance,
+            order,
+            Paging.Keyset(2),
+            ResultShape.Rows.Instance,
+            Projection.ColumnsOnly(nonNullName, nonNullTimestamp, Id, nonNullGuid));
+        var token = QueryContinuationToken.Encode(firstPage, options,
+            [
+                QueryConstant.Of(nonNullName, "alpha"),
+                QueryConstant.Of(nonNullTimestamp, new DateTimeOffset(2026, 9, 5, 0, 0, 0, TimeSpan.Zero)),
+                QueryConstant.Of(Id, 42L),
+                QueryConstant.Of(nonNullGuid, Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"))
+            ]);
+        var nextPage = Request(
+            Predicate.AlwaysTrue.Instance,
+            order,
+            Paging.Continuation(token, 2),
+            ResultShape.Rows.Instance,
+            Projection.ColumnsOnly(nonNullName, nonNullTimestamp, Id, nonNullGuid));
+
+        var commands = new[]
+        {
+            new SqliteQueryRenderer().Render(nextPage, options),
+            new PostgreSqlQueryRenderer().Render(nextPage, options)
+        };
+
+        Assert.All(commands, command =>
+        {
+            Assert.DoesNotContain(" IS NULL", command.CommandText, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains(" " + comparison + " ", command.CommandText, StringComparison.Ordinal);
+        });
+    }
+
+    [Theory]
+    [InlineData(OrderDirection.Ascending)]
+    [InlineData(OrderDirection.Descending)]
+    public void Relational_continuation_uses_declared_index_nullability_over_optimistic_request_metadata(
+        OrderDirection direction)
+    {
+        var optimisticName = new ColumnRef(Table, "optimisticName", QueryType.String, isNullable: false, maxLength: 100);
+        var options = new QueryRenderOptions(
+            [new QueryIndexDeclaration(
+                "ix_nullable_continuation",
+                [new QueryIndexColumn(optimisticName.Name, isNullable: true, QueryType.String)],
+                QueryIndexPinning.ProviderDefault)],
+            selectedIndex: "ix_nullable_continuation");
+        var firstPage = Request(
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(optimisticName, direction, NullOrder.Last)],
+            Paging.Keyset(1),
+            ResultShape.Rows.Instance,
+            Projection.ColumnsOnly(optimisticName));
+        var token = QueryContinuationToken.Encode(
+            firstPage,
+            options,
+            [QueryConstant.Of(optimisticName, "alpha")]);
+        var nextPage = Request(
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(optimisticName, direction, NullOrder.Last)],
+            Paging.Continuation(token, 1),
+            ResultShape.Rows.Instance,
+            Projection.ColumnsOnly(optimisticName));
+
+        var commands = new[]
+        {
+            new SqliteQueryRenderer().Render(nextPage, options),
+            new PostgreSqlQueryRenderer().Render(nextPage, options)
+        };
+
+        Assert.All(commands, command =>
+        {
+            var orderBy = command.CommandText.LastIndexOf(" ORDER BY", StringComparison.OrdinalIgnoreCase);
+            Assert.True(orderBy > 0, "The continuation predicate must be rendered before the order clause.");
+            Assert.Contains(" IS NULL", command.CommandText[..orderBy], StringComparison.OrdinalIgnoreCase);
+        });
+    }
+
+    [Theory]
+    [InlineData(OrderDirection.Ascending, NullOrder.First, true)]
+    [InlineData(OrderDirection.Ascending, NullOrder.First, false)]
+    [InlineData(OrderDirection.Ascending, NullOrder.Last, true)]
+    [InlineData(OrderDirection.Ascending, NullOrder.Last, false)]
+    [InlineData(OrderDirection.Descending, NullOrder.First, true)]
+    [InlineData(OrderDirection.Descending, NullOrder.First, false)]
+    [InlineData(OrderDirection.Descending, NullOrder.Last, true)]
+    [InlineData(OrderDirection.Descending, NullOrder.Last, false)]
+    public void Nullable_selected_relational_continuation_preserves_null_cursor_ordering(
+        OrderDirection direction,
+        NullOrder nullOrder,
+        bool cursorIsNull)
+    {
+        var nullableName = new ColumnRef(Table, "nullableContinuationName", QueryType.String, isNullable: true, maxLength: 100);
+        var options = new QueryRenderOptions(
+            [new QueryIndexDeclaration(
+                "ix_nullable_continuation_semantics",
+                [new QueryIndexColumn(nullableName.Name, isNullable: true, QueryType.String)],
+                QueryIndexPinning.ProviderDefault)],
+            selectedIndex: "ix_nullable_continuation_semantics");
+        var order = new[] { new OrderTerm(nullableName, direction, nullOrder) };
+        var firstPage = Request(
+            Predicate.AlwaysTrue.Instance,
+            order,
+            Paging.Keyset(1),
+            ResultShape.Rows.Instance,
+            Projection.ColumnsOnly(nullableName));
+        var cursor = cursorIsNull
+            ? QueryConstant.Of(nullableName, null)
+            : QueryConstant.Of(nullableName, "alpha");
+        var token = QueryContinuationToken.Encode(firstPage, options, [cursor]);
+        var nextPage = Request(
+            Predicate.AlwaysTrue.Instance,
+            order,
+            Paging.Continuation(token, 1),
+            ResultShape.Rows.Instance,
+            Projection.ColumnsOnly(nullableName));
+
+        var commands = new[]
+        {
+            new SqliteQueryRenderer().Render(nextPage, options),
+            new PostgreSqlQueryRenderer().Render(nextPage, options)
+        };
+
+        Assert.All(commands, command =>
+        {
+            var commandText = command.CommandText;
+            if (cursorIsNull)
+            {
+                Assert.Contains(
+                    nullOrder == NullOrder.First ? " IS NOT NULL" : "1 = 0",
+                    commandText,
+                    StringComparison.OrdinalIgnoreCase);
+            }
+            else if (nullOrder == NullOrder.Last)
+            {
+                Assert.Contains(
+                    direction == OrderDirection.Ascending ? " > " : " < ",
+                    commandText,
+                    StringComparison.Ordinal);
+                Assert.Contains(" IS NULL)", commandText, StringComparison.OrdinalIgnoreCase);
+            }
+            else
+            {
+                Assert.Contains(
+                    direction == OrderDirection.Ascending ? " > " : " < ",
+                    commandText,
+                    StringComparison.Ordinal);
+                // An ORDER BY null-rank CASE legitimately uses IS NULL THEN; only the
+                // closing continuation alternative is excluded here.
+                Assert.DoesNotContain(" IS NULL)", commandText, StringComparison.OrdinalIgnoreCase);
+            }
+        });
+    }
+
+    [Theory]
+    [InlineData(OrderDirection.Ascending, NullOrder.First)]
+    [InlineData(OrderDirection.Ascending, NullOrder.Last)]
+    [InlineData(OrderDirection.Descending, NullOrder.First)]
+    [InlineData(OrderDirection.Descending, NullOrder.Last)]
+    public void Joined_target_continuation_does_not_infer_source_index_nullability_for_same_named_column(
+        OrderDirection direction,
+        NullOrder nullOrder)
+    {
+        var orders = new TableId("orders");
+        var sourceId = new ColumnRef(orders, "customer_id", QueryType.Int64, isNullable: false);
+        var sourceName = new ColumnRef(orders, "name", QueryType.String, isNullable: false, maxLength: 100);
+        var targetName = new ColumnRef(Table, "name", QueryType.String, isNullable: true, maxLength: 100);
+        var join = new ReferenceJoin("customer", Table, [new JoinColumnPair(sourceId, Id)]);
+        var order = new[] { new OrderTerm(targetName, direction, nullOrder) };
+        var projection = Projection.ColumnsOnly(sourceName, targetName);
+        var firstPage = new QueryRequest(
+            orders,
+            join,
+            Predicate.AlwaysTrue.Instance,
+            order.ToImmutableArray(),
+            projection,
+            Paging.Keyset(1));
+        var options = new QueryRenderOptions(
+            [new QueryIndexDeclaration(
+                "ix_source_name",
+                [
+                    new QueryIndexColumn("name", isNullable: false, QueryType.String),
+                    new QueryIndexColumn(sourceId.Name, isNullable: false, QueryType.Int64)
+                ],
+                QueryIndexPinning.ProviderDefault)],
+            selectedIndex: "ix_source_name",
+            drivingIdentityColumns: [sourceId])
+            .WithIdentityTieBreaks([sourceId]);
+        var token = QueryContinuationToken.Encode(
+            firstPage,
+            options,
+            [
+                QueryConstant.Of(targetName, "alpha"),
+                QueryConstant.Of(sourceId, 7L),
+                QueryConstant.Of(Id, 42L)
+            ]);
+        var nextPage = new QueryRequest(
+            orders,
+            join,
+            Predicate.AlwaysTrue.Instance,
+            order.ToImmutableArray(),
+            projection,
+            Paging.Continuation(token, 1));
+
+        var commands = new[]
+        {
+            new SqliteQueryRenderer().Render(nextPage, options),
+            new PostgreSqlQueryRenderer().Render(nextPage, options)
+        };
+
+        Assert.All(commands, command =>
+        {
+            Assert.Contains("\"__groundwork_target\".\"name\"", command.CommandText, StringComparison.Ordinal);
+            var commandText = command.CommandText;
+            Assert.Contains(
+                direction == OrderDirection.Ascending ? " > " : " < ",
+                commandText,
+                StringComparison.Ordinal);
+            if (nullOrder == NullOrder.Last)
+                Assert.Contains(" IS NULL)", commandText, StringComparison.OrdinalIgnoreCase);
+            else
+                Assert.DoesNotContain(" IS NULL)", commandText, StringComparison.OrdinalIgnoreCase);
+        });
     }
 
     [Fact]

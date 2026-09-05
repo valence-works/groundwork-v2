@@ -201,7 +201,9 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
             var guidParameter = AddParameter(term.Column, value, parameters, ref parameterIndex);
             var guidComparison = term.Direction == OrderDirection.Ascending ? ">" : "<";
             var guidStrict = "(" + guidExpression + " IS NOT NULL AND (" + guidExpression + "::text COLLATE \"C\") " + guidComparison + " ((@" + guidParameter + ")::text COLLATE \"C\"))";
-            return term.NullOrder == NullOrder.First ? guidStrict : "(" + guidStrict + " OR " + guidExpression + " IS NULL)";
+            return term.NullOrder == NullOrder.First || !term.Column.IsNullable
+                ? guidStrict
+                : "(" + guidStrict + " OR " + guidExpression + " IS NULL)";
         }
         if (term.Column.Type != QueryType.String)
             return base.RenderAfter(term, value, parameters, ref parameterIndex);
@@ -213,12 +215,12 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
         if (persistedOrdinalIdentity)
         {
             var directStrict = "(" + expression + " IS NOT NULL AND " + expression + " " + comparison + " @" + name + ")";
-            return term.NullOrder == NullOrder.First
+            return term.NullOrder == NullOrder.First || !term.Column.IsNullable
                 ? directStrict
                 : "(" + directStrict + " OR " + expression + " IS NULL)";
         }
         var strict = "(" + expression + " IS NOT NULL AND " + RenderOrdinalKey(expression) + " " + comparison + " " + RenderOrdinalKey("@" + name) + ")";
-        return term.NullOrder == NullOrder.First
+        return term.NullOrder == NullOrder.First || !term.Column.IsNullable
             ? strict
             : "(" + strict + " OR " + expression + " IS NULL)";
     }

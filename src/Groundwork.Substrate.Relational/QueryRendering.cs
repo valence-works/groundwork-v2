@@ -1333,7 +1333,7 @@ public abstract class RelationalQueryRenderer
     private string RenderOrder(IReadOnlyList<OrderTerm> order, QueryRenderOptions options) =>
         string.Join(", ", order.Select(term => RenderOrderTerm(term, options)));
 
-    private string RenderOrderTerm(OrderTerm term, QueryRenderOptions options)
+    private OrderTerm ResolveOrderTerm(OrderTerm term, QueryRenderOptions options)
     {
         var selectedIndex = options.FindSelectedIndex();
         var provesNonNull = selectedIndex is not null &&
@@ -1350,8 +1350,11 @@ public abstract class RelationalQueryRenderer
             decimalPrecision: column.DecimalPrecision,
             decimalScale: column.DecimalScale,
             stringComparison: column.StringComparison);
-        return RenderMappedOrderTerm(new OrderTerm(carrier, term.Direction, term.NullOrder), options);
+        return new OrderTerm(carrier, term.Direction, term.NullOrder);
     }
+
+    private string RenderOrderTerm(OrderTerm term, QueryRenderOptions options) =>
+        RenderMappedOrderTerm(ResolveOrderTerm(term, options), options);
 
     protected string RenderPredicate(
         Predicate predicate,
@@ -1502,8 +1505,12 @@ public abstract class RelationalQueryRenderer
         {
             var terms = new List<string>();
             for (var prefix = 0; prefix < boundary; prefix++)
-                terms.Add(RenderCursorEquality(order[prefix].Column, cursor[prefix], parameters, ref parameterIndex, options));
-            terms.Add(RenderAfter(order[boundary], cursor[boundary], parameters, ref parameterIndex, options));
+            {
+                var prefixTerm = ResolveOrderTerm(order[prefix], options);
+                terms.Add(RenderCursorEquality(prefixTerm.Column, cursor[prefix], parameters, ref parameterIndex, options));
+            }
+            var boundaryTerm = ResolveOrderTerm(order[boundary], options);
+            terms.Add(RenderAfter(boundaryTerm, cursor[boundary], parameters, ref parameterIndex, options));
             alternatives.Add("(" + string.Join(" AND ", terms) + ")");
         }
         return alternatives.Count == 1 ? alternatives[0] : "(" + string.Join(" OR ", alternatives) + ")";
@@ -1546,7 +1553,7 @@ public abstract class RelationalQueryRenderer
         var name = AddParameter(term.Column, value, parameters, ref parameterIndex);
         var comparison = term.Direction == OrderDirection.Ascending ? ">" : "<";
         var strict = "(" + expression + " IS NOT NULL AND " + expression + " " + comparison + " @" + name + ")";
-        return nullsFirst ? strict : "(" + strict + " OR " + expression + " IS NULL)";
+        return nullsFirst || !term.Column.IsNullable ? strict : "(" + strict + " OR " + expression + " IS NULL)";
     }
 
     /// <summary>Allows a provider to render ordering with its resolved mappings.</summary>
