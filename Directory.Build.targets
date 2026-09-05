@@ -25,6 +25,16 @@
     <NoWarn>$(NoWarn);1591</NoWarn>
   </PropertyGroup>
 
+  <!-- PackageVersion is finalized at pack time, including explicit release overrides. Consumer
+       documentation pins the last published release, but each package links its own release notes. -->
+  <Target Name="GroundworkPackReleaseNotes"
+          BeforeTargets="_GetPackageFiles;GenerateNuspec"
+          Condition="'$(IsPackable)' == 'true'">
+    <PropertyGroup>
+      <PackageReleaseNotes>See https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/releases/$(PackageVersion).md and https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/versioning.md</PackageReleaseNotes>
+    </PropertyGroup>
+  </Target>
+
   <!-- Every public package ships its own readme, so a nuget.org listing describes that package
        rather than the family: one file per package id under docs/v2/package-readmes, wired here so
        no project repeats the property and the item. This runs as a target rather than as a plain

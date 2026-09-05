@@ -57,6 +57,19 @@ public sealed class PackedArtifactTests(PublicPackageSet packages) : IClassFixtu
         Assert.Equal(readmes.Length, readmes.Distinct(StringComparer.Ordinal).Count());
     }
 
+    [Theory]
+    [MemberData(nameof(PublicPackageIds))]
+    public void Every_public_package_links_release_notes_for_its_own_version(string packageId)
+    {
+        using var package = ZipFile.OpenRead(packages.PackagePath(packageId));
+        var nuspec = XDocument.Parse(ReadText(package, $"{packageId}.nuspec"));
+        var version = nuspec.Descendants().Single(element => element.Name.LocalName == "version").Value;
+        var releaseNotes = nuspec.Descendants().Single(element => element.Name.LocalName == "releaseNotes").Value;
+
+        Assert.Equal(packages.Version, version);
+        Assert.Contains($"docs/v2/releases/{version}.md", releaseNotes, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Groundwork_tool_embeds_first_party_schema_provider_plugins()
     {
