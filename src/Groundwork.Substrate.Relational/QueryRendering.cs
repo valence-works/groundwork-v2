@@ -438,7 +438,12 @@ public abstract class RelationalQueryRenderer
                 throw new QueryRenderException("GW-QUERY-013", "The keyset continuation token is invalid: " + exception.Message);
             }
             if (!request.Result.IncludesTotalCount && request.LatestPerKey is null && !request.Distinct)
-                where = $"({where}) AND ({RenderContinuation(effectiveOrder, cursor, parameters, ref parameterIndex, options)})";
+            {
+                var continuation = request.Result is ResultShape.Rows
+                    ? RenderContinuation(effectiveOrder, cursor, parameters, ref parameterIndex, options)
+                    : RenderContinuationFallback(effectiveOrder, cursor, parameters, ref parameterIndex, options);
+                where = $"({where}) AND ({continuation})";
+            }
         }
 
         var pinnedIndex = options.FindPinnedIndex();
@@ -541,7 +546,7 @@ public abstract class RelationalQueryRenderer
             else
             {
                 if (cursor is not null)
-                    pageWhere += " AND (" + RenderContinuation(effectiveOrder, cursor, parameters, ref parameterIndex, options) + ")";
+                    pageWhere += " AND (" + RenderContinuationFallback(effectiveOrder, cursor, parameters, ref parameterIndex, options) + ")";
                 var page = "SELECT * FROM " + pageSource + " WHERE " + pageWhere;
                 if (effectiveOrder.Count != 0)
                 {
@@ -610,7 +615,7 @@ public abstract class RelationalQueryRenderer
             }
             sql = source;
             if (cursor is not null && (request.LatestPerKey is not null || request.Distinct))
-                sql += " AND (" + RenderContinuation(effectiveOrder, cursor, parameters, ref parameterIndex, options) + ")";
+                sql += " AND (" + RenderContinuationFallback(effectiveOrder, cursor, parameters, ref parameterIndex, options) + ")";
             if (effectiveOrder.Count != 0)
                 sql += " ORDER BY " + (streamNativeDistinct
                     ? RenderStreamableDistinctOrder(effectiveOrder)
@@ -726,7 +731,7 @@ public abstract class RelationalQueryRenderer
                     throw new QueryRenderException("GW-QUERY-013", "The keyset continuation token is invalid: " + exception.Message);
                 }
                 if (!scope.UsesDerivedSource)
-                    where = "(" + where + ") AND (" + RenderContinuation(effectiveOrder, cursor, parameters, ref parameterIndex, options) + ")";
+                    where = "(" + where + ") AND (" + RenderContinuationFallback(effectiveOrder, cursor, parameters, ref parameterIndex, options) + ")";
             }
 
             var pinnedIndex = options.FindPinnedIndex();
@@ -797,7 +802,7 @@ public abstract class RelationalQueryRenderer
                 else
                 {
                     if (cursor is not null)
-                        pageWhere += " AND (" + RenderContinuation(effectiveOrder, cursor, parameters, ref parameterIndex, options) + ")";
+                        pageWhere += " AND (" + RenderContinuationFallback(effectiveOrder, cursor, parameters, ref parameterIndex, options) + ")";
                     var page = "SELECT * FROM " + pageSource + " WHERE " + pageWhere;
                     page += JoinedOrderAndPaging(request.Paging, effectiveOrder, parameters, ref parameterIndex, options);
                     // As with the single-table path, this is one provider command whose statement
@@ -827,7 +832,7 @@ public abstract class RelationalQueryRenderer
                     sourceWhere = "1 = 1";
                 }
                 if (cursor is not null)
-                    sourceWhere += " AND (" + RenderContinuation(effectiveOrder, cursor, parameters, ref parameterIndex, options) + ")";
+                    sourceWhere += " AND (" + RenderContinuationFallback(effectiveOrder, cursor, parameters, ref parameterIndex, options) + ")";
                 sql = baseCte + " SELECT * FROM " + source + " WHERE " + sourceWhere +
                     JoinedOrderAndPaging(request.Paging, effectiveOrder, parameters, ref parameterIndex, options) + ";";
             }
@@ -987,7 +992,7 @@ public abstract class RelationalQueryRenderer
         scope.IsDerived = true;
         var sourceWhere = request.LatestPerKey is null ? "1 = 1" : "__groundwork_latest_rank = 1";
         if (cursor is not null && !request.Distinct)
-            sourceWhere += " AND (" + RenderContinuation(effectiveOrder, cursor, parameters, ref parameterIndex, options) + ")";
+            sourceWhere += " AND (" + RenderContinuationFallback(effectiveOrder, cursor, parameters, ref parameterIndex, options) + ")";
         var source = "SELECT * FROM __groundwork_base WHERE " + sourceWhere;
         var inputAlias = dialect.QuoteIdentifier("__groundwork_reduction_input");
         string windowed;
@@ -1004,7 +1009,7 @@ public abstract class RelationalQueryRenderer
             {
                 var cursorAlias = dialect.QuoteIdentifier("__groundwork_reduction_distinct_cursor");
                 windowed = "SELECT * FROM (" + windowed + ") AS " + cursorAlias + " WHERE (" +
-                    RenderContinuation(effectiveOrder, cursor, parameters, ref parameterIndex, options) + ")";
+                    RenderContinuationFallback(effectiveOrder, cursor, parameters, ref parameterIndex, options) + ")";
             }
         }
         else
@@ -1189,7 +1194,7 @@ public abstract class RelationalQueryRenderer
         var latestSource = RenderLatestSource(request.LatestPerKey, selection, from, where, options);
         var sourceWhere = request.LatestPerKey is null ? "1 = 1" : "__groundwork_latest_rank = 1";
         if (cursor is not null && request.LatestPerKey is not null && !request.Distinct)
-            sourceWhere += " AND (" + RenderContinuation(effectiveOrder, cursor, parameters, ref parameterIndex, options) + ")";
+            sourceWhere += " AND (" + RenderContinuationFallback(effectiveOrder, cursor, parameters, ref parameterIndex, options) + ")";
 
         var source = "SELECT * FROM __groundwork_base WHERE " + sourceWhere;
         var inputAlias = dialect.QuoteIdentifier("__groundwork_reduction_input");
@@ -1215,7 +1220,7 @@ public abstract class RelationalQueryRenderer
             {
                 var cursorAlias = dialect.QuoteIdentifier("__groundwork_reduction_distinct_cursor");
                 windowed = "SELECT * FROM (" + windowed + ") AS " + cursorAlias + " WHERE (" +
-                    RenderContinuation(effectiveOrder, cursor, parameters, ref parameterIndex, options) + ")";
+                    RenderContinuationFallback(effectiveOrder, cursor, parameters, ref parameterIndex, options) + ")";
             }
         }
         else
@@ -1333,7 +1338,7 @@ public abstract class RelationalQueryRenderer
     private string RenderOrder(IReadOnlyList<OrderTerm> order, QueryRenderOptions options) =>
         string.Join(", ", order.Select(term => RenderOrderTerm(term, options)));
 
-    private string RenderOrderTerm(OrderTerm term, QueryRenderOptions options)
+    private OrderTerm ResolveOrderTerm(OrderTerm term, QueryRenderOptions options)
     {
         var selectedIndex = options.FindSelectedIndex();
         var provesNonNull = selectedIndex is not null &&
@@ -1350,8 +1355,11 @@ public abstract class RelationalQueryRenderer
             decimalPrecision: column.DecimalPrecision,
             decimalScale: column.DecimalScale,
             stringComparison: column.StringComparison);
-        return RenderMappedOrderTerm(new OrderTerm(carrier, term.Direction, term.NullOrder), options);
+        return new OrderTerm(carrier, term.Direction, term.NullOrder);
     }
+
+    private string RenderOrderTerm(OrderTerm term, QueryRenderOptions options) =>
+        RenderMappedOrderTerm(ResolveOrderTerm(term, options), options);
 
     protected string RenderPredicate(
         Predicate predicate,
@@ -1490,7 +1498,20 @@ public abstract class RelationalQueryRenderer
         return "(" + left + " IS NOT NULL AND " + right + " IS NOT NULL AND " + left + " " + op + " " + right + ")";
     }
 
-    private string RenderContinuation(
+    /// <summary>
+    /// Renders ordinary single-table row continuation before order terms are rewritten for
+    /// provider-specific nullability carriers. A provider may replace the portable disjunction
+    /// with an equivalent native tuple comparison when it can prove the complete term shape.
+    /// </summary>
+    protected virtual string RenderContinuation(
+        IReadOnlyList<OrderTerm> order,
+        IReadOnlyList<QueryConstant> cursor,
+        ICollection<QueryRenderParameter> parameters,
+        ref int parameterIndex,
+        QueryRenderOptions options) =>
+        RenderContinuationFallback(order, cursor, parameters, ref parameterIndex, options);
+
+    private string RenderContinuationFallback(
         IReadOnlyList<OrderTerm> order,
         IReadOnlyList<QueryConstant> cursor,
         ICollection<QueryRenderParameter> parameters,
@@ -1502,8 +1523,12 @@ public abstract class RelationalQueryRenderer
         {
             var terms = new List<string>();
             for (var prefix = 0; prefix < boundary; prefix++)
-                terms.Add(RenderCursorEquality(order[prefix].Column, cursor[prefix], parameters, ref parameterIndex, options));
-            terms.Add(RenderAfter(order[boundary], cursor[boundary], parameters, ref parameterIndex, options));
+            {
+                var prefixTerm = ResolveOrderTerm(order[prefix], options);
+                terms.Add(RenderCursorEquality(prefixTerm.Column, cursor[prefix], parameters, ref parameterIndex, options));
+            }
+            var boundaryTerm = ResolveOrderTerm(order[boundary], options);
+            terms.Add(RenderAfter(boundaryTerm, cursor[boundary], parameters, ref parameterIndex, options));
             alternatives.Add("(" + string.Join(" AND ", terms) + ")");
         }
         return alternatives.Count == 1 ? alternatives[0] : "(" + string.Join(" OR ", alternatives) + ")";
@@ -1546,7 +1571,7 @@ public abstract class RelationalQueryRenderer
         var name = AddParameter(term.Column, value, parameters, ref parameterIndex);
         var comparison = term.Direction == OrderDirection.Ascending ? ">" : "<";
         var strict = "(" + expression + " IS NOT NULL AND " + expression + " " + comparison + " @" + name + ")";
-        return nullsFirst ? strict : "(" + strict + " OR " + expression + " IS NULL)";
+        return nullsFirst || !term.Column.IsNullable ? strict : "(" + strict + " OR " + expression + " IS NULL)";
     }
 
     /// <summary>Allows a provider to render ordering with its resolved mappings.</summary>

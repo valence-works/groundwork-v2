@@ -52,6 +52,112 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
     protected override string RenderMappedOrderTerm(OrderTerm term, QueryRenderOptions options) =>
         RenderPostgreSqlOrderTerm(term, IsPersistedOrdinalIdentityColumn(term.Column, options));
 
+    /// <summary>
+    /// Uses PostgreSQL's row comparison only when the complete ordinary continuation tuple is
+    /// proven non-null and every expression has the same effective direction. Otherwise the base
+    /// renderer retains the portable lexicographic disjunction and its null semantics.
+    /// </summary>
+    protected override string RenderContinuation(
+        IReadOnlyList<OrderTerm> order,
+        IReadOnlyList<QueryConstant> cursor,
+        ICollection<QueryRenderParameter> parameters,
+        ref int parameterIndex,
+        QueryRenderOptions options)
+    {
+        if (!CanRenderTupleContinuation(order, cursor, options))
+            return base.RenderContinuation(order, cursor, parameters, ref parameterIndex, options);
+
+        var comparison = order[0].Direction == OrderDirection.Ascending ? ">" : "<";
+        var expressions = order.Select(term => RenderColumn(term.Column)).ToArray();
+        var values = new string[order.Count];
+        for (var index = 0; index < order.Count; index++)
+        {
+            values[index] = "@" + AddParameter(
+                order[index].Column,
+                cursor[index],
+                parameters,
+                ref parameterIndex);
+        }
+        return "((" + string.Join(", ", expressions) + ") " + comparison + " (" +
+            string.Join(", ", values) + "))";
+    }
+
+    private static bool CanRenderTupleContinuation(
+        IReadOnlyList<OrderTerm> order,
+        IReadOnlyList<QueryConstant> cursor,
+        QueryRenderOptions options)
+    {
+        if (order.Count < 2 || cursor.Count != order.Count)
+            return false;
+
+        var selectedIndex = options.FindSelectedIndex();
+        if (selectedIndex is null)
+            return false;
+
+        // The native tuple fast path is eligible only for the ordered key segment that the
+        // selected index actually exposes. Equality-prefix columns may precede that segment,
+        // but a permutation or a gap cannot describe one contiguous native key range.
+        var segmentStart = -1;
+        for (var candidate = 0; candidate <= selectedIndex.Columns.Length - order.Count; candidate++)
+        {
+            var matches = true;
+            for (var index = 0; index < order.Count; index++)
+            {
+                if (!string.Equals(selectedIndex.Columns[candidate + index], order[index].Column.Name, StringComparison.Ordinal))
+                {
+                    matches = false;
+                    break;
+                }
+            }
+
+            if (matches)
+            {
+                segmentStart = candidate;
+                break;
+            }
+        }
+
+        if (segmentStart < 0)
+            return false;
+
+        var direction = order[0].Direction;
+        for (var index = 0; index < order.Count; index++)
+        {
+            var term = order[index];
+            var value = cursor[index];
+            if (term.Direction != direction ||
+                term.Column.IsNullable ||
+                value.Kind == QueryConstantKind.Null ||
+                value.Type is not { } valueType ||
+                valueType != term.Column.Type ||
+                selectedIndex.NullableColumns.Contains(term.Column.Name) ||
+                !selectedIndex.ColumnTypes.TryGetValue(term.Column.Name, out var declaredType) ||
+                declaredType != term.Column.Type)
+            {
+                return false;
+            }
+
+            if (term.Column.Type == QueryType.String)
+            {
+                if (term.Column.StringComparison != QueryStringComparisonPolicy.Ordinal ||
+                    !IsPersistedOrdinalIdentityColumn(term.Column, options))
+                {
+                    return false;
+                }
+            }
+            else if (term.Column.Type is not (
+                         QueryType.Int32 or
+                         QueryType.Int64 or
+                         QueryType.Decimal or
+                         QueryType.DateTimeOffset))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private string RenderPostgreSqlOrderTerm(OrderTerm term, bool persistedOrdinalIdentity)
     {
         if (term.Column.Type == QueryType.Guid)
@@ -201,7 +307,9 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
             var guidParameter = AddParameter(term.Column, value, parameters, ref parameterIndex);
             var guidComparison = term.Direction == OrderDirection.Ascending ? ">" : "<";
             var guidStrict = "(" + guidExpression + " IS NOT NULL AND (" + guidExpression + "::text COLLATE \"C\") " + guidComparison + " ((@" + guidParameter + ")::text COLLATE \"C\"))";
-            return term.NullOrder == NullOrder.First ? guidStrict : "(" + guidStrict + " OR " + guidExpression + " IS NULL)";
+            return term.NullOrder == NullOrder.First || !term.Column.IsNullable
+                ? guidStrict
+                : "(" + guidStrict + " OR " + guidExpression + " IS NULL)";
         }
         if (term.Column.Type != QueryType.String)
             return base.RenderAfter(term, value, parameters, ref parameterIndex);
@@ -213,12 +321,12 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
         if (persistedOrdinalIdentity)
         {
             var directStrict = "(" + expression + " IS NOT NULL AND " + expression + " " + comparison + " @" + name + ")";
-            return term.NullOrder == NullOrder.First
+            return term.NullOrder == NullOrder.First || !term.Column.IsNullable
                 ? directStrict
                 : "(" + directStrict + " OR " + expression + " IS NULL)";
         }
         var strict = "(" + expression + " IS NOT NULL AND " + RenderOrdinalKey(expression) + " " + comparison + " " + RenderOrdinalKey("@" + name) + ")";
-        return term.NullOrder == NullOrder.First
+        return term.NullOrder == NullOrder.First || !term.Column.IsNullable
             ? strict
             : "(" + strict + " OR " + expression + " IS NULL)";
     }
