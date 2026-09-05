@@ -200,6 +200,43 @@ public sealed class PackagingContractTests
     }
 
     [Fact]
+    public void Api_documentation_baseline_counts_match_the_reviewed_public_api_snapshot_rows()
+    {
+        var root = RepositoryRoot.Find();
+        using var baseline = JsonDocument.Parse(File.ReadAllText(
+            Path.Combine(root, "eng", "api-documentation-baseline.json")));
+        var snapshotCounts = new Dictionary<string, Dictionary<string, int>>(StringComparer.Ordinal);
+        foreach (var framework in new[] { "net8.0", "net10.0" })
+        {
+            snapshotCounts[framework] = File.ReadLines(Path.Combine(root, "eng", $"public-api-v1-{framework}.txt"))
+                .Select(row => row.Split(": ", 2, StringSplitOptions.None)[0])
+                .GroupBy(assembly => assembly, StringComparer.Ordinal)
+                .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
+        }
+
+        var mismatches = new List<string>();
+        foreach (var entry in baseline.RootElement.GetProperty("entries").EnumerateObject())
+        {
+            var separator = entry.Name.IndexOf('|');
+            Assert.True(separator > 0, $"Invalid API documentation baseline entry key '{entry.Name}'.");
+            var assemblyPath = entry.Name[(separator + 1)..];
+            var assemblyName = Path.GetFileNameWithoutExtension(assemblyPath);
+            var declaredCount = entry.Value.GetProperty("publicApiMembers").GetInt32();
+            var framework = assemblyPath.Contains("/net10.0/", StringComparison.Ordinal) ? "net10.0" : "net8.0";
+            if (!snapshotCounts[framework].TryGetValue(assemblyName, out var snapshotCount))
+            {
+                mismatches.Add($"{entry.Name} ({framework}): snapshot has no '{assemblyName}' rows");
+                continue;
+            }
+
+            if (declaredCount != snapshotCount)
+                mismatches.Add($"{entry.Name} ({framework}): baseline={declaredCount}, snapshot={snapshotCount}");
+        }
+
+        Assert.Empty(mismatches);
+    }
+
+    [Fact]
     public void Public_tool_identity_is_groundwork_tool_while_project_identity_stays_schema_tool()
     {
         var root = RepositoryRoot.Find();

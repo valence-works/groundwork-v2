@@ -62,11 +62,11 @@
     },
     "Groundwork.PostgreSql|lib/net10.0/Groundwork.PostgreSql.dll": {
       "maximumUndocumentedMembers": 81,
-      "publicApiMembers": 94
+      "publicApiMembers": 95
     },
     "Groundwork.PostgreSql|lib/net8.0/Groundwork.PostgreSql.dll": {
       "maximumUndocumentedMembers": 81,
-      "publicApiMembers": 94
+      "publicApiMembers": 95
     },
     "Groundwork.Query.Linq.Execution|lib/net10.0/Groundwork.Query.Linq.Execution.dll": {
       "maximumUndocumentedMembers": 10,
@@ -158,11 +158,11 @@
     },
     "Groundwork.Substrate.Relational|lib/net10.0/Groundwork.Substrate.Relational.dll": {
       "maximumUndocumentedMembers": 445,
-      "publicApiMembers": 555
+      "publicApiMembers": 556
     },
     "Groundwork.Substrate.Relational|lib/net8.0/Groundwork.Substrate.Relational.dll": {
       "maximumUndocumentedMembers": 445,
-      "publicApiMembers": 555
+      "publicApiMembers": 556
     },
     "Groundwork.Testing|lib/net10.0/Groundwork.Testing.dll": {
       "maximumUndocumentedMembers": 196,
