@@ -280,6 +280,7 @@ public sealed class PostgreSqlExplainPlanTests
             .Build();
 
         Assert.True(connection.Schema.Apply(unit).Applied);
+        var payload = new string('p', 768);
         var rows = Enumerable.Range(1, totalRows)
             .Select(value =>
             {
@@ -289,7 +290,7 @@ public sealed class PostgreSqlExplainPlanTests
                     traceKey: traceKeyValue,
                     startTime: epoch.AddSeconds(group),
                     spanId: group.ToString("D8", CultureInfo.InvariantCulture),
-                    payload: new string('p', 768));
+                    payload);
             })
             .ToArray();
 
@@ -338,18 +339,19 @@ public sealed class PostgreSqlExplainPlanTests
         Assert.Contains(ordinalIdentity, physicalIndex.Columns.Select(column => column.Column));
         Assert.Contains("spanId", physicalIndex.IncludedColumns!);
 
+        var commandObserver = new ProviderCommandObserver();
         using var session = connection.OpenOwnedSession(
             unit,
-            StorageAccess.Scoped(new StorageScope(scope)));
+            StorageAccess.Scoped(new StorageScope(scope)),
+            commandObserver);
         var table = new TableId(name);
         var traceKey = new ColumnRef(table, "traceKey", QueryType.String, isNullable: false, maxLength: 64);
-        // Keep caller-side metadata nullable to model the diagnostics query shape. The selected
-        // index declaration below is the authoritative required-key proof that the renderer must
-        // carry into its native continuation terms; the old renderer therefore grew impossible
-        // NULL alternatives on the late page.
-        var startTime = new ColumnRef(table, "startTime", QueryType.DateTimeOffset, isNullable: true);
-        var spanId = new ColumnRef(table, "spanId", QueryType.String, isNullable: true, maxLength: 64);
-        var sequence = new ColumnRef(table, "sequence", QueryType.Int64, isNullable: true);
+        // The admitted diagnostics unit declares these ordering columns required. The selected
+        // index remains an independent proof used by the renderer before it can use PostgreSQL's
+        // native tuple continuation path.
+        var startTime = new ColumnRef(table, "startTime", QueryType.DateTimeOffset, isNullable: false);
+        var spanId = new ColumnRef(table, "spanId", QueryType.String, isNullable: false, maxLength: 64);
+        var sequence = new ColumnRef(table, "sequence", QueryType.Int64, isNullable: false);
         var request = new QueryRequest(
             table,
             new Predicate.Equal(traceKey, QueryConstant.Of(traceKey, traceKeyValue)),
@@ -374,14 +376,31 @@ public sealed class PostgreSqlExplainPlanTests
         Assert.Equal(indexName, warmup.SelectedIndex);
         Assert.NotNull(warmup.NextContinuationToken);
         Assert.Equal(lateCursorSequence, Assert.IsType<long>(warmup.Rows[^1]["sequence"]));
-        var latePage = session.Query(
-            new QueryRequest(
-                table,
-                request.Where,
-                request.Order,
-                request.Projection,
-                Paging.Continuation(warmup.NextContinuationToken!, pageSize)),
-            options);
+        QueryMaterializedResult latePage;
+        var continuationRequest = new QueryRequest(
+            table,
+            request.Where,
+            request.Order,
+            request.Projection,
+            Paging.Continuation(warmup.NextContinuationToken!, pageSize));
+        try
+        {
+            latePage = session.Query(continuationRequest, options);
+        }
+        catch (ExplainAssertionException exception)
+        {
+            var plan = File.Exists(exception.ArtifactPath)
+                ? File.ReadAllText(exception.ArtifactPath)
+                : $"<native plan artifact was unavailable at '{exception.ArtifactPath}'>";
+            var command = commandObserver.Commands
+                .LastOrDefault(item => item.Operation == "postgresql.query")
+                .CommandText ?? "<parameterized query command was not observed>";
+            throw new InvalidOperationException(
+                exception.Message + Environment.NewLine +
+                "Parameterized native command:" + Environment.NewLine + command + Environment.NewLine +
+                "Native plan captured before ExplainEnvironment cleanup:" + Environment.NewLine + plan,
+                exception);
+        }
         Assert.Equal(pageSize, latePage.Rows.Count);
         Assert.Equal(indexName, latePage.SelectedIndex);
         Assert.NotNull(latePage.NextContinuationToken);
