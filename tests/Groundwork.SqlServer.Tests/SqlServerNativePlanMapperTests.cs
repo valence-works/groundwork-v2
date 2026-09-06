@@ -120,6 +120,62 @@ public sealed class SqlServerNativePlanMapperTests
     }
 
     [Fact]
+    public void Maps_captured_filter_chain_without_exporting_native_expressions()
+    {
+        var forest = Map(
+            Plan("""
+                <StmtSimple StatementType="SELECT"><QueryPlan>
+                  <RelOp NodeId="0" PhysicalOp="Top"><OutputList /><RunTimeInformation /><Top>
+                    <RelOp NodeId="1" PhysicalOp="Sort"><OutputList /><MemoryFractions /><RunTimeInformation /><Sort>
+                      <RelOp NodeId="2" PhysicalOp="Filter"><OutputList /><RunTimeInformation /><Filter>
+                        <Predicate><ScalarOperator ScalarString="private-filter-expression" /></Predicate>
+                        <RelOp NodeId="3" PhysicalOp="Compute Scalar"><OutputList /><ComputeScalar>
+                          <DefinedValues><DefinedValue><ScalarOperator ScalarString="private-compute-expression" /></DefinedValue></DefinedValues>
+                          <RelOp NodeId="4" PhysicalOp="Table Scan"><OutputList /><RunTimeInformation /><TableScan>
+                            <Object Database="[records_db]" Schema="[dbo]" Table="[records]" />
+                          </TableScan></RelOp>
+                        </ComputeScalar></RelOp>
+                      </Filter></RelOp>
+                    </Sort></RelOp>
+                  </Top></RelOp>
+                </QueryPlan></StmtSimple>
+                """),
+            new Dictionary<string, string>(StringComparer.Ordinal));
+
+        Assert.NotNull(forest);
+        Assert.Collection(
+            forest!.Nodes,
+            node =>
+            {
+                Assert.Equal(ProviderPlanOperator.Limit, node.Operation);
+                Assert.Null(node.ParentId);
+            },
+            node =>
+            {
+                Assert.Equal(ProviderPlanOperator.Sort, node.Operation);
+                Assert.Equal(0, node.ParentId);
+            },
+            node =>
+            {
+                Assert.Equal(ProviderPlanOperator.Filter, node.Operation);
+                Assert.Equal(1, node.ParentId);
+            },
+            node =>
+            {
+                Assert.Equal(ProviderPlanOperator.Compute, node.Operation);
+                Assert.Equal(2, node.ParentId);
+            },
+            node =>
+            {
+                Assert.Equal(ProviderPlanOperator.TableScan, node.Operation);
+                Assert.Equal(3, node.ParentId);
+                Assert.Equal(TargetId, node.TargetId);
+            });
+        Assert.DoesNotContain("private-filter-expression", System.Text.Json.JsonSerializer.Serialize(forest));
+        Assert.DoesNotContain("private-compute-expression", System.Text.Json.JsonSerializer.Serialize(forest));
+    }
+
+    [Fact]
     public void Keeps_index_scan_distinct_and_maps_table_scan_without_inventing_index_facts()
     {
         var indexScan = Map(
@@ -168,7 +224,7 @@ public sealed class SqlServerNativePlanMapperTests
         var unknown = Map(
             Plan("""
                 <StmtSimple StatementType="SELECT"><QueryPlan>
-                  <RelOp NodeId="0" PhysicalOp="Filter"><RelOp NodeId="1" PhysicalOp="Table Scan">
+                  <RelOp NodeId="0" PhysicalOp="Unmapped Operator"><RelOp NodeId="1" PhysicalOp="Table Scan">
                     <TableScan><Object Database="[records_db]" Schema="[dbo]" Table="[records]" /></TableScan>
                   </RelOp></RelOp>
                 </QueryPlan></StmtSimple>
@@ -218,6 +274,33 @@ public sealed class SqlServerNativePlanMapperTests
                     StringComparison.Ordinal),
             new Dictionary<string, string>(StringComparer.Ordinal),
             ["ix_records_value"]);
+        var malformedFilterArity = Map(
+            Plan("""
+                <StmtSimple StatementType="SELECT"><QueryPlan>
+                  <RelOp NodeId="0" PhysicalOp="Filter"><Filter>
+                    <RelOp NodeId="1" PhysicalOp="Table Scan"><TableScan>
+                      <Object Database="[records_db]" Schema="[dbo]" Table="[records]" />
+                    </TableScan></RelOp>
+                    <RelOp NodeId="2" PhysicalOp="Table Scan"><TableScan>
+                      <Object Database="[records_db]" Schema="[dbo]" Table="[records]" />
+                    </TableScan></RelOp>
+                  </Filter></RelOp>
+                </QueryPlan></StmtSimple>
+                """),
+            new Dictionary<string, string>(StringComparer.Ordinal),
+            []);
+        var mixedFilterPayload = Map(
+            Plan("""
+                <StmtSimple StatementType="SELECT"><QueryPlan>
+                  <RelOp NodeId="0" PhysicalOp="Filter"><Filter>
+                    <RelOp NodeId="1" PhysicalOp="Table Scan"><TableScan>
+                      <Object Database="[records_db]" Schema="[dbo]" Table="[records]" />
+                    </TableScan></RelOp>
+                  </Filter><Sort /></RelOp>
+                </QueryPlan></StmtSimple>
+                """),
+            new Dictionary<string, string>(StringComparer.Ordinal),
+            []);
         var conflictingPayload = Map(
             AccessPlan("Index Seek", "[ix_records_value]")
                 .Replace("</IndexScan>", "</IndexScan><Sort />", StringComparison.Ordinal),
@@ -262,6 +345,18 @@ public sealed class SqlServerNativePlanMapperTests
                 """),
             new Dictionary<string, string>(StringComparer.Ordinal),
             []);
+        var foreignFilter = Map(
+            PlanWithForeignNamespace("""
+                <StmtSimple StatementType="SELECT"><QueryPlan>
+                  <RelOp NodeId="0" PhysicalOp="Filter"><f:Filter>
+                    <RelOp NodeId="1" PhysicalOp="Table Scan"><TableScan>
+                      <Object Database="[records_db]" Schema="[dbo]" Table="[records]" />
+                    </TableScan></RelOp>
+                  </f:Filter></RelOp>
+                </QueryPlan></StmtSimple>
+                """),
+            new Dictionary<string, string>(StringComparer.Ordinal),
+            []);
         var hiddenRelOpWrapper = Map(
             Plan("""
                 <StmtSimple StatementType="SELECT"><QueryPlan>
@@ -301,10 +396,13 @@ public sealed class SqlServerNativePlanMapperTests
         Assert.Null(Map(extraStatementKinds, new Dictionary<string, string>(StringComparer.Ordinal), []));
         Assert.Null(duplicatePayload);
         Assert.Null(conflictingPayload);
+        Assert.Null(malformedFilterArity);
+        Assert.Null(mixedFilterPayload);
         Assert.Null(mixedSortPayload);
         Assert.Null(hiddenPayload);
         Assert.Null(foreignPayload);
         Assert.Null(foreignTopSort);
+        Assert.Null(foreignFilter);
         Assert.Null(hiddenRelOpWrapper);
         Assert.Null(malformedIdentifier);
         Assert.Null(unknownAccessWrapper);

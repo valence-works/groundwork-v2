@@ -64,6 +64,10 @@ native operator, not two separate nodes, and does not establish a numeric bound
 or prove that the sort stayed in memory. Standalone operations remain `Sort`
 and `Limit`.
 
+`Filter` retains a native predicate-filtering stage, not its expression or
+values. Its presence alone does not prove predicate identity, selectivity or
+index coverage; it carries no storage target identity.
+
 ## Retaining observations
 
 The immutable runtime types are not a default JSON wire contract. Map the actual

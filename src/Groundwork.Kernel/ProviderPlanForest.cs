@@ -25,7 +25,9 @@ public enum ProviderPlanOperator
     /// <summary>A native row-skipping stage; its presence does not establish a numeric offset.</summary>
     Offset,
     /// <summary>A single native operator that sorts and limits rows; no numeric bound is implied.</summary>
-    TopNSort
+    TopNSort,
+    /// <summary>A native stage retaining input rows that satisfy a predicate; no predicate values or selectivity are implied.</summary>
+    Filter
 }
 
 /// <summary>The purpose of a sort when the native plan identifies it.</summary>

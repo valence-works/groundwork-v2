@@ -220,6 +220,11 @@ second native node or changing parentage. Consumers checking for either kind
 of work must also consider this fused operator. It carries no numeric bound,
 spill claim or access identity; a sort purpose is optional and must be observed.
 
+A native predicate-filtering stage is retained as `ProviderPlanOperator.Filter`
+with its original parentage. This does not expose its expression or values,
+establish selectivity, or prove which declared predicates it enforces. It is
+not a storage access and carries no target or index identity.
+
 SQLite maps the actual four-column `EXPLAIN QUERY PLAN` response for a single
 physical source. It distinguishes table scans, index scans/searches, integer
 primary-key searches and explicit ordering/grouping/distinct sorts. The native

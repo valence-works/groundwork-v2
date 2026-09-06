@@ -11,6 +11,7 @@ public sealed class ProviderPlanForestTests
     [InlineData("Compute")]
     [InlineData("Projection")]
     [InlineData("Offset")]
+    [InlineData("Filter")]
     public void Computational_operators_preserve_structure_without_fabricating_a_storage_target(string name)
     {
         Assert.True(Enum.TryParse<ProviderPlanOperator>(name, out var operation));

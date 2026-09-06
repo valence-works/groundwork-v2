@@ -605,6 +605,7 @@ Groundwork.Kernel: field [Public, Static, Literal, HasDefault] Groundwork.Kernel
 Groundwork.Kernel: field [Public, Static, Literal, HasDefault] Groundwork.Kernel.ProviderOrderingTransform [nullability: NotNull/NotNull] Groundwork.Kernel.ProviderOrderingTransform.Unknown = 0
 Groundwork.Kernel: field [Public, Static, Literal, HasDefault] Groundwork.Kernel.ProviderPlanOperator [nullability: NotNull/NotNull] Groundwork.Kernel.ProviderPlanOperator.Aggregate = 8
 Groundwork.Kernel: field [Public, Static, Literal, HasDefault] Groundwork.Kernel.ProviderPlanOperator [nullability: NotNull/NotNull] Groundwork.Kernel.ProviderPlanOperator.Compute = 10
+Groundwork.Kernel: field [Public, Static, Literal, HasDefault] Groundwork.Kernel.ProviderPlanOperator [nullability: NotNull/NotNull] Groundwork.Kernel.ProviderPlanOperator.Filter = 14
 Groundwork.Kernel: field [Public, Static, Literal, HasDefault] Groundwork.Kernel.ProviderPlanOperator [nullability: NotNull/NotNull] Groundwork.Kernel.ProviderPlanOperator.FunctionScan = 9
 Groundwork.Kernel: field [Public, Static, Literal, HasDefault] Groundwork.Kernel.ProviderPlanOperator [nullability: NotNull/NotNull] Groundwork.Kernel.ProviderPlanOperator.IndexScan = 2
 Groundwork.Kernel: field [Public, Static, Literal, HasDefault] Groundwork.Kernel.ProviderPlanOperator [nullability: NotNull/NotNull] Groundwork.Kernel.ProviderPlanOperator.IndexSearch = 1

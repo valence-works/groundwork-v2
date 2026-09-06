@@ -169,6 +169,12 @@ internal static class SqlServerNativePlanMapper
                 node = new ProviderPlanNode(id, parentId, ProviderPlanOperator.Compute);
                 break;
 
+            case "Filter":
+                if (!TryReadOperatorChildren(source, "Filter", out children) || children.Length != 1)
+                    return false;
+                node = new ProviderPlanNode(id, parentId, ProviderPlanOperator.Filter);
+                break;
+
             case "Sort":
                 if (!TryReadOperatorChildren(source, "Sort", out children) || children.Length != 1)
                     return false;
@@ -295,7 +301,7 @@ internal static class SqlServerNativePlanMapper
     }
 
     private static bool IsOperatorPayload(XElement element) =>
-        element.Name.LocalName is "IndexScan" or "TableScan" or "Sort" or "Top" or "TopSort" or "ComputeScalar";
+        element.Name.LocalName is "IndexScan" or "TableScan" or "Sort" or "Top" or "TopSort" or "ComputeScalar" or "Filter";
 
     private static bool TryReadNodeId(XElement source, out int id) =>
         int.TryParse((string?)source.Attribute("NodeId"), out id) && id >= 0;
