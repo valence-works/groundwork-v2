@@ -85,6 +85,41 @@ public sealed class SqlServerNativePlanMapperTests
     }
 
     [Fact]
+    public void Maps_namespaced_top_n_sort_payload_and_preserves_parentage()
+    {
+        var forest = Map(
+            Plan("""
+                <StmtSimple StatementType="SELECT">
+                  <QueryPlan><RelOp NodeId="0" PhysicalOp="Sort" LogicalOp="TopN Sort"><TopSort Distinct="0" Rows="2">
+                    <OrderBy><OrderByColumn Ascending="1" /></OrderBy>
+                    <RelOp NodeId="1" PhysicalOp="Table Scan"><TableScan>
+                      <Object Database="[records_db]" Schema="[dbo]" Table="[records]" />
+                    </TableScan></RelOp>
+                  </TopSort></RelOp></QueryPlan>
+                </StmtSimple>
+                """),
+            new Dictionary<string, string>(StringComparer.Ordinal),
+            []);
+
+        Assert.NotNull(forest);
+        Assert.Collection(
+            forest!.Nodes,
+            node =>
+            {
+                Assert.Equal(0, node.Id);
+                Assert.Null(node.ParentId);
+                Assert.Equal(ProviderPlanOperator.Sort, node.Operation);
+                Assert.Null(node.SortPurpose);
+            },
+            node =>
+            {
+                Assert.Equal(1, node.Id);
+                Assert.Equal(0, node.ParentId);
+                Assert.Equal(ProviderPlanOperator.TableScan, node.Operation);
+            });
+    }
+
+    [Fact]
     public void Keeps_index_scan_distinct_and_maps_table_scan_without_inventing_index_facts()
     {
         var indexScan = Map(
@@ -188,6 +223,18 @@ public sealed class SqlServerNativePlanMapperTests
                 .Replace("</IndexScan>", "</IndexScan><Sort />", StringComparison.Ordinal),
             new Dictionary<string, string>(StringComparer.Ordinal),
             ["ix_records_value"]);
+        var mixedSortPayload = Map(
+            Plan("""
+                <StmtSimple StatementType="SELECT"><QueryPlan>
+                  <RelOp NodeId="0" PhysicalOp="Sort"><Sort>
+                    <RelOp NodeId="1" PhysicalOp="Table Scan"><TableScan>
+                      <Object Database="[records_db]" Schema="[dbo]" Table="[records]" />
+                    </TableScan></RelOp>
+                  </Sort><TopSort Distinct="0" Rows="2" /></RelOp>
+                </QueryPlan></StmtSimple>
+                """),
+            new Dictionary<string, string>(StringComparer.Ordinal),
+            []);
         var hiddenPayload = Map(
             AccessPlan("Index Seek", "[ix_records_value]")
                 .Replace("</IndexScan>", "</IndexScan><Unknown><IndexScan /></Unknown>", StringComparison.Ordinal),
@@ -203,6 +250,18 @@ public sealed class SqlServerNativePlanMapperTests
                 """),
             new Dictionary<string, string>(StringComparer.Ordinal),
             ["ix_records_value"]);
+        var foreignTopSort = Map(
+            PlanWithForeignNamespace("""
+                <StmtSimple StatementType="SELECT"><QueryPlan>
+                  <RelOp NodeId="0" PhysicalOp="Sort"><f:TopSort Distinct="0" Rows="2">
+                    <RelOp NodeId="1" PhysicalOp="Table Scan"><TableScan>
+                      <Object Database="[records_db]" Schema="[dbo]" Table="[records]" />
+                    </TableScan></RelOp>
+                  </f:TopSort></RelOp>
+                </QueryPlan></StmtSimple>
+                """),
+            new Dictionary<string, string>(StringComparer.Ordinal),
+            []);
         var hiddenRelOpWrapper = Map(
             Plan("""
                 <StmtSimple StatementType="SELECT"><QueryPlan>
@@ -242,8 +301,10 @@ public sealed class SqlServerNativePlanMapperTests
         Assert.Null(Map(extraStatementKinds, new Dictionary<string, string>(StringComparer.Ordinal), []));
         Assert.Null(duplicatePayload);
         Assert.Null(conflictingPayload);
+        Assert.Null(mixedSortPayload);
         Assert.Null(hiddenPayload);
         Assert.Null(foreignPayload);
+        Assert.Null(foreignTopSort);
         Assert.Null(hiddenRelOpWrapper);
         Assert.Null(malformedIdentifier);
         Assert.Null(unknownAccessWrapper);

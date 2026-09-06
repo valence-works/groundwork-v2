@@ -274,7 +274,8 @@ internal static class SqlServerNativePlanMapper
             .Where(element => element.Ancestors().FirstOrDefault(a => a.Name.LocalName == "RelOp") == source)
             .ToArray();
         if (payloads.Length != 1 || payloads[0].Parent != source ||
-            payloads[0].Name != ShowPlanNamespace + operatorElement)
+            (payloads[0].Name != ShowPlanNamespace + operatorElement &&
+             !(operatorElement == "Sort" && payloads[0].Name == ShowPlanNamespace + "TopSort")))
             return false;
 
         var expected = payloads[0];
@@ -291,7 +292,7 @@ internal static class SqlServerNativePlanMapper
     }
 
     private static bool IsOperatorPayload(XElement element) =>
-        element.Name.LocalName is "IndexScan" or "TableScan" or "Sort" or "Top" or "ComputeScalar";
+        element.Name.LocalName is "IndexScan" or "TableScan" or "Sort" or "Top" or "TopSort" or "ComputeScalar";
 
     private static bool TryReadNodeId(XElement source, out int id) =>
         int.TryParse((string?)source.Attribute("NodeId"), out id) && id >= 0;
