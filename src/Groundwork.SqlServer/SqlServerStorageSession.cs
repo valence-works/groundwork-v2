@@ -1,6 +1,5 @@
 using System.Data;
 using System.Data.Common;
-using System.Data.SqlTypes;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Runtime.ExceptionServices;
@@ -327,18 +326,15 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
                 while (await mode.Read(reader).ConfigureAwait(false))
                 for (var ordinal = 0; ordinal < reader.FieldCount; ordinal++)
                 {
-                    if (reader is not SqlDataReader sqlReader ||
-                        !string.Equals(
-                            reader.GetName(ordinal),
-                            "Microsoft SQL Server 2005 XML Showplan",
-                            StringComparison.OrdinalIgnoreCase) ||
-                        sqlReader.GetProviderSpecificFieldType(ordinal) != typeof(SqlXml))
+                    var columnName = reader.GetName(ordinal);
+                    if (!string.Equals(columnName, SqlServerShowplanValueReader.ColumnName,
+                            StringComparison.OrdinalIgnoreCase))
                         continue;
-                    // SqlClient exposes SQL XML as string through GetFieldType/GetValue, while its
-                    // provider-specific accessors expose the SqlXml value without a lossy cast.
-                    var xml = sqlReader.GetSqlXml(ordinal);
-                    if (xml is { IsNull: false } && !string.IsNullOrWhiteSpace(xml.Value))
-                        plans.Add(xml.Value);
+                    var content = SqlServerShowplanValueReader.Read(
+                        columnName,
+                        reader.GetValue(ordinal));
+                    if (content is not null)
+                        plans.Add(content);
                 }
             } while (await mode.NextResult(reader).ConfigureAwait(false));
         }
