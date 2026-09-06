@@ -108,7 +108,7 @@ public sealed class SqlServerNativePlanMapperTests
             {
                 Assert.Equal(0, node.Id);
                 Assert.Null(node.ParentId);
-                Assert.Equal(ProviderPlanOperator.Sort, node.Operation);
+                Assert.Equal(ProviderPlanOperator.TopNSort, node.Operation);
                 Assert.Null(node.SortPurpose);
             },
             node =>
@@ -365,6 +365,7 @@ public sealed class SqlServerNativePlanLiveEvidenceTests(SqlServerFixture fixtur
 
         var observer = new EvidenceObserver();
         var session = provider.OpenSession(unit, StorageAccess.Global, observer);
+        observer.Commands.Clear();
         observer.EvidenceOptions = ProviderExecutionEvidenceOptions.ShapeAndPlans;
         session.Query(new QueryRequest(
             new TableId(unit.Name),

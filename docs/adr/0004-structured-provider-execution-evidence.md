@@ -209,10 +209,16 @@ keys, spill, row counts, or enforced key shape. A null forest means incomplete
 or unmapped structure, never an empty plan or proof of no sort. Typed node guards
 reject unknown operators, invalid relationships and contradictory fields.
 
-A native row-limiting operator is preserved as `ProviderPlanOperator.Limit`,
+A standalone native row-limiting operator is preserved as `ProviderPlanOperator.Limit`,
 including its parent and children. This structural fact carries no numeric
 bound: an estimated row count must not be substituted for the bound emitted by
 the renderer. It also cannot carry access, index or sort attributes.
+
+A fused native top-N sort is preserved as one `ProviderPlanOperator.TopNSort`
+node. It retains both sorting and row-limiting semantics without inventing a
+second native node or changing parentage. Consumers checking for either kind
+of work must also consider this fused operator. It carries no numeric bound,
+spill claim or access identity; a sort purpose is optional and must be observed.
 
 SQLite maps the actual four-column `EXPLAIN QUERY PLAN` response for a single
 physical source. It distinguishes table scans, index scans/searches, integer

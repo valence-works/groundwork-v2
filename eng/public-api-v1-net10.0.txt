@@ -615,6 +615,7 @@ Groundwork.Kernel: field [Public, Static, Literal, HasDefault] Groundwork.Kernel
 Groundwork.Kernel: field [Public, Static, Literal, HasDefault] Groundwork.Kernel.ProviderPlanOperator [nullability: NotNull/NotNull] Groundwork.Kernel.ProviderPlanOperator.Projection = 11
 Groundwork.Kernel: field [Public, Static, Literal, HasDefault] Groundwork.Kernel.ProviderPlanOperator [nullability: NotNull/NotNull] Groundwork.Kernel.ProviderPlanOperator.Sort = 5
 Groundwork.Kernel: field [Public, Static, Literal, HasDefault] Groundwork.Kernel.ProviderPlanOperator [nullability: NotNull/NotNull] Groundwork.Kernel.ProviderPlanOperator.TableScan = 3
+Groundwork.Kernel: field [Public, Static, Literal, HasDefault] Groundwork.Kernel.ProviderPlanOperator [nullability: NotNull/NotNull] Groundwork.Kernel.ProviderPlanOperator.TopNSort = 13
 Groundwork.Kernel: field [Public, Static, Literal, HasDefault] Groundwork.Kernel.ProviderPlanOperator [nullability: NotNull/NotNull] Groundwork.Kernel.ProviderPlanOperator.Unknown = 0
 Groundwork.Kernel: field [Public, Static, Literal, HasDefault] Groundwork.Kernel.ProviderPlanProvenance [nullability: NotNull/NotNull] Groundwork.Kernel.ProviderPlanProvenance.EstimatedExplain = 1
 Groundwork.Kernel: field [Public, Static, Literal, HasDefault] Groundwork.Kernel.ProviderPlanProvenance [nullability: NotNull/NotNull] Groundwork.Kernel.ProviderPlanProvenance.ExplainReplay = 2

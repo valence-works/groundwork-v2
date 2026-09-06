@@ -59,6 +59,11 @@ does not mean no sort. Even a complete operator structure does not establish
 sort-key semantics, spill behavior, row counts or enforced uniqueness. Require
 explicit evidence for each fact your policy needs.
 
+Treat `TopNSort` as both sorting and row-limiting work. It represents one fused
+native operator, not two separate nodes, and does not establish a numeric bound
+or prove that the sort stayed in memory. Standalone operations remain `Sort`
+and `Limit`.
+
 ## Retaining observations
 
 The immutable runtime types are not a default JSON wire contract. Map the actual

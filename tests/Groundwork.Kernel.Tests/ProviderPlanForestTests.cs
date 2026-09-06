@@ -26,6 +26,24 @@ public sealed class ProviderPlanForestTests
     private static readonly ProviderOpaqueIdentity Index = new(Guid.NewGuid());
 
     [Fact]
+    public void Native_top_n_sort_retains_fused_semantics_in_one_node()
+    {
+        Assert.True(Enum.TryParse<ProviderPlanOperator>("TopNSort", out var operation));
+        var forest = new ProviderPlanForest([
+            new(0, null, operation, sortPurpose: ProviderPlanSortPurpose.OrderBy),
+            new(1, 0, ProviderPlanOperator.TableScan, targetId: Target)
+        ]);
+
+        Assert.Equal(2, forest.Nodes.Length);
+        Assert.Equal(operation, forest.Nodes[0].Operation);
+        Assert.Equal(ProviderPlanSortPurpose.OrderBy, forest.Nodes[0].SortPurpose);
+        Assert.Equal(0, forest.Nodes[1].ParentId);
+        Assert.Null(forest.Nodes[0].TargetId);
+        Assert.Null(forest.Nodes[0].IndexId);
+        Assert.Throws<ArgumentException>(() => new ProviderPlanNode(0, null, operation, targetId: Target));
+    }
+
+    [Fact]
     public void Native_limit_preserves_parentage_without_claiming_access_or_sort_facts()
     {
         Assert.True(Enum.TryParse<ProviderPlanOperator>("Limit", out var limit));

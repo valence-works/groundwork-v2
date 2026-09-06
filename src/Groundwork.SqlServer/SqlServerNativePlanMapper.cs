@@ -172,7 +172,10 @@ internal static class SqlServerNativePlanMapper
             case "Sort":
                 if (!TryReadOperatorChildren(source, "Sort", out children) || children.Length != 1)
                     return false;
-                node = new ProviderPlanNode(id, parentId, ProviderPlanOperator.Sort);
+                node = new ProviderPlanNode(id, parentId,
+                    source.Element(ShowPlanNamespace + "TopSort") is not null
+                        ? ProviderPlanOperator.TopNSort
+                        : ProviderPlanOperator.Sort);
                 break;
 
             case "Top":

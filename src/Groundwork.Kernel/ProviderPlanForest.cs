@@ -23,7 +23,9 @@ public enum ProviderPlanOperator
     /// <summary>A native stage selecting the output fields of its input rows.</summary>
     Projection,
     /// <summary>A native row-skipping stage; its presence does not establish a numeric offset.</summary>
-    Offset
+    Offset,
+    /// <summary>A single native operator that sorts and limits rows; no numeric bound is implied.</summary>
+    TopNSort
 }
 
 /// <summary>The purpose of a sort when the native plan identifies it.</summary>
@@ -67,7 +69,7 @@ public sealed record ProviderPlanNode
         {
             if (!Enum.IsDefined(purpose) || purpose == ProviderPlanSortPurpose.Unknown)
                 throw new ArgumentOutOfRangeException(nameof(sortPurpose));
-            if (operation != ProviderPlanOperator.Sort)
+            if (operation is not (ProviderPlanOperator.Sort or ProviderPlanOperator.TopNSort))
                 throw new ArgumentException("A sort purpose requires a sort node.", nameof(sortPurpose));
         }
 
