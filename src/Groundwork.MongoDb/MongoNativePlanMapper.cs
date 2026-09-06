@@ -258,9 +258,19 @@ internal static class MongoNativePlanMapper
             return false;
 
         if (operation is ProviderPlanOperator.Compute or
-            ProviderPlanOperator.Projection or
-            ProviderPlanOperator.Sort)
+            ProviderPlanOperator.Projection)
             return value.IsBsonDocument;
+
+        if (operation == ProviderPlanOperator.Sort)
+        {
+            if (!value.IsBsonDocument ||
+                !TryReadFusedLimit(value.AsBsonDocument, "limit", "limitAmount", true, out var fused))
+                return false;
+
+            if (fused)
+                operation = ProviderPlanOperator.TopNSort;
+            return true;
+        }
 
         if (operation is ProviderPlanOperator.Offset or ProviderPlanOperator.Limit)
         {
@@ -273,6 +283,44 @@ internal static class MongoNativePlanMapper
 
         return false;
     }
+
+    private static bool TryReadFusedLimit(
+        BsonDocument document,
+        string limitField,
+        string conflictingLimitField,
+        bool requireSortKey,
+        out bool fused)
+    {
+        fused = false;
+        var limitCount = Count(document, limitField);
+        var conflictingLimitCount = Count(document, conflictingLimitField);
+        if (limitCount == 0 && conflictingLimitCount == 0)
+            return true;
+
+        // Mongo uses `limit` in an optimized aggregation `$sort` payload and
+        // `limitAmount` in a classic SORT plan. Do not silently reinterpret one
+        // native dialect as the other when both or the wrong alias is present.
+        if (limitCount != 1 || conflictingLimitCount != 0 ||
+            !document.TryGetValue(limitField, out var value) ||
+            !IsPositiveInteger(value))
+            return false;
+
+        if (requireSortKey &&
+            (Count(document, "sortKey") != 1 ||
+             !document.TryGetValue("sortKey", out var sortKey) ||
+             !sortKey.IsBsonDocument))
+            return false;
+
+        // The bound witnesses fusion only; ProviderPlanNode deliberately exposes no numeric
+        // limit, so the value is validated and then discarded.
+        fused = true;
+        return true;
+    }
+
+    private static bool IsPositiveInteger(BsonValue value) =>
+        value.IsInt32
+            ? value.AsInt32 > 0
+            : value.IsInt64 && value.AsInt64 > 0;
 
     private static bool ValidateLogicalIndexMap(IReadOnlyDictionary<string, string> map)
     {
@@ -447,6 +495,7 @@ internal static class MongoNativePlanMapper
                 ProviderPlanOperator.TableScan => childCount == 0,
             ProviderPlanOperator.Materialize or
                 ProviderPlanOperator.Sort or
+                ProviderPlanOperator.TopNSort or
                 ProviderPlanOperator.Limit or
                 ProviderPlanOperator.Compute or
                 ProviderPlanOperator.Projection or
@@ -485,6 +534,14 @@ internal static class MongoNativePlanMapper
                     string.IsNullOrWhiteSpace(indexValue.AsString))
                     return false;
                 indexName = indexValue.AsString;
+            }
+
+            if (operation == ProviderPlanOperator.Sort)
+            {
+                if (!TryReadFusedLimit(document, "limitAmount", "limit", false, out var fused))
+                    return false;
+                if (fused)
+                    operation = ProviderPlanOperator.TopNSort;
             }
 
             return operation != ProviderPlanOperator.Unknown;

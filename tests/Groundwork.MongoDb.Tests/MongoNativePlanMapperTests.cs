@@ -32,6 +32,28 @@ public sealed class MongoNativePlanMapperTests
     }
 
     [Fact]
+    public void Classic_fused_sort_limit_maps_to_one_top_n_node_and_preserves_parentage()
+    {
+        var winningPlan = new BsonDocument
+        {
+            { "stage", "SORT" },
+            { "limitAmount", new BsonInt64(2) },
+            { "inputStage", new BsonDocument("stage", "IXSCAN") { { "indexName", "status_1" } } }
+        };
+        var forest = Map(
+            Explain(winningPlan),
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["status_1"] = "by_status" });
+
+        Assert.NotNull(forest);
+        var topN = Assert.Single(forest!.Nodes, node => node.Operation == ProviderPlanOperator.TopNSort);
+        var index = Assert.Single(forest.Nodes, node => node.Operation == ProviderPlanOperator.IndexScan);
+        Assert.Equal(topN.Id, index.ParentId);
+        Assert.Null(topN.TargetId);
+        Assert.Null(topN.IndexId);
+        Assert.Null(topN.SortPurpose);
+    }
+
+    [Fact]
     public void Sbe_query_plan_is_mapped_without_exporting_native_ids_or_values()
     {
         var forest = Map(Explain(
@@ -119,6 +141,37 @@ public sealed class MongoNativePlanMapperTests
         Assert.All(forest.Nodes, node => Assert.Null(node.ParentId));
         Assert.Equal(Target, forest.Nodes[0].TargetId);
         Assert.All(forest.Nodes.Skip(1), node => Assert.Null(node.TargetId));
+    }
+
+    [Fact]
+    public void Aggregation_fused_sort_limit_maps_to_one_top_n_sibling_root()
+    {
+        var explain = BsonDocument.Parse("""
+        {
+          "stages": [
+            { "$cursor": { "queryPlanner": {
+              "namespace": "db.scope",
+              "winningPlan": { "stage": "COLLSCAN" }
+            } } },
+            { "$sort": { "sortKey": { "status": 1 }, "limit": 2 } }
+          ]
+        }
+        """);
+
+        var forest = Map(explain);
+
+        Assert.NotNull(forest);
+        Assert.Collection(
+            forest!.Nodes,
+            node => Assert.Equal(ProviderPlanOperator.TableScan, node.Operation),
+            node =>
+            {
+                Assert.Equal(ProviderPlanOperator.TopNSort, node.Operation);
+                Assert.Null(node.ParentId);
+                Assert.Null(node.TargetId);
+                Assert.Null(node.IndexId);
+                Assert.Null(node.SortPurpose);
+            });
     }
 
     [Fact]
@@ -231,8 +284,110 @@ public sealed class MongoNativePlanMapperTests
         Assert.Null(Map(unknownMetadata));
     }
 
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-1")]
+    [InlineData("1.5")]
+    [InlineData("\"2\"")]
+    [InlineData("null")]
+    [InlineData("true")]
+    public void Malformed_classic_fused_limit_amount_withholds_the_whole_forest(string limitAmount)
+    {
+        Assert.Null(Map(ClassicSortExplain(ParseJsonValue(limitAmount))));
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-1")]
+    [InlineData("1.5")]
+    [InlineData("\"2\"")]
+    public void Malformed_pipeline_fused_limit_withholds_the_whole_forest(string limit)
+    {
+        Assert.Null(Map(AggregationSortExplain(ParseJsonValue(limit))));
+    }
+
+    [Fact]
+    public void Duplicate_classic_fused_limit_amount_fields_withhold_the_whole_forest()
+    {
+        var winningPlan = new BsonDocument { { "stage", "SORT" } };
+        winningPlan.AllowDuplicateNames = true;
+        winningPlan.Add("limitAmount", 1);
+        winningPlan.Add("limitAmount", 2);
+        winningPlan.Add("inputStage", new BsonDocument("stage", "COLLSCAN"));
+
+        Assert.Null(Map(Explain(winningPlan)));
+    }
+
+    [Fact]
+    public void Pipeline_fused_sort_rejects_the_classic_limit_amount_alias()
+    {
+        var sort = new BsonDocument
+        {
+            { "sortKey", new BsonDocument("status", 1) },
+            { "limit", 2 },
+            { "limitAmount", 2 }
+        };
+
+        Assert.Null(Map(AggregationSortExplain(sort)));
+    }
+
+    [Fact]
+    public void Classic_fused_sort_rejects_the_pipeline_limit_alias()
+    {
+        var winningPlan = new BsonDocument
+        {
+            { "stage", "SORT" },
+            { "limit", 2 },
+            { "inputStage", new BsonDocument("stage", "COLLSCAN") }
+        };
+
+        Assert.Null(Map(Explain(winningPlan)));
+    }
+
+    [Fact]
+    public void Pipeline_fused_sort_requires_the_documented_sort_key()
+    {
+        Assert.Null(Map(AggregationSortExplain(new BsonDocument("limit", 2))));
+    }
+
     private static BsonDocument Explain(string winningPlan) =>
         BsonDocument.Parse($"{{\"queryPlanner\":{{\"namespace\":\"db.scope\",\"winningPlan\":{winningPlan}}}}}");
+
+    private static BsonDocument Explain(BsonDocument winningPlan) =>
+        new("queryPlanner", new BsonDocument
+        {
+            { "namespace", "db.scope" },
+            { "winningPlan", winningPlan }
+        });
+
+    private static BsonDocument ClassicSortExplain(BsonValue limitAmount) =>
+        Explain(new BsonDocument
+        {
+            { "stage", "SORT" },
+            { "limitAmount", limitAmount },
+            { "inputStage", new BsonDocument("stage", "COLLSCAN") }
+        });
+
+    private static BsonDocument AggregationSortExplain(BsonDocument sort) =>
+        new("stages", new BsonArray
+        {
+            new BsonDocument("$cursor", new BsonDocument("queryPlanner", new BsonDocument
+            {
+                { "namespace", "db.scope" },
+                { "winningPlan", new BsonDocument("stage", "COLLSCAN") }
+            })),
+            new BsonDocument("$sort", sort)
+        });
+
+    private static BsonDocument AggregationSortExplain(BsonValue limit) =>
+        AggregationSortExplain(new BsonDocument
+        {
+            { "sortKey", new BsonDocument("status", 1) },
+            { "limit", limit }
+        });
+
+    private static BsonValue ParseJsonValue(string value) =>
+        BsonDocument.Parse("{\"value\":" + value + "}")["value"];
 
     private static ProviderPlanForest? Map(
         BsonDocument explain,
