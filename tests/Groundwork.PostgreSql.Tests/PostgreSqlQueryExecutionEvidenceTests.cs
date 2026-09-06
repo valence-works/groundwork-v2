@@ -106,8 +106,10 @@ public sealed class PostgreSqlQueryExecutionEvidenceTests
         Assert.Contains("string_to_array", rendered.Command.CommandText, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void Persisted_ordinal_identity_reports_logical_source_and_physical_transform()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Persisted_ordinal_identity_reports_logical_source_and_physical_transform(bool projectPhysicalColumn)
     {
         var (table, id, payload) = Columns(nullablePayload: false);
         var options = new QueryRenderOptions
@@ -127,7 +129,9 @@ public sealed class PostgreSqlQueryExecutionEvidenceTests
             table,
             new Predicate.Equal(payload, QueryConstant.Of(payload, "secret")),
             [new OrderTerm(payload, nullOrder: NullOrder.First)],
-            Projection.ColumnsOnly(id, payload),
+            Projection.ColumnsOnly(id, projectPhysicalColumn
+                ? new ColumnRef(table, "__groundwork_ordinal_payload", QueryType.String, isNullable: false)
+                : payload),
             Paging.Keyset(2));
 
         var rendered = new PostgreSqlQueryRenderer().RenderForExecution(request, options, hasLookahead: true);
@@ -142,6 +146,8 @@ public sealed class PostgreSqlQueryExecutionEvidenceTests
             order.Transforms.ToArray());
         Assert.Equal(ProviderPredicateComparison.Ordinal, order.Comparison);
         Assert.Contains("__groundwork_ordinal_payload", rendered.Command.CommandText, StringComparison.Ordinal);
+        Assert.Equal(new[] { id.Name, payload.Name }, shape.Projection.LogicalColumns);
+        Assert.DoesNotContain("__groundwork_ordinal_payload", System.Text.Json.JsonSerializer.Serialize(shape), StringComparison.Ordinal);
     }
 
     [Fact]

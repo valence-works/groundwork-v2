@@ -132,7 +132,7 @@ public abstract partial class RelationalQueryRenderer
         internal void Selection(ColumnRef column)
         {
             if (!allColumns)
-                projection.Add(column.Name);
+                projection.Add(LogicalColumn(column));
         }
 
         internal void Order(OrderTerm term, IReadOnlyList<ProviderOrderingTransform> transforms)
