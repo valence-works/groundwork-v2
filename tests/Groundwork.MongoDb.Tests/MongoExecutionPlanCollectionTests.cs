@@ -1,3 +1,4 @@
+using System.Runtime.ExceptionServices;
 using Groundwork.Kernel;
 using Groundwork.MongoDb;
 using Groundwork.Query.Model;
@@ -166,6 +167,42 @@ public sealed class MongoExecutionPlanCollectionTests
                 planCollection: result));
 
         Assert.Same(diagnostic, failure);
+        Assert.Single(observer.Observed);
+    }
+
+    [Fact]
+    public void Transactional_legacy_assertion_failure_precedes_observer_failure_after_actual_success()
+    {
+        var observer = new RecordingObserver { ThrowOnObserve = true };
+        var capture = new MongoExecutionEvidenceCapture(observer, CreateUnit(), MongoStorageAccess.Global);
+        var diagnostic = new InvalidOperationException("legacy explain diagnostic");
+        ExceptionDispatchInfo? observerFailure = null;
+
+        try
+        {
+            capture.Publish(
+                capture.BeginInvocation(),
+                commandOrdinal: 0,
+                ProviderExecutionOperation.BoundedQuery,
+                ProviderExecutionRole.Statement,
+                ProviderCommandKind.Read,
+                ProviderExecutionOutcome.Succeeded,
+                failureCategory: null,
+                boundedQuery: null,
+                pointRead: null,
+                plan: MongoNativePlanCollectionResult.Unsupported.Evidence);
+        }
+        catch (Exception failure)
+        {
+            observerFailure = ExceptionDispatchInfo.Capture(failure);
+        }
+
+        var failureToPropagate = Assert.Throws<InvalidOperationException>(() =>
+            MongoExecutionEvidenceCompletion.ThrowPendingDiagnostic(
+                ExceptionDispatchInfo.Capture(diagnostic),
+                observerFailure));
+
+        Assert.Same(diagnostic, failureToPropagate);
         Assert.Single(observer.Observed);
     }
 

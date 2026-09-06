@@ -8,6 +8,13 @@ using Xunit;
 
 namespace Groundwork.MongoDb.Tests;
 
+[CollectionDefinition(Name, DisableParallelization = true)]
+public sealed class MongoExplainAssertionCollection
+{
+    public const string Name = "MongoDB explain assertion tests";
+}
+
+[Collection(MongoExplainAssertionCollection.Name)]
 public sealed class MongoExecutionEvidenceLiveTests
 {
     [SkippableFact]
@@ -102,7 +109,7 @@ public sealed class MongoExecutionEvidenceLiveTests
             Assert.Equal(ProviderScopeBindingMode.Unscoped, item.Target.ScopeBinding);
             Assert.NotNull(item.PointRead);
             var point = item.PointRead!;
-            Assert.Equal(1, point.KeyBounds.Length);
+            Assert.Single(point.KeyBounds);
             Assert.Equal("id", point.KeyBounds[0].LogicalColumn);
             Assert.Equal(ProviderNativeBoundKind.Explicit, point.NativeLimit.Kind);
             Assert.Equal(1, point.NativeLimit.Value);
@@ -202,6 +209,56 @@ public sealed class MongoExecutionEvidenceLiveTests
 
         Assert.Single(observer.Commands);
         Assert.Equal("mongodb.query", observer.Commands[0].Operation);
+    }
+
+    [SkippableFact]
+    public void Live_structured_transactional_query_preserves_legacy_explain_assertion_refusal()
+    {
+        using var database = OwnedMongoDatabase.Create();
+        using var connection = new MongoDbProviderFactory().Create(database.ConnectionString);
+        Skip.If(connection.ProviderSequenceFit is ProviderFit.Unsupported,
+            "MongoDB deployment does not support transactions.");
+        var unit = Unit("live_transaction") with
+        {
+            Scope = ScopePolicy.Global,
+            Indexes =
+            [
+                new IndexDefinition
+                {
+                    Name = "by_category",
+                    Columns = [new IndexColumn("category")]
+                }
+            ]
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        SeedGlobal(connection, unit, "transaction-id-secret-405", "transaction-payload-secret-405");
+
+        var previousFlag = Environment.GetEnvironmentVariable("GW_EXPLAIN_ASSERT");
+        Environment.SetEnvironmentVariable("GW_EXPLAIN_ASSERT", "1");
+        try
+        {
+            var observer = new RecordingExecutionObserver(ProviderExecutionEvidenceOptions.ShapeAndPlans);
+            var options = new QueryRenderOptions(
+                [new QueryIndexDeclaration(
+                    "by_category",
+                    [new QueryIndexColumn("category", false, QueryType.String)],
+                    QueryIndexPinning.ProviderDefault)],
+                selectedIndex: "by_category");
+            using var work = connection.BeginUnitOfWork(MongoStorageAccess.Global, observer, unit);
+            var session = work.OpenSession(unit);
+
+            var refusal = Assert.Throws<InvalidOperationException>(() =>
+                session.Query(BoundedQuery(unit, "global-category"), options));
+
+            Assert.Contains("cannot run inside a transaction", refusal.Message, StringComparison.Ordinal);
+            var evidence = Assert.Single(observer.Evidence);
+            Assert.Equal(ProviderExecutionOutcome.Succeeded, evidence.Outcome);
+            Assert.Equal(ProviderEvidenceAvailability.Unsupported, evidence.Plan.Availability);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("GW_EXPLAIN_ASSERT", previousFlag);
+        }
     }
 
     private static StorageUnit Unit(string suffix) => new()

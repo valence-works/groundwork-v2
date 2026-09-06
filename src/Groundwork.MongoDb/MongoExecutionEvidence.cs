@@ -515,6 +515,14 @@ internal static class MongoExecutionEvidenceCompletion
         planCollection.ThrowPendingFailure();
         observerFailure?.Throw();
     }
+
+    internal static void ThrowPendingDiagnostic(
+        ExceptionDispatchInfo? pendingDiagnostic,
+        ExceptionDispatchInfo? observerFailure)
+    {
+        pendingDiagnostic?.Throw();
+        observerFailure?.Throw();
+    }
 }
 
 internal readonly struct MongoExecutionEvidenceInvocation

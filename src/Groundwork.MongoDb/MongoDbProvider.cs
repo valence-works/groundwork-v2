@@ -2,6 +2,7 @@ using System.Collections;
 using System.Collections.ObjectModel;
 using System.Collections.Immutable;
 using System.Globalization;
+using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -1118,6 +1119,15 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             command = emitted.Command;
         }
         var structuredShape = emission?.StructuredShape;
+        var legacyAssertionRequested = !command.IsMatchNone &&
+            ExplainAssertionMode.ShouldAssert(command.ExpectedIndex);
+        var deferObserverFailure = evidenceCapture is not null &&
+            transactionSession is not null &&
+            legacyAssertionRequested;
+        ExceptionDispatchInfo? deferredObserverFailure = null;
+        Action<ExceptionDispatchInfo>? observerFailureSink = deferObserverFailure
+            ? failure => deferredObserverFailure ??= failure
+            : null;
         commandObserver?.Observe(new ProviderCommandEvent("mongodb.query", "MongoDB.Aggregate(page)", ProviderCommandKind.Read, IsProbe: false));
         var invocation = evidenceCapture?.BeginInvocation();
         var deferSuccess = evidenceCapture is not null && transactionSession is null;
@@ -1142,13 +1152,15 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                     structuredShape,
                     0,
                     deferSuccess,
+                    observerFailureSink,
                     () => mode.Aggregate(collection, transactionSession, dataPipeline,
                         new AggregateOptions { Hint = command.Hint })).ConfigureAwait(false);
                 documents.AddRange(await ExecuteObservedQuery(
                     invocation,
-                    shape: null,
+                    null,
                     1,
-                    deferSuccess: false,
+                    false,
+                    observerFailureSink,
                     () => mode.Aggregate(collection, transactionSession, countPipeline,
                         new AggregateOptions { Hint = command.Hint })).ConfigureAwait(false));
             }
@@ -1160,6 +1172,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                     structuredShape,
                     0,
                     deferSuccess,
+                    observerFailureSink,
                     () => mode.Aggregate(collection, transactionSession, pipeline,
                         new AggregateOptions { Hint = command.Hint })).ConfigureAwait(false);
             }
@@ -1186,6 +1199,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 structuredShape,
                 0,
                 deferSuccess,
+                observerFailureSink,
                 () => mode.Find(collection, transactionSession, command.Filter, findOptions)).ConfigureAwait(false);
         }
 
@@ -1295,6 +1309,22 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         }
         if (evidenceCapture is null)
             await AssertExplainPlan(command, renderOptions, mode).ConfigureAwait(false);
+        else if (transactionSession is not null && legacyAssertionRequested)
+        {
+            ExceptionDispatchInfo? legacyAssertionFailure = null;
+            try
+            {
+                await AssertExplainPlan(command, renderOptions, mode).ConfigureAwait(false);
+            }
+            catch (Exception failure)
+            {
+                legacyAssertionFailure = ExceptionDispatchInfo.Capture(failure);
+            }
+
+            MongoExecutionEvidenceCompletion.ThrowPendingDiagnostic(
+                legacyAssertionFailure,
+                deferredObserverFailure);
+        }
         return QueryResultMaterializer.Materialize(
             executionSource,
             renderOptions,
@@ -1311,6 +1341,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         ProviderBoundedQueryEvidence? shape,
         int commandOrdinal,
         bool deferSuccess,
+        Action<ExceptionDispatchInfo>? observerFailureSink,
         Func<ValueTask<List<BsonDocument>>> execute)
     {
         ArgumentNullException.ThrowIfNull(execute);
@@ -1370,16 +1401,25 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         // has been collected; transactional split commands have no explain path and publish
         // here. An observer failure on success never becomes a synthetic provider failure.
         if (!deferSuccess)
-            evidenceCapture.Publish(
-                current,
-                commandOrdinal,
-                ProviderExecutionOperation.BoundedQuery,
-                ProviderExecutionRole.Statement,
-                ProviderCommandKind.Read,
-                ProviderExecutionOutcome.Succeeded,
-                failureCategory: null,
-                boundedQuery: shape,
-                pointRead: null);
+        {
+            try
+            {
+                evidenceCapture.Publish(
+                    current,
+                    commandOrdinal,
+                    ProviderExecutionOperation.BoundedQuery,
+                    ProviderExecutionRole.Statement,
+                    ProviderCommandKind.Read,
+                    ProviderExecutionOutcome.Succeeded,
+                    failureCategory: null,
+                    boundedQuery: shape,
+                    pointRead: null);
+            }
+            catch (Exception failure) when (observerFailureSink is not null)
+            {
+                observerFailureSink(ExceptionDispatchInfo.Capture(failure));
+            }
+        }
         return result;
     }
 
