@@ -95,7 +95,9 @@ public sealed class MongoExecutionEvidenceLiveTests
         Assert.False(queryEvidence.BoundedQuery.HasContinuation);
         Assert.False(queryEvidence.BoundedQuery.IncludesTotalCount);
         Assert.False(queryEvidence.BoundedQuery.Projection.AllColumns);
-        Assert.Equal(new[] { "id", "payload" }, queryEvidence.BoundedQuery.Projection.LogicalColumns);
+        // The actual native projection retains the nullable ordering key so Mongo can
+        // materialize the requested null-rank sort; the public rows stay two columns.
+        Assert.Equal(new[] { "id", "payload", "status" }, queryEvidence.BoundedQuery.Projection.LogicalColumns);
 
         var pointEvidence = observer.Evidence
             .Where(item => item.Operation == ProviderExecutionOperation.PointRead)
@@ -287,7 +289,7 @@ public sealed class MongoExecutionEvidenceLiveTests
             new Predicate.Equal(categoryColumn, QueryConstant.Of(categoryColumn, category)),
             [
                 new OrderTerm(status, OrderDirection.Ascending, NullOrder.First),
-                new OrderTerm(id, OrderDirection.Ascending)
+                new OrderTerm(id, OrderDirection.Ascending, NullOrder.Last)
             ],
             Projection.ColumnsOnly(id, payload),
             Paging.OffsetLimit(0, 2));

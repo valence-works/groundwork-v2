@@ -22,6 +22,7 @@ public sealed class PostgreSqlBoundedExecutionEvidenceLiveTests
         var result = fixture.Session.Query(Query(fixture.Unit), fixture.Unit.CreateQueryRenderOptions());
 
         Assert.Equal(2, result.Rows.Count);
+        Assert.All(result.Rows, row => Assert.Equal(2, row.Count));
         Assert.Equal("a-null", result.Rows[0]["id"]);
         Assert.Equal(Fixture.ScopeAPayloadNull, result.Rows[0]["payload"]);
         Assert.Equal("a-ready", result.Rows[1]["id"]);
@@ -68,13 +69,20 @@ public sealed class PostgreSqlBoundedExecutionEvidenceLiveTests
             {
                 Assert.Equal("id", id.LogicalColumn);
                 Assert.Equal(OrderDirection.Ascending, id.Direction);
-                Assert.Null(id.NullPlacement);
-                Assert.Equal([ProviderOrderingTransform.OrdinalStringKey], id.Transforms);
+                // The request uses provider-default options without a selected index proof. The
+                // shared renderer therefore emits its conservative null-rank guard even though
+                // the storage declaration and ColumnRef mark id as non-nullable; evidence records
+                // the emitted order expression, not the declaration's nullability.
+                Assert.Equal(NullOrder.First, id.NullPlacement);
+                Assert.Equal(
+                    new[] { ProviderOrderingTransform.NullRank, ProviderOrderingTransform.OrdinalStringKey },
+                    id.Transforms.ToArray());
                 Assert.Equal(ProviderPredicateComparison.Ordinal, id.Comparison);
             });
 
         Assert.False(shape.Projection.AllColumns);
-        Assert.Equal(["id", "payload"], shape.Projection.LogicalColumns);
+        // Native paging retains the ordering key; public materialization hides that extra field.
+        Assert.Equal(new[] { "id", "payload", "status" }, shape.Projection.LogicalColumns.ToArray());
         Assert.Equal(ProviderNativeBoundKind.Absent, shape.NativeOffset.Kind);
         Assert.Equal(ProviderNativeBoundKind.Explicit, shape.NativeLimit.Kind);
         Assert.Equal(3, shape.NativeLimit.Value);
