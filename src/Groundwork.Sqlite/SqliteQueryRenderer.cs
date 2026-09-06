@@ -1,4 +1,5 @@
 using Groundwork.Substrate.Relational;
+using Groundwork.Kernel;
 using Groundwork.Query.Model;
 using Groundwork.Store;
 using System.Globalization;
@@ -17,17 +18,23 @@ public sealed class SqliteQueryRenderer : RelationalQueryRenderer
     }
 
     protected override string ProviderName => "SQLite";
+    protected override bool SupportsExecutionEvidence => true;
 
     protected override string RenderColumn(ColumnRef column)
     {
         if (string.Equals(column.Name, CrossScopeQueryMaterializer.ScopeTokenColumn, StringComparison.Ordinal))
+        {
+            EvidenceUnsupported();
             return "groundwork_scope_token(" + Dialect.QuoteIdentifier(SqliteSchemaCoordinator.ScopeColumn) + ") COLLATE GROUNDWORK_UTF16_ORDINAL";
-        return column.Type switch
+        }
+        var native = column.Type switch
         {
             QueryType.Decimal => base.RenderColumn(column) + " COLLATE GROUNDWORK_DECIMAL_18_4",
             QueryType.String => base.RenderColumn(column) + " COLLATE GROUNDWORK_UTF16_ORDINAL",
             _ => base.RenderColumn(column)
         };
+        return EvidenceColumn(native, column, column.Type == QueryType.String
+            ? ProviderPredicateComparison.Ordinal : ProviderPredicateComparison.Exact);
     }
 
     protected override string RenderReductionAggregate(ResultShape.Reduction reduction, string valueExpression)

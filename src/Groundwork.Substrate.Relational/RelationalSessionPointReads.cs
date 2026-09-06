@@ -19,6 +19,7 @@ internal sealed class RelationalSessionPointReads
     private readonly IRelationalPointReadAdapter adapter;
     private readonly IProviderCommandObserver? observer;
     private readonly string operationPrefix;
+    private readonly RelationalEvidenceCapture? evidenceCapture;
 
     internal RelationalSessionPointReads(
         StorageUnit unit,
@@ -28,7 +29,8 @@ internal sealed class RelationalSessionPointReads
         Func<string, DbCommand> createCommand,
         IRelationalPointReadAdapter adapter,
         IProviderCommandObserver? observer,
-        string operationPrefix)
+        string operationPrefix,
+        RelationalEvidenceCapture? evidenceCapture = null)
     {
         this.unit = unit;
         this.access = access;
@@ -38,6 +40,10 @@ internal sealed class RelationalSessionPointReads
         this.adapter = adapter;
         this.observer = observer;
         this.operationPrefix = operationPrefix;
+        if (observer is IProviderExecutionObserver)
+        {
+            this.evidenceCapture = evidenceCapture ?? new();
+        }
     }
 
     internal async ValueTask<StoredEntry?> Read(
@@ -49,6 +55,13 @@ internal sealed class RelationalSessionPointReads
         bool isProbe = true)
     {
         ArgumentNullException.ThrowIfNull(key);
+        // Probe correlation belongs to the enclosing write operation, not a separate read invocation.
+        var evidenceObserver = !isProbe ? observer as IProviderExecutionObserver : null;
+        var evidenceOptions = evidenceObserver is null
+            ? null
+            : evidenceCapture!.InvokeStructuredObserver(() => evidenceObserver.EvidenceOptions);
+        var keyBounds = evidenceObserver is null ? null : new List<ProviderPointReadKeyBound>();
+        var shapeCollected = evidenceObserver is not null;
         var keyColumns = unit.Key.Columns.ToList();
         if (unit.Columns.Any(column => column.Name == ProviderOwnedColumns.Scope) &&
             !keyColumns.Contains(ProviderOwnedColumns.Scope, StringComparer.Ordinal))
@@ -68,8 +81,16 @@ internal sealed class RelationalSessionPointReads
             var parameter = name == ProviderOwnedColumns.Scope
                 ? "@__groundwork_scope"
                 : "@key_" + name;
-            clauses.Add(adapter.Equality(column, parameter, exactStringKeys));
+            var predicate = adapter.RenderEquality(unit, column, parameter, exactStringKeys, evidenceObserver is not null);
+            clauses.Add(predicate.Sql);
             adapter.Bind(command, parameter, value, column);
+            if (keyBounds is not null)
+            {
+                if (predicate.Evidence is { } bound)
+                    keyBounds.Add(bound);
+                else
+                    shapeCollected = false;
+            }
         }
 
         var columns = userColumns.Concat(versionColumn is null ? [] : [versionColumn]);
@@ -77,12 +98,68 @@ internal sealed class RelationalSessionPointReads
             $"SELECT {string.Join(", ", columns.Select(column => adapter.QuoteIdentifier(column.Name)))} " +
             $"FROM {adapter.QuoteIdentifier(unit.Name)} WHERE {string.Join(" AND ", clauses)}" +
             adapter.LockingClause(forUpdate) + ";";
+        var identity = evidenceObserver is null ? null : evidenceCapture!.NewInvocation();
+        var target = evidenceObserver is null ? null : evidenceCapture!.Target(unit,
+            keyColumns.Contains(ProviderOwnedColumns.Scope, StringComparer.Ordinal)
+                ? ProviderScopeBindingMode.Predicate : ProviderScopeBindingMode.Unscoped);
+        ProviderIdentity? provider = evidenceObserver is null ? null : new(
+            adapter.EvidenceProviderName ?? operationPrefix, command.Connection!.ServerVersion);
+        var pointRead = shapeCollected ? new ProviderPointReadEvidence(
+            keyBounds!, new(ProviderPointReadUniquenessStatus.NotObserved),
+            ProviderNativeBound.Absent, materializerReadsAtMostOne: true,
+            lockMode: adapter.EvidenceLockMode(forUpdate)) : null;
+        var plan = evidenceOptions?.CollectNativePlans == true
+            ? new ProviderPlanEvidence(ProviderEvidenceAvailability.Unsupported)
+            : ProviderPlanEvidence.NotRequested;
+
         observer?.Observe(new ProviderCommandEvent(
             observerOperation ?? operationPrefix + ".write-probe",
             command.CommandText,
             ProviderCommandKind.Read,
             IsProbe: isProbe));
 
+        var outcome = ProviderExecutionOutcome.Failed;
+        ProviderExecutionFailureCategory? failure = ProviderExecutionFailureCategory.Provider;
+        var issued = false;
+        try
+        {
+            var entry = await ReadEntry(command, execution,
+                evidenceObserver is null ? null : () => issued = true).ConfigureAwait(false);
+            outcome = ProviderExecutionOutcome.Succeeded;
+            failure = null;
+            return entry;
+        }
+        catch (OperationCanceledException)
+        {
+            outcome = ProviderExecutionOutcome.Cancelled;
+            failure = ProviderExecutionFailureCategory.Cancellation;
+            throw;
+        }
+        finally
+        {
+            if (evidenceObserver is not null && issued)
+            {
+                try
+                {
+                    evidenceCapture!.InvokeStructuredObserver(() => evidenceObserver.ObserveExecution(
+                        new ProviderExecutionEvidence(
+                            provider!, ProviderExecutionOperation.PointRead, ProviderCommandKind.Read,
+                            ProviderExecutionRole.Statement, identity!, target!, outcome, failure,
+                            shapeCollected ? ProviderEvidenceAvailability.Collected : ProviderEvidenceAvailability.Unsupported,
+                            pointRead: pointRead, plan: plan)));
+                }
+                catch when (outcome != ProviderExecutionOutcome.Succeeded)
+                {
+                    // An observer failure must not replace the actual provider/cancellation exception.
+                }
+            }
+        }
+    }
+
+    private async ValueTask<StoredEntry?> ReadEntry(DbCommand command, RelationalExecution execution, Action? onIssuing)
+    {
+        execution.CancellationToken.ThrowIfCancellationRequested();
+        onIssuing?.Invoke();
         await using var readerScope = await execution.ExecuteReader(command).ConfigureAwait(false);
         var reader = readerScope.Reader;
         if (!await execution.Read(reader).ConfigureAwait(false))
@@ -115,6 +192,14 @@ internal sealed class RelationalSessionPointReads
 
 internal interface IRelationalPointReadAdapter
 {
+    string? EvidenceProviderName => null;
+
+    ProviderPointReadLockMode EvidenceLockMode(bool forUpdate) => ProviderPointReadLockMode.Unknown;
+
+    RelationalPointReadPredicate RenderEquality(StorageUnit unit, ColumnDefinition column,
+        string parameter, bool exactStringKeys, bool collectEvidence) =>
+        new(Equality(column, parameter, exactStringKeys), null);
+
     string QuoteIdentifier(string identifier);
 
     string Equality(ColumnDefinition column, string parameter, bool exactStringKeys);
@@ -124,4 +209,23 @@ internal interface IRelationalPointReadAdapter
     object? Decode(object value, ColumnDefinition column);
 
     string LockingClause(bool forUpdate);
+}
+
+internal readonly record struct RelationalPointReadPredicate(string Sql, ProviderPointReadKeyBound? Evidence)
+{
+    // Providers opt in at their actual equality emitter. Sharing value-free binding construction
+    // does not opt an unmapped provider into evidence or change its native equality semantics.
+    internal static RelationalPointReadPredicate WithKeyBound(string sql, StorageUnit unit,
+        ColumnDefinition column, bool collectEvidence)
+    {
+        ProviderPointReadKeyBound? evidence = null;
+        if (collectEvidence && RelationalSessionPolicy.QueryColumn(unit, column.Name) is { } queryColumn)
+        {
+            var isScope = column.Name == ProviderOwnedColumns.Scope;
+            evidence = new(isScope ? null : column.Name, queryColumn.Type,
+                isScope ? ProviderPointReadBindingRole.Scope : ProviderPointReadBindingRole.Key,
+                new(Guid.NewGuid()));
+        }
+        return new(sql, evidence);
+    }
 }

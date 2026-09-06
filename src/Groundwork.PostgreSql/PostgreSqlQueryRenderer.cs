@@ -1,3 +1,4 @@
+using Groundwork.Kernel;
 using Groundwork.Substrate.Relational;
 using Groundwork.Query.Model;
 using Groundwork.Store;
@@ -16,6 +17,7 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
     }
 
     protected override string ProviderName => "PostgreSQL";
+    protected override bool SupportsExecutionEvidence => true;
 
     protected override string RenderReductionAggregate(ResultShape.Reduction reduction, string valueExpression)
     {
@@ -36,10 +38,15 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
     protected override string RenderColumn(ColumnRef column)
     {
         if (string.Equals(column.Name, CrossScopeQueryMaterializer.ScopeTokenColumn, StringComparison.Ordinal))
+        {
+            EvidenceUnsupported();
             return "upper(encode(sha256(convert_to(" + Dialect.QuoteIdentifier(PostgreSqlSchemaCoordinator.ScopeColumn) + ", 'UTF8')), 'hex'))";
-        return column.Type == QueryType.String
+        }
+        var native = column.Type == QueryType.String
             ? "(" + base.RenderColumn(column) + " COLLATE \"C\")"
             : base.RenderColumn(column);
+        return EvidenceColumn(native, column, column.Type == QueryType.String
+            ? ProviderPredicateComparison.Ordinal : ProviderPredicateComparison.Exact);
     }
 
     protected override bool RequiresExplicitSelection(ColumnRef column) =>
@@ -162,6 +169,7 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
     {
         if (term.Column.Type == QueryType.Guid)
         {
+            EvidenceUnsupported();
             var guidExpression = RenderColumn(term.Column);
             var guidKey = "(" + guidExpression + "::text COLLATE \"C\")";
             if (!term.Column.IsNullable)
@@ -174,25 +182,30 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
         if (term.Column.Type != QueryType.String)
             return term.Column.IsNullable
                 ? base.RenderOrderTerm(term)
-                : RenderNonNullableOrder(RenderColumn(term.Column), term.Direction);
+                : RenderNonNullableOrderWithEvidence(term);
 
         var expression = RenderColumn(term.Column);
-        if (persistedOrdinalIdentity)
-        {
-            var directDirection = term.Direction == OrderDirection.Ascending ? "ASC" : "DESC";
-            if (!term.Column.IsNullable)
-                return RenderNonNullableOrder(expression, term.Direction);
-            var directNullRank = term.NullOrder == NullOrder.First ? "0" : "1";
-            var directNonNullRank = term.NullOrder == NullOrder.First ? "1" : "0";
-            return "CASE WHEN " + expression + " IS NULL THEN " + directNullRank + " ELSE " + directNonNullRank + " END ASC, " + expression + " " + directDirection;
-        }
-        var key = RenderOrdinalKey(expression);
+        var key = persistedOrdinalIdentity ? expression : RenderOrdinalKey(expression);
+        var keyTransform = persistedOrdinalIdentity
+            ? ProviderOrderingTransform.PhysicalSearchKey
+            : ProviderOrderingTransform.OrdinalStringKey;
+        var transforms = term.Column.IsNullable
+            ? new[] { ProviderOrderingTransform.NullRank, keyTransform }
+            : new[] { keyTransform };
+        EvidenceOrderTerm(term, transforms);
         var direction = term.Direction == OrderDirection.Ascending ? "ASC" : "DESC";
         if (!term.Column.IsNullable)
             return RenderNonNullableOrder(key, term.Direction);
         var nullRank = term.NullOrder == NullOrder.First ? "0" : "1";
         var nonNullRank = term.NullOrder == NullOrder.First ? "1" : "0";
         return "CASE WHEN " + expression + " IS NULL THEN " + nullRank + " ELSE " + nonNullRank + " END ASC, " + key + " " + direction;
+    }
+
+    private string RenderNonNullableOrderWithEvidence(OrderTerm term)
+    {
+        var native = RenderNonNullableOrder(RenderColumn(term.Column), term.Direction);
+        EvidenceOrderTerm(term, []);
+        return native;
     }
 
     private static string RenderNonNullableOrder(string expression, OrderDirection direction) =>
@@ -211,15 +224,25 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
         var expression = RenderColumn(range.Column);
         var key = RenderOrdinalKey(expression);
         var parts = new List<string> { expression + " IS NOT NULL" };
+        if (range.Lower is null && range.Upper is null)
+            EvidenceUnsupported();
         if (range.Lower is { } lower)
         {
             var name = AddParameter(range.Column, lower.Value, parameters, ref parameterIndex);
             parts.Add(key + (lower.IsInclusive ? " >= " : " > ") + RenderOrdinalKey("@" + name));
+            EvidenceComparisonPredicate(
+                range.Column,
+                ProviderPredicateOperator.LowerBound,
+                lower.IsInclusive ? ProviderPredicateBoundInclusivity.Inclusive : ProviderPredicateBoundInclusivity.Exclusive);
         }
         if (range.Upper is { } upper)
         {
             var name = AddParameter(range.Column, upper.Value, parameters, ref parameterIndex);
             parts.Add(key + (upper.IsInclusive ? " <= " : " < ") + RenderOrdinalKey("@" + name));
+            EvidenceComparisonPredicate(
+                range.Column,
+                ProviderPredicateOperator.UpperBound,
+                upper.IsInclusive ? ProviderPredicateBoundInclusivity.Inclusive : ProviderPredicateBoundInclusivity.Exclusive);
         }
         return "(" + string.Join(" AND ", parts) + ")";
     }

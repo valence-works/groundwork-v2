@@ -188,10 +188,17 @@ internal class MongoStoreSession(
     /// only closes it. The capability exists so a consumer can use one session lifetime model across every
     /// provider rather than special-casing this one.
     /// </summary>
-    public void Dispose() => released = true;
+    public void Dispose()
+    {
+        if (inner is IMongoStructuredEvidenceOwner owner)
+            owner.ThrowIfStructuredObserverReentry();
+        released = true;
+    }
 
     public ValueTask DisposeAsync()
     {
+        if (inner is IMongoStructuredEvidenceOwner owner)
+            owner.ThrowIfStructuredObserverReentry();
         released = true;
         return ValueTask.CompletedTask;
     }
@@ -831,6 +838,8 @@ internal sealed class MongoStoreUnitOfWork : IUnitOfWork
 
     public void Dispose()
     {
+        if (inner is IMongoStructuredEvidenceOwner owner)
+            owner.ThrowIfStructuredObserverReentry();
         if (!terminal && (inner is not IMongoUnitOfWorkState state || state.IsActive))
             Rollback();
         else
@@ -846,6 +855,8 @@ internal sealed class MongoStoreUnitOfWork : IUnitOfWork
 
     private void ThrowIfTerminal()
     {
+        if (inner is IMongoStructuredEvidenceOwner owner)
+            owner.ThrowIfStructuredObserverReentry();
         if (terminal)
             throw new InvalidOperationException("The unit of work is already terminal.");
     }

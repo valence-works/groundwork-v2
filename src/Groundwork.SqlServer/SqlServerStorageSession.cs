@@ -1,8 +1,8 @@
 using System.Data;
 using System.Data.Common;
-using System.Data.SqlTypes;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
+using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using Microsoft.Data.SqlClient;
 using Groundwork.Kernel;
@@ -49,6 +49,9 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
         this.connection = connection;
         this.transaction = transaction;
         this.schemaSession = schemaSession;
+        var evidenceCapture = observer is IProviderExecutionObserver
+            ? new RelationalEvidenceCapture(owner.InvokeStructuredObserver)
+            : null;
         execution = new RelationalSessionExecution(
             access,
             transaction,
@@ -63,7 +66,8 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
             Command,
             new SqlServerPointReadAdapter(),
             observer,
-            "sqlserver");
+            "sqlserver",
+            evidenceCapture);
         crud = new RelationalSessionCrud(
             unit,
             UserColumns,
@@ -85,7 +89,10 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
             FromSqlServer,
             AssertExplainPlan,
             observer,
-            "sqlserver");
+            "sqlserver",
+            evidenceCapture,
+            (command, options, mode, collectEvidence) =>
+                InspectExecutionPlan(command, options, mode, collectEvidence, evidenceCapture));
         aggregations = new RelationalSessionAggregations(
             unit,
             access,
@@ -175,15 +182,141 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
 
     private async ValueTask AssertExplainPlan(RelationalQueryCommand query, QueryRenderOptions options, RelationalExecution mode)
     {
-        if (query.IsMatchNone || !ExplainAssertionMode.ShouldAssert(query.SelectedIndex)) return;
+        var inspection = await InspectExecutionPlan(query, options, mode, collectEvidence: false, capture: null)
+            .ConfigureAwait(false);
+        inspection.Assert?.Invoke();
+    }
+
+    private async ValueTask<RelationalQueryPlanInspection> InspectExecutionPlan(
+        RelationalQueryCommand query,
+        QueryRenderOptions options,
+        RelationalExecution mode,
+        bool collectEvidence,
+        RelationalEvidenceCapture? capture)
+    {
+        var assert = !query.IsMatchNone && ExplainAssertionMode.ShouldAssert(query.SelectedIndex);
+        var collect = collectEvidence && !query.IsMatchNone && query.Statements.Length == 1 && capture is not null;
+        var unavailable = collectEvidence
+            ? new ProviderPlanEvidence(ProviderEvidenceAvailability.Unsupported)
+            : ProviderPlanEvidence.NotRequested;
+        if (!assert && !collect)
+            return new(unavailable);
+
+        SqlServerCatalogWitness? catalog = null;
+        if (collect)
+            catalog = await ReadCatalogWitness(mode).ConfigureAwait(false);
+
         var logicalIndex = query.SelectedIndex!;
-        var physicalIndex = options.ResolvePhysicalIndexName(logicalIndex);
-        using (var enable = Command("SET STATISTICS XML ON"))
-            await mode.ExecuteNonQuery(enable).ConfigureAwait(false);
-        string rawPlan;
+        var physicalIndex = logicalIndex is null ? null : options.ResolvePhysicalIndexName(logicalIndex);
+        var plans = await ReadStatisticsPlans(query, mode).ConfigureAwait(false);
+        var rawPlan = string.Join(Environment.NewLine, plans);
+        var chosen = physicalIndex is null
+            ? (bool?)null
+            : plans.Count == query.Statements.Length &&
+              plans.All(plan => SqlServerExplainPlanInspector.ChoseIndex(plan, physicalIndex));
+
+        var logicalIndexesByPhysical = new Dictionary<string, string>(StringComparer.Ordinal);
+        var ambiguousLogicalIndex = false;
+        foreach (var mapping in options.PhysicalIndexNames)
+        {
+            if (logicalIndexesByPhysical.TryGetValue(mapping.Value, out var existing) &&
+                !string.Equals(existing, mapping.Key, StringComparison.Ordinal))
+            {
+                ambiguousLogicalIndex = true;
+                break;
+            }
+            logicalIndexesByPhysical[mapping.Value] = mapping.Key;
+        }
+
+        var forest = collect && plans.Count == 1 && catalog is not null && !ambiguousLogicalIndex
+            ? SqlServerNativePlanMapper.Map(
+                plans[0],
+                catalog.Database,
+                catalog.Schema,
+                catalog.Target,
+                capture!.Target(Unit, ProviderScopeBindingMode.Unknown).PhysicalTargetId,
+                capture.Index,
+                logicalIndexesByPhysical,
+                catalog.Indexes)
+            : null;
+        // Structured choice is a consequence of a complete mapped tree, never a loose text match.
+        bool? structuredChosen = forest is null || physicalIndex is null
+            ? null
+            : forest.Nodes.Any(node => node.IndexId == capture!.Index(physicalIndex));
+        var evidence = !collect
+            ? unavailable
+            : structuredChosen is null && forest is null
+                ? new ProviderPlanEvidence(
+                    ProviderEvidenceAvailability.Unsupported,
+                    collectionCommandCount: 4)
+                : new ProviderPlanEvidence(
+                    ProviderEvidenceAvailability.Collected,
+                    ProviderPlanProvenance.ExplainReplay,
+                    choseExpectedIndex: structuredChosen,
+                    expectedLogicalIndex: structuredChosen is null ? null : logicalIndex,
+                    chosenPhysicalIndexId: structuredChosen == true ? capture!.Index(physicalIndex!) : null,
+                    collectionCommandCount: 4,
+                    winningPlan: forest);
+
+        return new(
+            evidence,
+            assert
+                ? () => ExplainAssertionMode.AssertChosenIndex(
+                    "SQL Server",
+                    logicalIndex!,
+                    physicalIndex!,
+                    query.IndexHintApplied,
+                    rawPlan,
+                    chosen == true)
+                : null);
+    }
+
+    private async ValueTask<SqlServerCatalogWitness?> ReadCatalogWitness(RelationalExecution mode)
+    {
+        using var command = Command(
+            "SELECT DB_NAME(), s.name, t.name, i.name " +
+            "FROM sys.tables AS t " +
+            "JOIN sys.schemas AS s ON s.schema_id = t.schema_id " +
+            "LEFT JOIN sys.indexes AS i ON i.object_id = t.object_id " +
+            "AND i.index_id > 0 AND i.is_disabled = 0 AND i.is_hypothetical = 0 " +
+            "WHERE s.name = @schema AND t.name = @table;");
+        command.Parameters.Add("@schema", SqlDbType.NVarChar, 128).Value = "dbo";
+        command.Parameters.Add("@table", SqlDbType.NVarChar, 128).Value = Unit.Name;
+        await using var readerScope = await mode.ExecuteReader(command).ConfigureAwait(false);
+        var reader = readerScope.Reader;
+        string? database = null;
+        string? schema = null;
+        string? target = null;
+        var indexes = new HashSet<string>(StringComparer.Ordinal);
+        while (await mode.Read(reader).ConfigureAwait(false))
+        {
+            database ??= reader.IsDBNull(0) ? null : reader.GetString(0);
+            schema ??= reader.IsDBNull(1) ? null : reader.GetString(1);
+            target ??= reader.IsDBNull(2) ? null : reader.GetString(2);
+            if (!reader.IsDBNull(3))
+                indexes.Add(reader.GetString(3));
+        }
+
+        return database is null || schema is null || target is null
+            ? null
+            : new(database, schema, target, indexes);
+    }
+
+    private async ValueTask<IReadOnlyList<string>> ReadStatisticsPlans(
+        RelationalQueryCommand query,
+        RelationalExecution mode)
+    {
         var plans = new List<string>();
+        var enableAttempted = false;
+        Exception? primary = null;
         try
         {
+            // Set the guard before issuing ON: cancellation or provider failure during ON still
+            // requires a best-effort OFF on the non-cancellable cleanup surface.
+            enableAttempted = true;
+            using (var enable = Command("SET STATISTICS XML ON"))
+                await mode.ExecuteNonQuery(enable).ConfigureAwait(false);
+
             using var explain = Command(query.CommandText);
             RelationalQueryResultReader.AddParameters(explain, query);
             await using var readerScope = await mode.ExecuteReader(explain).ConfigureAwait(false);
@@ -193,31 +326,69 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
                 while (await mode.Read(reader).ConfigureAwait(false))
                 for (var ordinal = 0; ordinal < reader.FieldCount; ordinal++)
                 {
-                    if (!reader.GetName(ordinal).Contains("XML Showplan", StringComparison.OrdinalIgnoreCase) &&
-                        reader.GetFieldType(ordinal) != typeof(SqlXml))
+                    var columnName = reader.GetName(ordinal);
+                    if (!string.Equals(columnName, SqlServerShowplanValueReader.ColumnName,
+                            StringComparison.OrdinalIgnoreCase))
                         continue;
-                    var content = reader.GetValue(ordinal) switch
-                    {
-                        SqlXml xml when !xml.IsNull => xml.Value,
-                        SqlString text when !text.IsNull => text.Value,
-                        string text => text,
-                        _ => null
-                    };
-                    if (!string.IsNullOrWhiteSpace(content)) plans.Add(content);
+                    var content = SqlServerShowplanValueReader.Read(
+                        columnName,
+                        reader.GetValue(ordinal));
+                    if (content is not null)
+                        plans.Add(content);
                 }
-            } while ((await mode.NextResult(reader).ConfigureAwait(false)));
-            rawPlan = string.Join(Environment.NewLine, plans);
+            } while (await mode.NextResult(reader).ConfigureAwait(false));
+        }
+        catch (Exception exception)
+        {
+            primary = exception;
+            throw;
         }
         finally
         {
-            using var disable = Command("SET STATISTICS XML OFF");
-            await mode.ExecuteNonQuery(disable).ConfigureAwait(false);
+            if (enableAttempted)
+            {
+                try
+                {
+                    var cleanupMode = mode.IsAsync
+                        ? RelationalExecution.Asynchronous(CancellationToken.None)
+                        : RelationalExecution.Synchronous;
+                    using var disable = Command("SET STATISTICS XML OFF");
+                    await cleanupMode.ExecuteNonQuery(disable).ConfigureAwait(false);
+                }
+                catch
+                {
+                    RetireUnusableConnection();
+                    if (primary is not null)
+                    {
+                        ExceptionDispatchInfo.Capture(primary).Throw();
+                        throw;
+                    }
+                    throw;
+                }
+            }
         }
-        ExplainAssertionMode.AssertChosenIndex(
-            "SQL Server", logicalIndex, physicalIndex, query.IndexHintApplied, rawPlan,
-            plans.Count == query.Statements.Length &&
-            plans.All(plan => SqlServerExplainPlanInspector.ChoseIndex(plan, physicalIndex)));
+
+        return plans;
     }
+
+    private void RetireUnusableConnection()
+    {
+        execution.Close();
+        try
+        {
+            connection.Close();
+        }
+        catch
+        {
+            // The connection is already unusable; preserve the diagnostic failure instead.
+        }
+    }
+
+    private sealed record SqlServerCatalogWitness(
+        string Database,
+        string Schema,
+        string Target,
+        IReadOnlySet<string> Indexes);
 
     public StoredEntry? Read(StorageKey key) =>
         ReadEntry(key, RelationalExecution.Synchronous).GetAwaiter().GetResult();
@@ -859,6 +1030,7 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
     {
         if (execution.IsReleased)
             return;
+        owner.ThrowIfStructuredObserverReentry();
         execution.Close();
         if (ownsConnection)
             connection.Dispose();
@@ -868,6 +1040,7 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
     {
         if (execution.IsReleased)
             return;
+        owner.ThrowIfStructuredObserverReentry();
         execution.Close();
         if (ownsConnection)
             await connection.DisposeAsync().ConfigureAwait(false);
@@ -1972,6 +2145,15 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
 
     private sealed class SqlServerPointReadAdapter : IRelationalPointReadAdapter
     {
+        public string EvidenceProviderName => "SQL Server";
+
+        public ProviderPointReadLockMode EvidenceLockMode(bool forUpdate) => ProviderPointReadLockMode.None;
+
+        public RelationalPointReadPredicate RenderEquality(StorageUnit unit, ColumnDefinition column,
+            string parameter, bool exactStringKeys, bool collectEvidence) =>
+            RelationalPointReadPredicate.WithKeyBound(Equality(column, parameter, exactStringKeys),
+                unit, column, collectEvidence);
+
         public string QuoteIdentifier(string identifier) => Quote(identifier);
 
         public string Equality(ColumnDefinition column, string parameter, bool exactStringKeys)

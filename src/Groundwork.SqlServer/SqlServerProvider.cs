@@ -33,6 +33,8 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
     };
 
     private readonly SemaphoreSlim gate = new(1, 1);
+    private readonly RelationalStructuredObserverGuard structuredObserverGuard =
+        new("SQL Server");
     private readonly string connectionString;
     private readonly List<SqlConnection> sessionConnections = [];
     private readonly SqlServerSchemaCoordinator schemaCoordinator;
@@ -73,6 +75,7 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
     /// </summary>
     internal IDisposable EnterGate()
     {
+        ThrowIfStructuredObserverReentry();
         gate.Wait();
         return new GateScope(gate);
     }
@@ -82,9 +85,16 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
 
     private async ValueTask<IDisposable> EnterGateAsync(CancellationToken cancellationToken)
     {
+        ThrowIfStructuredObserverReentry();
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         return new GateScope(gate);
     }
+
+    internal void InvokeStructuredObserver(Action callback)
+        => structuredObserverGuard.Invoke(callback);
+
+    internal void ThrowIfStructuredObserverReentry()
+        => structuredObserverGuard.ThrowIfReentry();
 
     private sealed class GateScope(SemaphoreSlim gate) : IDisposable
     {
@@ -224,7 +234,8 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
                         observer);
                     return new RelationalUnitOfWorkSession(session, session.Close);
                 },
-                lifetime);
+                lifetime,
+                ThrowIfStructuredObserverReentry);
         }
         catch
         {
@@ -235,12 +246,14 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
 
     internal void ThrowIfDisposed()
     {
+        ThrowIfStructuredObserverReentry();
         if (disposed)
             throw new ObjectDisposedException(nameof(SqlServerProviderConnection));
     }
 
     public void Dispose()
     {
+        ThrowIfStructuredObserverReentry();
         activeRegistrationObserver?.OnProviderDisposalAttempted();
         using (EnterGate())
         {

@@ -21,6 +21,7 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
     }
 
     protected override string ProviderName => "SQL Server";
+    protected override bool SupportsExecutionEvidence => true;
 
     protected override string RenderCountExpression() => "COUNT_BIG(*) OVER()";
 
@@ -47,13 +48,16 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
     {
         if (string.Equals(column.Name, CrossScopeQueryMaterializer.ScopeTokenColumn, StringComparison.Ordinal))
         {
+            EvidenceUnsupported();
             var scope = Dialect.QuoteIdentifier(SqlServerSchemaCoordinator.ScopeColumn);
             return "CONVERT(varchar(64), HASHBYTES('SHA2_256', CONVERT(varbinary(max), CONVERT(varchar(max), " +
                    scope + " COLLATE Latin1_General_100_BIN2_UTF8))), 2)";
         }
-        return column.Type == QueryType.String
+        var native = column.Type == QueryType.String
             ? base.RenderColumn(column) + " COLLATE Latin1_General_100_BIN2"
             : base.RenderColumn(column);
+        return EvidenceColumn(native, column,
+            column.Type == QueryType.String ? ProviderPredicateComparison.Ordinal : ProviderPredicateComparison.Exact);
     }
 
     protected override bool RequiresExplicitSelection(ColumnRef column) =>
@@ -63,6 +67,7 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
     {
         if (term.Column.Type == QueryType.Guid)
         {
+            EvidenceUnsupported();
             var guidExpression = RenderGuidOrderKey(RenderColumn(term.Column));
             var guidDirection = term.Direction == OrderDirection.Ascending ? "ASC" : "DESC";
             if (!term.Column.IsNullable)
@@ -71,13 +76,25 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
             var guidNonNullRank = term.NullOrder == NullOrder.First ? "1" : "0";
             return "CASE WHEN " + RenderColumn(term.Column) + " IS NULL THEN " + guidNullRank + " ELSE " + guidNonNullRank + " END ASC, " + guidExpression + " " + guidDirection;
         }
-        var rendered = base.RenderOrderTerm(term);
-        if (term.Column.Type != QueryType.String)
-            return rendered;
-        if (IsOrdinalIdentityColumn(term.Column))
-            return rendered;
+        var expression = RenderColumn(term.Column);
+        var identity = IsOrdinalIdentityColumn(term.Column);
+        var transforms = new List<ProviderOrderingTransform>();
+        if (term.Column.IsNullable)
+            transforms.Add(ProviderOrderingTransform.NullRank);
+        if (term.Column.Type == QueryType.String)
+            transforms.Add(identity
+                ? ProviderOrderingTransform.PhysicalSearchKey
+                : ProviderOrderingTransform.OrdinalStringKey);
+        EvidenceOrderTerm(term, transforms);
         var direction = term.Direction == OrderDirection.Ascending ? "ASC" : "DESC";
-        return rendered + ", DATALENGTH(" + RenderColumn(term.Column) + ") " + direction;
+        var rendered = term.Column.IsNullable
+            ? "CASE WHEN " + expression + " IS NULL THEN " +
+              (term.NullOrder == NullOrder.First ? "0" : "1") + " ELSE " +
+              (term.NullOrder == NullOrder.First ? "1" : "0") + " END ASC, " + expression + " " + direction
+            : expression + " " + direction;
+        return term.Column.Type == QueryType.String && !identity
+            ? rendered + ", DATALENGTH(" + expression + ") " + direction
+            : rendered;
     }
 
     protected override string RenderDistinctPartition(ColumnRef column)
@@ -98,8 +115,12 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
             return base.RenderEquality(column, value, parameters, ref parameterIndex);
         var expression = RenderColumn(column);
         if (value.Kind == QueryConstantKind.Null)
+        {
+            EvidenceUnsupported();
             return expression + " IS NULL";
+        }
         var parameter = AddParameter(column, value, parameters, ref parameterIndex);
+        EvidenceComparisonPredicate(column, ProviderPredicateOperator.Equal);
         return "(" + expression + " IS NOT NULL AND DATALENGTH(" + expression + ") = DATALENGTH(@" + parameter + ") AND " + expression + " = @" + parameter + ")";
     }
 
@@ -134,6 +155,7 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
     {
         if (range.Column.Type == QueryType.Guid)
         {
+            EvidenceUnsupported();
             var guidExpression = RenderColumn(range.Column);
             var guidKey = RenderGuidOrderKey(guidExpression);
             var guidParts = new List<string> { guidExpression + " IS NOT NULL" };
@@ -153,14 +175,31 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
             return base.RenderRange(range, parameters, ref parameterIndex);
 
         if (range.Column.Name.StartsWith(SearchKeyProjection.Prefix, StringComparison.Ordinal))
+        {
+            EvidenceUnsupported();
             return RenderSearchKeyRange(range, parameters, ref parameterIndex);
+        }
 
         var expression = RenderColumn(range.Column);
         var parts = new List<string> { expression + " IS NOT NULL" };
+        if (range.Lower is null && range.Upper is null)
+            EvidenceUnsupported();
         if (range.Lower is { } lower)
+        {
             parts.Add(RenderStringBound(expression, range.Column, lower, isLower: true, parameters, ref parameterIndex));
+            EvidenceComparisonPredicate(
+                range.Column,
+                ProviderPredicateOperator.LowerBound,
+                lower.IsInclusive ? ProviderPredicateBoundInclusivity.Inclusive : ProviderPredicateBoundInclusivity.Exclusive);
+        }
         if (range.Upper is { } upper)
+        {
             parts.Add(RenderStringBound(expression, range.Column, upper, isLower: false, parameters, ref parameterIndex));
+            EvidenceComparisonPredicate(
+                range.Column,
+                ProviderPredicateOperator.UpperBound,
+                upper.IsInclusive ? ProviderPredicateBoundInclusivity.Inclusive : ProviderPredicateBoundInclusivity.Exclusive);
+        }
         return "(" + string.Join(" AND ", parts) + ")";
     }
 
@@ -361,6 +400,8 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
     {
         if (paging.Offset is null && paging.Limit is null)
             return string.Empty;
+
+        EvidencePaging(paging.Offset ?? 0, paging.Limit);
 
         var offset = paging.Offset is int suppliedOffset
             ? AddPagingParameter(parameters, ref parameterIndex, suppliedOffset)

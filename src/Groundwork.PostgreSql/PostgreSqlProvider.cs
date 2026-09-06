@@ -47,12 +47,15 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
     /// core directly rather than through a funnel.
     /// </remarks>
     private readonly SemaphoreSlim gate = new(1, 1);
+    private readonly RelationalStructuredObserverGuard structuredObserverGuard =
+        new("PostgreSQL");
     private readonly object connectionRegistryGate = new();
 
     private readonly ConcurrentDictionary<StorageUnitId, StorageUnit> units = new();
 
     internal IDisposable EnterGate()
     {
+        ThrowIfStructuredObserverReentry();
         gate.Wait();
         return new GateScope(gate);
     }
@@ -62,9 +65,16 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
 
     private async ValueTask<IDisposable> EnterGateAsync(CancellationToken cancellationToken)
     {
+        ThrowIfStructuredObserverReentry();
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         return new GateScope(gate);
     }
+
+    internal void InvokeStructuredObserver(Action callback)
+        => structuredObserverGuard.Invoke(callback);
+
+    internal void ThrowIfStructuredObserverReentry()
+        => structuredObserverGuard.ThrowIfReentry();
 
     private sealed class GateScope(SemaphoreSlim gate) : IDisposable
     {
@@ -231,7 +241,8 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
                         observer);
                     return new RelationalUnitOfWorkSession(session, session.Close);
                 },
-                lifetime);
+                lifetime,
+                ThrowIfStructuredObserverReentry);
         }
         catch
         {
@@ -292,12 +303,14 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
 
     internal void ThrowIfDisposed()
     {
+        ThrowIfStructuredObserverReentry();
         if (disposed)
             throw new ObjectDisposedException(nameof(PostgreSqlProviderConnection));
     }
 
     public void Dispose()
     {
+        ThrowIfStructuredObserverReentry();
         activeRegistrationObserver?.OnProviderDisposalAttempted();
         List<NpgsqlConnection> connections = [];
         lock (connectionRegistryGate)

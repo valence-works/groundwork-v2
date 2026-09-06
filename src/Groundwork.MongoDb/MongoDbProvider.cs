@@ -2,6 +2,7 @@ using System.Collections;
 using System.Collections.ObjectModel;
 using System.Collections.Immutable;
 using System.Globalization;
+using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -56,6 +57,8 @@ public sealed class MongoDbProviderConnection : IMongoProviderConnection
     internal static IReadOnlyList<CapabilityDescriptor> ConstraintCapabilities { get; } =
         Array.Empty<CapabilityDescriptor>();
     private readonly MongoProviderState state;
+    private MongoStructuredEvidenceOwnerRegistry? evidenceOwners;
+    private int evidenceInitializationDepth;
     private bool disposed;
 
     internal MongoDbProviderConnection(MongoClientContext context)
@@ -97,7 +100,20 @@ public sealed class MongoDbProviderConnection : IMongoProviderConnection
             : MongoSchemaCoordinator.EnsureAdmission(state, applied, access);
         if (!access.IsPrivilegedAcrossScopes)
             state.RegisterScope(applied, access);
-        return new MongoStorageSession(state, applied, access, collection, null, observer: observer);
+        if (observer is not IProviderExecutionObserver)
+            return new MongoStorageSession(state, applied, access, collection, null, observer: observer);
+
+        evidenceInitializationDepth++;
+        try
+        {
+            var session = new MongoStorageSession(state, applied, access, collection, null, observer: observer);
+            RegisterEvidenceOwner(observer, session);
+            return session;
+        }
+        finally
+        {
+            evidenceInitializationDepth--;
+        }
     }
 
     public IMongoUnitOfWork BeginUnitOfWork(MongoStorageAccess access, params StorageUnit[] units)
@@ -124,11 +140,14 @@ public sealed class MongoDbProviderConnection : IMongoProviderConnection
             .ToArray();
         foreach (var unit in applied)
             state.RegisterScope(unit, access);
-        return new MongoUnitOfWork(state, applied, collections, access, observer);
+        var unitOfWork = new MongoUnitOfWork(state, applied, collections, access, observer);
+        RegisterEvidenceOwner(observer, unitOfWork);
+        return unitOfWork;
     }
 
     public void Dispose()
     {
+        EnsureEvidenceNotReentered();
         if (disposed)
             return;
         disposed = true;
@@ -137,8 +156,34 @@ public sealed class MongoDbProviderConnection : IMongoProviderConnection
 
     private void ThrowIfDisposed()
     {
+        EnsureEvidenceNotReentered();
         if (disposed)
             throw new ObjectDisposedException(nameof(MongoDbProviderConnection));
+    }
+
+    private void RegisterEvidenceOwner(
+        IProviderCommandObserver? observer,
+        IMongoStructuredEvidenceOwner owner)
+    {
+        if (observer is not IProviderExecutionObserver)
+            return;
+
+        var registry = Volatile.Read(ref evidenceOwners);
+        if (registry is null)
+        {
+            var created = new MongoStructuredEvidenceOwnerRegistry();
+            registry = Interlocked.CompareExchange(ref evidenceOwners, created, null) ?? created;
+        }
+
+        registry.RegisterIfStructured(observer, owner);
+    }
+
+    private void EnsureEvidenceNotReentered()
+    {
+        if (evidenceInitializationDepth != 0)
+            throw new InvalidOperationException(
+                "A MongoDB structured execution observer cannot re-enter its owning provider connection while evidence capability is being initialized.");
+        Volatile.Read(ref evidenceOwners)?.EnsureNotReentered();
     }
 }
 
@@ -911,7 +956,7 @@ internal interface IMongoSchemaBoundSession
     void EnsureSchemaCurrent();
 }
 
-internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongoCompareAndDeleteStorageSession, IMongoExactAppendStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IExactRetentionAffectedKeysStorageSession, ISetMutationStorageSession, IMongoSchemaBoundSession
+internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongoCompareAndDeleteStorageSession, IMongoExactAppendStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IExactRetentionAffectedKeysStorageSession, ISetMutationStorageSession, IMongoSchemaBoundSession, IMongoStructuredEvidenceOwner
 {
     private const string HighWaterValue = "high_water";
     private readonly MongoProviderState state;
@@ -920,6 +965,8 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
     private readonly IClientSessionHandle? transactionSession;
     private readonly MongoUnitOfWork? unitOfWork;
     private readonly SchemaSessionLease schemaSession;
+    private readonly MongoExecutionEvidenceCapture? evidenceCapture;
+    private int evidenceInitializationDepth;
     private bool disposed;
 
     // A wrapper-owned transaction must let transient failures escape so the wrapper can
@@ -936,7 +983,8 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         IMongoCollection<BsonDocument> collection,
         IClientSessionHandle? transactionSession,
         MongoUnitOfWork? unitOfWork = null,
-        IProviderCommandObserver? observer = null)
+        IProviderCommandObserver? observer = null,
+        MongoExecutionEvidenceCapture? evidenceCapture = null)
     {
         commandObserver = observer;
         this.state = state;
@@ -947,6 +995,20 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         schemaSession = state.CaptureSchemaSession(applied);
         Access = access;
         Unit = MongoDeclarationSnapshot.Clone(applied.Declaration);
+        if (evidenceCapture is not null)
+            this.evidenceCapture = evidenceCapture;
+        else if (observer is IProviderExecutionObserver structured)
+        {
+            evidenceInitializationDepth++;
+            try
+            {
+                this.evidenceCapture = new MongoExecutionEvidenceCapture(structured, Unit, Access);
+            }
+            finally
+            {
+                evidenceInitializationDepth--;
+            }
+        }
     }
 
     /// <summary>
@@ -976,6 +1038,8 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
     {
         ArgumentNullException.ThrowIfNull(request);
         ThrowIfDisposed();
+        if (mode.IsAsync && mode.CancellationToken.IsCancellationRequested)
+            mode.CancellationToken.ThrowIfCancellationRequested();
         if (Access.IsPrivilegedAcrossScopes)
             throw new InvalidOperationException(
                 "GW-ACCESS-004: privileged cross-scope sessions must use QueryAcrossScopes so every row retains its scope.");
@@ -1012,14 +1076,61 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         var reduction = executionSource.Result as ResultShape.Reduction;
         var reductionColumn = reduction is null ? null : ResolveReductionColumn(reduction, targetApplied);
         var renderer = new MongoQueryRenderer();
-        var command = targetApplied is null
-            ? renderer.Render(executionRequest, renderOptions, collection.CollectionNamespace.CollectionName)
-            : renderer.Render(
+        var hasLookahead = request.Result is ResultShape.Rows &&
+            request.Paging.Limit is int requestedLimit &&
+            executionRequest.Paging.Limit is int emittedLimit &&
+            emittedLimit > requestedLimit;
+        MongoQueryCommand command;
+        MongoQueryEmission? emission = null;
+        if (targetApplied is null)
+        {
+            if (evidenceCapture is null)
+                command = renderer.Render(executionRequest, renderOptions, collection.CollectionNamespace.CollectionName);
+            else
+            {
+                var emitted = renderer.RenderWithEvidence(
+                    executionRequest,
+                    renderOptions,
+                    collection.CollectionNamespace.CollectionName,
+                    evidenceCapture,
+                    hasLookahead);
+                emission = emitted;
+                command = emitted.Command;
+            }
+        }
+        else if (evidenceCapture is null)
+        {
+            command = renderer.Render(
                 executionRequest,
                 renderOptions,
                 collection.CollectionNamespace.CollectionName,
                 MongoSchemaCoordinator.CollectionName(targetApplied, Access));
+        }
+        else
+        {
+            var emitted = renderer.RenderWithEvidence(
+                executionRequest,
+                renderOptions,
+                collection.CollectionNamespace.CollectionName,
+                evidenceCapture,
+                hasLookahead,
+                MongoSchemaCoordinator.CollectionName(targetApplied, Access));
+            emission = emitted;
+            command = emitted.Command;
+        }
+        var structuredShape = emission?.StructuredShape;
+        var legacyAssertionRequested = !command.IsMatchNone &&
+            ExplainAssertionMode.ShouldAssert(command.ExpectedIndex);
+        var deferObserverFailure = evidenceCapture is not null &&
+            transactionSession is not null &&
+            legacyAssertionRequested;
+        ExceptionDispatchInfo? deferredObserverFailure = null;
+        Action<ExceptionDispatchInfo>? observerFailureSink = deferObserverFailure
+            ? failure => deferredObserverFailure ??= failure
+            : null;
         commandObserver?.Observe(new ProviderCommandEvent("mongodb.query", "MongoDB.Aggregate(page)", ProviderCommandKind.Read, IsProbe: false));
+        var invocation = evidenceCapture?.BeginInvocation();
+        var deferSuccess = evidenceCapture is not null && transactionSession is null;
         List<BsonDocument> documents;
         long? facetTotalCount = null;
         if (command.Pipeline.Length != 0)
@@ -1036,16 +1147,34 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 var union = command.Pipeline[unionIndex]["$unionWith"].AsBsonDocument;
                 var countPipeline = PipelineDefinition<BsonDocument, BsonDocument>.Create(
                     union["pipeline"].AsBsonArray.Select(value => value.AsBsonDocument).ToArray());
-                documents = await mode.Aggregate(collection, transactionSession, dataPipeline,
-                    new AggregateOptions { Hint = command.Hint }).ConfigureAwait(false);
-                documents.AddRange(await mode.Aggregate(collection, transactionSession, countPipeline,
-                    new AggregateOptions { Hint = command.Hint }).ConfigureAwait(false));
+                documents = await ExecuteObservedQuery(
+                    invocation,
+                    structuredShape,
+                    0,
+                    deferSuccess,
+                    observerFailureSink,
+                    () => mode.Aggregate(collection, transactionSession, dataPipeline,
+                        new AggregateOptions { Hint = command.Hint })).ConfigureAwait(false);
+                documents.AddRange(await ExecuteObservedQuery(
+                    invocation,
+                    null,
+                    1,
+                    false,
+                    observerFailureSink,
+                    () => mode.Aggregate(collection, transactionSession, countPipeline,
+                        new AggregateOptions { Hint = command.Hint })).ConfigureAwait(false));
             }
             else
             {
                 var pipeline = PipelineDefinition<BsonDocument, BsonDocument>.Create(command.Pipeline);
-                documents = await mode.Aggregate(collection, transactionSession, pipeline,
-                    new AggregateOptions { Hint = command.Hint }).ConfigureAwait(false);
+                documents = await ExecuteObservedQuery(
+                    invocation,
+                    structuredShape,
+                    0,
+                    deferSuccess,
+                    observerFailureSink,
+                    () => mode.Aggregate(collection, transactionSession, pipeline,
+                        new AggregateOptions { Hint = command.Hint })).ConfigureAwait(false);
             }
             if (command.IncludesTotalCount && documents.Count == 1 && documents[0].Contains("metadata") && documents[0].Contains("data"))
             {
@@ -1065,8 +1194,25 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 Limit = command.Limit,
                 Hint = command.Hint
             };
-            documents = await mode.Find(collection, transactionSession, command.Filter, findOptions)
-                .ConfigureAwait(false);
+            documents = await ExecuteObservedQuery(
+                invocation,
+                structuredShape,
+                0,
+                deferSuccess,
+                observerFailureSink,
+                () => mode.Find(collection, transactionSession, command.Filter, findOptions)).ConfigureAwait(false);
+        }
+
+        var planCollection = MongoNativePlanCollectionResult.NotRequested;
+        if (deferSuccess && evidenceCapture is not null && invocation is { } deferredInvocation)
+        {
+            planCollection = await CollectNativePlan(command, renderOptions, mode).ConfigureAwait(false);
+            MongoExecutionEvidenceCompletion.PublishSuccessfulQuery(
+                evidenceCapture,
+                deferredInvocation,
+                commandOrdinal: 0,
+                boundedQuery: structuredShape,
+                planCollection: planCollection);
         }
 
         var rows = documents.Select(document =>
@@ -1161,7 +1307,24 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 }
             ];
         }
-        await AssertExplainPlan(command, renderOptions, mode).ConfigureAwait(false);
+        if (evidenceCapture is null)
+            await AssertExplainPlan(command, renderOptions, mode).ConfigureAwait(false);
+        else if (transactionSession is not null && legacyAssertionRequested)
+        {
+            ExceptionDispatchInfo? legacyAssertionFailure = null;
+            try
+            {
+                await AssertExplainPlan(command, renderOptions, mode).ConfigureAwait(false);
+            }
+            catch (Exception failure)
+            {
+                legacyAssertionFailure = ExceptionDispatchInfo.Capture(failure);
+            }
+
+            MongoExecutionEvidenceCompletion.ThrowPendingDiagnostic(
+                legacyAssertionFailure,
+                deferredObserverFailure);
+        }
         return QueryResultMaterializer.Materialize(
             executionSource,
             renderOptions,
@@ -1171,6 +1334,93 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             sourceIncludesRequestedOffset: true,
             sourceIncludesContinuation: true,
             sourceIncludesDistinct: true);
+    }
+
+    private async ValueTask<List<BsonDocument>> ExecuteObservedQuery(
+        MongoExecutionEvidenceInvocation? invocation,
+        ProviderBoundedQueryEvidence? shape,
+        int commandOrdinal,
+        bool deferSuccess,
+        Action<ExceptionDispatchInfo>? observerFailureSink,
+        Func<ValueTask<List<BsonDocument>>> execute)
+    {
+        ArgumentNullException.ThrowIfNull(execute);
+        if (evidenceCapture is null || invocation is not { } current)
+            return await execute().ConfigureAwait(false);
+
+        List<BsonDocument> result;
+        try
+        {
+            result = await execute().ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            try
+            {
+                evidenceCapture.Publish(
+                    current,
+                    commandOrdinal,
+                    ProviderExecutionOperation.BoundedQuery,
+                    ProviderExecutionRole.Statement,
+                    ProviderCommandKind.Read,
+                    ProviderExecutionOutcome.Cancelled,
+                    ProviderExecutionFailureCategory.Cancellation,
+                    boundedQuery: shape,
+                    pointRead: null);
+            }
+            catch
+            {
+                // The original cancellation is authoritative even if an observer fails.
+            }
+            throw;
+        }
+        catch (Exception)
+        {
+            try
+            {
+                evidenceCapture.Publish(
+                    current,
+                    commandOrdinal,
+                    ProviderExecutionOperation.BoundedQuery,
+                    ProviderExecutionRole.Statement,
+                    ProviderCommandKind.Read,
+                    ProviderExecutionOutcome.Failed,
+                    ProviderExecutionFailureCategory.Provider,
+                    boundedQuery: shape,
+                    pointRead: null);
+            }
+            catch
+            {
+                // The provider failure is authoritative even if an observer fails.
+            }
+            throw;
+        }
+
+        // Publish only after the provider operation has completed. Non-transactional
+        // structured queries defer this terminal callback until their optional explain replay
+        // has been collected; transactional split commands have no explain path and publish
+        // here. An observer failure on success never becomes a synthetic provider failure.
+        if (!deferSuccess)
+        {
+            try
+            {
+                evidenceCapture.Publish(
+                    current,
+                    commandOrdinal,
+                    ProviderExecutionOperation.BoundedQuery,
+                    ProviderExecutionRole.Statement,
+                    ProviderCommandKind.Read,
+                    ProviderExecutionOutcome.Succeeded,
+                    failureCategory: null,
+                    boundedQuery: shape,
+                    pointRead: null);
+            }
+            catch (Exception failure) when (observerFailureSink is not null)
+            {
+                observerFailureSink(ExceptionDispatchInfo.Capture(failure));
+            }
+        }
+        return result;
     }
 
     private ColumnDefinition ResolveReductionColumn(
@@ -1396,46 +1646,98 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         return ExecuteNativeAggregation(profile, query, mode);
     }
 
+    private async ValueTask<MongoNativePlanCollectionResult> CollectNativePlan(
+        MongoQueryCommand query,
+        QueryRenderOptions options,
+        MongoExecution mode)
+    {
+        var collectStructured = evidenceCapture?.Options.CollectNativePlans == true;
+        var assertLegacy = !query.IsMatchNone && ExplainAssertionMode.ShouldAssert(query.ExpectedIndex);
+        if (!collectStructured && !assertLegacy)
+            return MongoNativePlanCollectionResult.NotRequested;
+        if (transactionSession is not null)
+            return MongoNativePlanCollectionResult.Unsupported;
+
+        var explainCommand = MongoNativeExplainCommand.Build(
+            query,
+            collection.CollectionNamespace.CollectionName);
+        BsonDocument explain;
+        try
+        {
+            explain = await mode.Run(
+                token => state.Context.Database.RunCommandAsync(
+                    new BsonDocumentCommand<BsonDocument>(explainCommand),
+                    cancellationToken: token),
+                () => state.Context.Database.RunCommand(
+                    new BsonDocumentCommand<BsonDocument>(explainCommand)))
+                .ConfigureAwait(false);
+        }
+        catch (Exception failure)
+        {
+            return collectStructured
+                ? MongoNativePlanCollectionResult.Failed(failure, assertLegacy)
+                : assertLegacy
+                    ? MongoNativePlanCollectionResult.LegacyFailure(failure)
+                    : MongoNativePlanCollectionResult.NotRequested;
+        }
+
+        if (collectStructured)
+        {
+            try
+            {
+                return MongoNativePlanCollectionResult.FromExplain(
+                    explain,
+                    evidenceCapture!,
+                    query,
+                    collection.CollectionNamespace.FullName,
+                    options,
+                    assertLegacy);
+            }
+            catch (Exception failure)
+            {
+                // A plan-only interpretation failure must not turn an already successful
+                // provider read into a failed read or suppress its terminal callback.
+                return MongoNativePlanCollectionResult.Failed(failure, assertLegacy);
+            }
+        }
+
+        var logicalIndex = query.ExpectedIndex!;
+        var physicalIndex = options.ResolvePhysicalIndexName(logicalIndex);
+        return MongoNativePlanCollectionResult.LegacyOnly(
+            logicalIndex,
+            physicalIndex,
+            query.Hint is not null,
+            explain.ToJson(new JsonWriterSettings { Indent = true }),
+            MongoExplainPlanInspector.ChoseIndex(explain, physicalIndex));
+    }
+
     private async ValueTask AssertExplainPlan(MongoQueryCommand query, QueryRenderOptions options, MongoExecution mode)
     {
-        var logicalIndex = query.ExpectedIndex;
-        if (query.IsMatchNone || !ExplainAssertionMode.ShouldAssert(logicalIndex)) return;
+        if (query.IsMatchNone || !ExplainAssertionMode.ShouldAssert(query.ExpectedIndex))
+            return;
         if (transactionSession is not null)
             throw new InvalidOperationException(
                 "MongoDB explain-assert cannot run inside a transaction; execute the differential query outside a unit of work.");
 
-        var native = query.Pipeline.Length == 0
-            ? new BsonDocument
-            {
-                { "find", collection.CollectionNamespace.CollectionName },
-                { "filter", query.Filter },
-                { "sort", query.Sort, query.Sort.ElementCount != 0 },
-                { "projection", query.Projection, query.Projection.ElementCount != 0 },
-                { "skip", query.Skip.GetValueOrDefault(), query.Skip.HasValue },
-                { "limit", query.Limit.GetValueOrDefault(), query.Limit.HasValue },
-                { "hint", query.Hint ?? string.Empty, query.Hint is not null }
-            }
-            : new BsonDocument
-            {
-                { "aggregate", collection.CollectionNamespace.CollectionName },
-                { "pipeline", new BsonArray(query.Pipeline) },
-                { "cursor", new BsonDocument() },
-                { "hint", query.Hint ?? string.Empty, query.Hint is not null }
-            };
-        var explainCommand = new BsonDocument
-        {
-            { "explain", native },
-            { "verbosity", "executionStats" }
-        };
         var explain = await mode.Run(
-            token => state.Context.Database.RunCommandAsync(new BsonDocumentCommand<BsonDocument>(explainCommand), cancellationToken: token),
-            () => state.Context.Database.RunCommand(new BsonDocumentCommand<BsonDocument>(explainCommand)))
+            token => state.Context.Database.RunCommandAsync(
+                new BsonDocumentCommand<BsonDocument>(MongoNativeExplainCommand.Build(
+                    query,
+                    collection.CollectionNamespace.CollectionName)),
+                cancellationToken: token),
+            () => state.Context.Database.RunCommand(
+                new BsonDocumentCommand<BsonDocument>(MongoNativeExplainCommand.Build(
+                    query,
+                    collection.CollectionNamespace.CollectionName))))
             .ConfigureAwait(false);
-        var rawPlan = explain.ToJson(new JsonWriterSettings { Indent = true });
-        var physicalIndex = options.ResolvePhysicalIndexName(logicalIndex!);
+        var logicalIndex = query.ExpectedIndex!;
         ExplainAssertionMode.AssertChosenIndex(
-            "MongoDB", logicalIndex!, physicalIndex, query.Hint is not null, rawPlan,
-            MongoExplainPlanInspector.ChoseIndex(explain, physicalIndex));
+            "MongoDB",
+            logicalIndex,
+            options.ResolvePhysicalIndexName(logicalIndex),
+            query.Hint is not null,
+            explain.ToJson(new JsonWriterSettings { Indent = true }),
+            MongoExplainPlanInspector.ChoseIndex(explain, options.ResolvePhysicalIndexName(logicalIndex)));
     }
 
     private ColumnRef? QueryColumn(string name)
@@ -1483,6 +1785,8 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         RefusePrivilegedOperation("read");
         ArgumentNullException.ThrowIfNull(key);
         ThrowIfDisposed();
+        if (mode.IsAsync && mode.CancellationToken.IsCancellationRequested)
+            mode.CancellationToken.ThrowIfCancellationRequested();
         var identity = MongoDocumentMapper.EncodeKey(Unit, key.Values);
         var document = await FindOne(identity, mode, "mongodb.read", isProbe: false).ConfigureAwait(false);
         return document is null
@@ -2648,7 +2952,19 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         ? null
         : new WriteOptions { Precondition = options.Precondition };
 
-    internal void Close() => disposed = true;
+    internal void Close()
+    {
+        ThrowIfStructuredObserverReentry();
+        disposed = true;
+    }
+
+    public void ThrowIfStructuredObserverReentry()
+    {
+        if (evidenceInitializationDepth != 0)
+            throw new InvalidOperationException(
+                "A MongoDB structured execution observer cannot re-enter its owning session while evidence capability is being initialized.");
+        evidenceCapture?.ThrowIfCallbackReentry();
+    }
 
     private async ValueTask<MongoWriteOutcome> Mutate(
         MongoStorageValues values,
@@ -3426,7 +3742,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             });
     }
 
-    private ValueTask<BsonDocument?> FindOne(
+    private async ValueTask<BsonDocument?> FindOne(
         BsonValue identity,
         MongoExecution mode,
         string operation = "mongodb.write-probe",
@@ -3439,9 +3755,88 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 : "MongoDB.FindOne";
             commandObserver.Observe(new ProviderCommandEvent(operation, commandText, ProviderCommandKind.Read, IsProbe: isProbe));
         }
-        return mode.FirstOrDefault(transactionSession is null
-            ? collection.Find(new BsonDocument("_id", identity))
-            : collection.Find(transactionSession, new BsonDocument("_id", identity)))!;
+        var isPointRead = evidenceCapture is not null && operation == "mongodb.read" && !isProbe;
+        if (!isPointRead)
+            return await mode.FirstOrDefault(transactionSession is null
+                ? collection.Find(new BsonDocument("_id", identity))
+                : collection.Find(transactionSession, new BsonDocument("_id", identity))).ConfigureAwait(false);
+
+        var invocation = evidenceCapture!.BeginInvocation();
+        ProviderPointReadEvidence? shape = null;
+        try
+        {
+            shape = MongoExecutionEvidenceBuilder.CreatePointRead(Unit, evidenceCapture);
+        }
+        catch (InvalidOperationException)
+        {
+            // A key whose portable type has no kernel QueryType remains an actual read, but its
+            // structured shape is withheld rather than being reconstructed from BSON.
+        }
+
+        BsonDocument? result;
+        try
+        {
+            result = await mode.FirstOrDefault(transactionSession is null
+                ? collection.Find(new BsonDocument("_id", identity))
+                : collection.Find(transactionSession, new BsonDocument("_id", identity))).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            try
+            {
+                evidenceCapture.Publish(
+                    invocation,
+                    0,
+                    ProviderExecutionOperation.PointRead,
+                    ProviderExecutionRole.Statement,
+                    ProviderCommandKind.Read,
+                    ProviderExecutionOutcome.Cancelled,
+                    ProviderExecutionFailureCategory.Cancellation,
+                    boundedQuery: null,
+                    pointRead: shape);
+            }
+            catch
+            {
+                // The original cancellation remains authoritative.
+            }
+            throw;
+        }
+        catch (Exception)
+        {
+            try
+            {
+                evidenceCapture.Publish(
+                    invocation,
+                    0,
+                    ProviderExecutionOperation.PointRead,
+                    ProviderExecutionRole.Statement,
+                    ProviderCommandKind.Read,
+                    ProviderExecutionOutcome.Failed,
+                    ProviderExecutionFailureCategory.Provider,
+                    boundedQuery: null,
+                    pointRead: shape);
+            }
+            catch
+            {
+                // The original provider failure remains authoritative.
+            }
+            throw;
+        }
+
+        // Keep observer failures separate from provider outcomes. The provider operation has
+        // succeeded at this point, so a callback exception must escape without a synthetic
+        // failed terminal event.
+        evidenceCapture.Publish(
+            invocation,
+            0,
+            ProviderExecutionOperation.PointRead,
+            ProviderExecutionRole.Statement,
+            ProviderCommandKind.Read,
+            ProviderExecutionOutcome.Succeeded,
+            failureCategory: null,
+            boundedQuery: null,
+            pointRead: shape);
+        return result;
     }
 
     private string PointReadCommandText(BsonValue identity)
@@ -3578,7 +3973,14 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 token => state.Context.StartSessionAsync(cancellationToken: token),
                 () => state.Context.StartSession()).ConfigureAwait(false);
             session.StartTransaction();
-            var transactional = new MongoStorageSession(state, applied, Access, collection, session, observer: commandObserver);
+            var transactional = new MongoStorageSession(
+                state,
+                applied,
+                Access,
+                collection,
+                session,
+                observer: commandObserver,
+                evidenceCapture: evidenceCapture);
             var operationCompleted = false;
             try
             {
@@ -3663,6 +4065,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
 
     private void ThrowIfDisposed()
     {
+        ThrowIfStructuredObserverReentry();
         if (disposed)
             throw new ObjectDisposedException(nameof(MongoStorageSession));
         schemaSession.EnsureCurrent();
@@ -3680,7 +4083,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
     }
 }
 
-internal sealed class MongoUnitOfWork : IMongoUnitOfWork, IMongoUnitOfWorkState
+internal sealed class MongoUnitOfWork : IMongoUnitOfWork, IMongoUnitOfWorkState, IMongoStructuredEvidenceOwner
 {
     private readonly IProviderCommandObserver? commandObserver;
     private readonly MongoProviderState state;
@@ -3688,6 +4091,7 @@ internal sealed class MongoUnitOfWork : IMongoUnitOfWork, IMongoUnitOfWorkState
     private readonly MongoStorageAccess access;
     private readonly IClientSessionHandle session;
     private readonly List<MongoStorageSession> sessions = [];
+    private int evidenceInitializationDepth;
     private bool terminal;
 
     internal MongoUnitOfWork(
@@ -3714,9 +4118,33 @@ internal sealed class MongoUnitOfWork : IMongoUnitOfWork, IMongoUnitOfWorkState
         ThrowIfTerminal();
         if (!units.TryGetValue(unit.Id, out var applied))
             throw new InvalidOperationException($"Storage unit '{unit.Id.Value}' was not declared for this unit of work.");
-        var session = new MongoStorageSession(state, applied.Applied, access, applied.Collection, this.session, this, commandObserver);
-        sessions.Add(session);
-        return session;
+        MongoStorageSession CreateSession() => new(
+            state,
+            applied.Applied,
+            access,
+            applied.Collection,
+            this.session,
+            this,
+            commandObserver);
+
+        if (commandObserver is not IProviderExecutionObserver)
+        {
+            var ordinarySession = CreateSession();
+            sessions.Add(ordinarySession);
+            return ordinarySession;
+        }
+
+        evidenceInitializationDepth++;
+        try
+        {
+            var session = CreateSession();
+            sessions.Add(session);
+            return session;
+        }
+        finally
+        {
+            evidenceInitializationDepth--;
+        }
     }
 
     public void Commit() => CommitCore(MongoExecution.Synchronous).GetAwaiter().GetResult();
@@ -3777,8 +4205,18 @@ internal sealed class MongoUnitOfWork : IMongoUnitOfWork, IMongoUnitOfWorkState
 
     private void ThrowIfTerminal()
     {
+        ThrowIfStructuredObserverReentry();
         if (terminal)
             throw new InvalidOperationException("The unit of work is already terminal.");
+    }
+
+    public void ThrowIfStructuredObserverReentry()
+    {
+        if (evidenceInitializationDepth != 0)
+            throw new InvalidOperationException(
+                "A MongoDB structured execution observer cannot re-enter its owning unit of work while evidence capability is being initialized.");
+        foreach (var storageSession in sessions)
+            storageSession.ThrowIfStructuredObserverReentry();
     }
 
     public bool IsActive => !terminal;

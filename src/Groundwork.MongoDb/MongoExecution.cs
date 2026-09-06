@@ -45,7 +45,9 @@ internal readonly struct MongoExecution
     internal ValueTask<List<T>> ToList<T>(IAsyncCursorSource<T> source, CancellationToken cancellationToken) =>
         Run(_ => source.ToListAsync(cancellationToken), () => source.ToList(cancellationToken));
 
-    internal ValueTask<T> FirstOrDefault<T>(IAsyncCursorSource<T> source)
+    // Retain the fluent type: its terminal adds native Limit(1). Erasing it to
+    // IAsyncCursorSource would select the first document without setting the native limit.
+    internal ValueTask<TProjection> FirstOrDefault<TDocument, TProjection>(IFindFluent<TDocument, TProjection> source)
     {
         var cancellationToken = CancellationToken;
         return Run(token => source.FirstOrDefaultAsync(token), () => source.FirstOrDefault(cancellationToken));
@@ -94,13 +96,17 @@ internal readonly struct MongoExecution
         return Run<List<BsonDocument>>(
             async token =>
             {
-                var cursor = session is null
+                using var cursor = session is null
                     ? await collection.FindAsync(filter, options, token).ConfigureAwait(false)
                     : await collection.FindAsync(session, filter, options, token).ConfigureAwait(false);
                 return await cursor.ToListAsync(token).ConfigureAwait(false);
             },
-            () => (session is null
-                ? collection.FindSync(filter, options)
-                : collection.FindSync(session, filter, options)).ToList(cancellationToken));
+            () =>
+            {
+                using var cursor = session is null
+                    ? collection.FindSync(filter, options)
+                    : collection.FindSync(session, filter, options);
+                return cursor.ToList(cancellationToken);
+            });
     }
 }

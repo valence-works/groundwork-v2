@@ -21,6 +21,8 @@ internal sealed class RelationalSessionQueries
     private readonly Func<RelationalQueryCommand, QueryRenderOptions, RelationalExecution, ValueTask> assertExplainPlan;
     private readonly IProviderCommandObserver? observer;
     private readonly string operationPrefix;
+    private readonly RelationalEvidenceCapture? evidenceCapture;
+    private readonly RelationalQueryPlanCollector? inspectPlan;
 
     internal RelationalSessionQueries(
         StorageUnit unit,
@@ -31,7 +33,9 @@ internal sealed class RelationalSessionQueries
         Func<object, ColumnDefinition, object?> decode,
         Func<RelationalQueryCommand, QueryRenderOptions, RelationalExecution, ValueTask> assertExplainPlan,
         IProviderCommandObserver? observer,
-        string operationPrefix)
+        string operationPrefix,
+        RelationalEvidenceCapture? evidenceCapture = null,
+        RelationalQueryPlanCollector? inspectPlan = null)
     {
         this.unit = unit;
         this.access = access;
@@ -42,6 +46,8 @@ internal sealed class RelationalSessionQueries
         this.assertExplainPlan = assertExplainPlan;
         this.observer = observer;
         this.operationPrefix = operationPrefix;
+        this.evidenceCapture = observer is IProviderExecutionObserver ? evidenceCapture ?? new() : null;
+        this.inspectPlan = inspectPlan;
     }
 
     internal async ValueTask<QueryMaterializedResult> Query(
@@ -56,28 +62,98 @@ internal sealed class RelationalSessionQueries
             request,
             options,
             physicalIndexNames());
-        var command = renderer.Render(prepared.ExecutionRequest, prepared.RenderOptions);
+        var evidenceObserver = observer as IProviderExecutionObserver;
+        var evidenceOptions = evidenceObserver is null
+            ? null
+            : evidenceCapture!.InvokeStructuredObserver(() => evidenceObserver.EvidenceOptions);
+        var rendered = evidenceObserver is null
+            ? new RelationalRenderedQuery(renderer.Render(prepared.ExecutionRequest, prepared.RenderOptions), null)
+            : renderer.RenderForExecution(prepared.ExecutionRequest, prepared.RenderOptions,
+                prepared.ExecutionRequest.Paging.Limit > prepared.ExecutionSource.Paging.Limit);
+        var command = rendered.Command;
+        var identity = evidenceCapture?.NewInvocation();
+        var target = evidenceCapture?.Target(unit, rendered.Shape is null
+            ? ProviderScopeBindingMode.Unknown
+            : rendered.Shape.Predicate.Facts.Any(fact => fact.BindingRole == ProviderPredicateBindingRole.Scope)
+                ? ProviderScopeBindingMode.Predicate : ProviderScopeBindingMode.Unscoped);
+        var provider = evidenceObserver is null ? null : new ProviderIdentity(renderer.ExecutionProviderName, connection.ServerVersion);
+        var plan = evidenceOptions?.CollectNativePlans == true
+            ? new ProviderPlanEvidence(ProviderEvidenceAvailability.Unsupported) : ProviderPlanEvidence.NotRequested;
         Observe("query", command);
-        var rows = await RelationalQueryResultReader.Read(
-            connection,
-            command,
-            (name, value) => DecodeQueryValue(
-                name,
-                value,
+        var outcome = ProviderExecutionOutcome.Failed;
+        ProviderExecutionFailureCategory? failure = ProviderExecutionFailureCategory.Provider;
+        var completed = false;
+        var issued = false;
+        try
+        {
+            var rows = await RelationalQueryResultReader.Read(
+                connection,
+                command,
+                (name, value) => DecodeQueryValue(name, value, prepared.ExecutionSource, prepared.RenderOptions),
+                transaction,
+                execution,
+                onIssuing: evidenceObserver is null ? null : () => issued = true).ConfigureAwait(false);
+            outcome = ProviderExecutionOutcome.Succeeded;
+            failure = null;
+            if (inspectPlan is not null)
+            {
+                RelationalQueryPlanInspection inspection;
+                try
+                {
+                    inspection = await inspectPlan(command, prepared.RenderOptions, execution,
+                        evidenceOptions?.CollectNativePlans == true).ConfigureAwait(false);
+                    plan = inspection.Evidence;
+                }
+                catch when (evidenceOptions?.CollectNativePlans == true)
+                {
+                    plan = new(ProviderEvidenceAvailability.Failed,
+                        failureCategory: ProviderExecutionFailureCategory.PlanCollection);
+                    throw;
+                }
+                // The native read already succeeded. An assertion failure must not turn its
+                // outcome into a failed read or discard a successfully collected plan.
+                inspection.Assert?.Invoke();
+            }
+            else
+            {
+                await assertExplainPlan(command, prepared.RenderOptions, execution).ConfigureAwait(false);
+            }
+            var result = QueryResultMaterializer.Materialize(
                 prepared.ExecutionSource,
-                prepared.RenderOptions),
-            transaction,
-            execution).ConfigureAwait(false);
-        await assertExplainPlan(command, prepared.RenderOptions, execution).ConfigureAwait(false);
-        return QueryResultMaterializer.Materialize(
-            prepared.ExecutionSource,
-            prepared.RenderOptions,
-            rows,
-            command.SelectedIndex,
-            command.IndexHintApplied,
-            sourceIncludesRequestedOffset: true,
-            sourceIncludesContinuation: true,
-            sourceIncludesDistinct: true);
+                prepared.RenderOptions,
+                rows,
+                command.SelectedIndex,
+                command.IndexHintApplied,
+                sourceIncludesRequestedOffset: true,
+                sourceIncludesContinuation: true,
+                sourceIncludesDistinct: true);
+            completed = true;
+            return result;
+        }
+        catch (OperationCanceledException) when (outcome != ProviderExecutionOutcome.Succeeded)
+        {
+            outcome = ProviderExecutionOutcome.Cancelled;
+            failure = ProviderExecutionFailureCategory.Cancellation;
+            throw;
+        }
+        finally
+        {
+            if (evidenceObserver is not null && issued)
+            {
+                try
+                {
+                    evidenceCapture!.InvokeStructuredObserver(() => evidenceObserver.ObserveExecution(new(
+                        provider!, ProviderExecutionOperation.BoundedQuery,
+                        ProviderCommandKind.Read, ProviderExecutionRole.Statement, identity!, target!, outcome, failure,
+                        rendered.Shape is null ? ProviderEvidenceAvailability.Unsupported : ProviderEvidenceAvailability.Collected,
+                        boundedQuery: rendered.Shape, plan: plan)));
+                }
+                catch when (!completed)
+                {
+                    // Preserve the original read, plan-collection, or assertion failure.
+                }
+            }
+        }
     }
 
     internal async ValueTask<CrossScopeQueryResult> QueryAcrossScopes(
