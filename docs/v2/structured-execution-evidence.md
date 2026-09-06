@@ -1,8 +1,8 @@
 # Structured execution evidence
 
-Status: unreleased implementation for #405. Do not assume an existing published
-package contains this surface. Provider coverage and the release gate remain
-under validation; see [ADR 0004](../adr/0004-structured-provider-execution-evidence.md).
+Status: released in `0.4.0-preview.17`. The package publication and exact-feed
+verification gates passed in canonical release run `34017785123` for merge
+`59290973218eb0476a39ea3fd9bd740aa182560e`; see [ADR 0004](../adr/0004-structured-provider-execution-evidence.md).
 
 ## Migrating a command-text consumer
 
@@ -85,8 +85,8 @@ operations or diagnostic probes were observed.
 
 ## Release adoption
 
-After publication, pin the complete Groundwork package family to the verified
-release and restore from the published feed. Repeat the real artifact lifecycle
-test against that exact package closure before removing the consumer's parser.
-A source reference or local proof package is development evidence, not proof of
-published-package adoption.
+For `0.4.0-preview.17`, pin the complete Groundwork package family to that exact
+release and restore from the published Feedz source. Repeat the real artifact
+lifecycle test against that exact package closure before removing the consumer's
+parser. A source reference or local proof package is development evidence, not
+proof of published-package adoption.
