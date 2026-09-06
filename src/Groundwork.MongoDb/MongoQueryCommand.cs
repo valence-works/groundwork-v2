@@ -49,3 +49,8 @@ public sealed class MongoQueryCommand
     /// <summary>Logical index expected from the optimizer, without implying a native hint.</summary>
     public string? ExpectedIndex { get; }
 }
+
+/// <summary>Immutable pairing of one emitted Mongo command and its optional native shape.</summary>
+internal readonly record struct MongoQueryEmission(
+    MongoQueryCommand Command,
+    Groundwork.Kernel.ProviderBoundedQueryEvidence? StructuredShape);

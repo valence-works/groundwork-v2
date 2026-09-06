@@ -14,7 +14,19 @@ public sealed class MongoQueryRenderer
         QueryRenderOptions? options = null,
         string? physicalCollectionName = null,
         IReadOnlyList<BsonDocument>? sourcePrefix = null) =>
-        RenderCore(request, options, physicalCollectionName, physicalTargetCollectionName: null, sourcePrefix);
+        RenderCore(request, options, physicalCollectionName, physicalTargetCollectionName: null, sourcePrefix,
+            evidenceCapture: null, hasLookahead: false).Command;
+
+    internal MongoQueryEmission RenderWithEvidence(
+        QueryRequest request,
+        QueryRenderOptions? options,
+        string? physicalCollectionName,
+        MongoExecutionEvidenceCapture evidenceCapture,
+        bool hasLookahead,
+        string? physicalTargetCollectionName = null,
+        IReadOnlyList<BsonDocument>? sourcePrefix = null) =>
+        RenderCore(request, options, physicalCollectionName, physicalTargetCollectionName, sourcePrefix,
+            evidenceCapture, hasLookahead);
 
     /// <summary>
     /// Renders a query when the provider has resolved the exact physical target collection. The
@@ -27,7 +39,8 @@ public sealed class MongoQueryRenderer
         string? physicalCollectionName,
         string physicalTargetCollectionName,
         IReadOnlyList<BsonDocument>? sourcePrefix = null) =>
-        RenderCore(request, options, physicalCollectionName, physicalTargetCollectionName, sourcePrefix);
+        RenderCore(request, options, physicalCollectionName, physicalTargetCollectionName, sourcePrefix,
+            evidenceCapture: null, hasLookahead: false).Command;
 
     internal MongoQueryCommand Render(
         QueryRequest request,
@@ -35,18 +48,23 @@ public sealed class MongoQueryRenderer
         string physicalTargetCollectionName,
         IReadOnlyList<BsonDocument>? sourcePrefix = null) =>
         RenderCore(request, options: null, physicalCollectionName: physicalCollectionName,
-            physicalTargetCollectionName: physicalTargetCollectionName, sourcePrefix: sourcePrefix);
+            physicalTargetCollectionName: physicalTargetCollectionName, sourcePrefix: sourcePrefix,
+            evidenceCapture: null, hasLookahead: false).Command;
 
-    private MongoQueryCommand RenderCore(
+    private MongoQueryEmission RenderCore(
         QueryRequest request,
         QueryRenderOptions? options,
         string? physicalCollectionName,
         string? physicalTargetCollectionName,
-        IReadOnlyList<BsonDocument>? sourcePrefix)
+        IReadOnlyList<BsonDocument>? sourcePrefix,
+        MongoExecutionEvidenceCapture? evidenceCapture,
+        bool hasLookahead)
     {
         ArgumentNullException.ThrowIfNull(request);
         if (request.Join is not null)
-            return RenderJoined(request, options, physicalCollectionName, physicalTargetCollectionName, sourcePrefix);
+            return new MongoQueryEmission(
+                RenderJoined(request, options, physicalCollectionName, physicalTargetCollectionName, sourcePrefix),
+                StructuredShape: null);
         options ??= QueryRenderOptions.Default;
         request = QueryElementSearchKeyRewriter.Rewrite(
             QuerySearchKeyRewriter.Rewrite(request, options.SearchKeyColumns),
@@ -61,7 +79,11 @@ public sealed class MongoQueryRenderer
             throw new QueryRenderException(refusal.Code, refusal.Message + " (" + refusal.Path + ").");
         }
         var order = EffectiveOrder(request, options);
-        var baseFilter = RenderPredicate(request.Where, options, request.Table.Value);
+        var evidence = evidenceCapture is null
+            ? null
+            : new MongoExecutionEvidenceEmitter(evidenceCapture, options, request.Table);
+        evidence?.ConfigureRequest(request);
+        var baseFilter = RenderPredicate(request.Where, options, request.Table.Value, evidence: evidence);
         var filter = baseFilter;
         var matchNone = request.Where is Predicate.AlwaysFalse;
         IReadOnlyList<QueryConstant>? cursor = null;
@@ -77,6 +99,7 @@ public sealed class MongoQueryRenderer
             {
                 throw new QueryRenderException("GW-QUERY-013", "The keyset continuation token is invalid: " + exception.Message);
             }
+            evidence?.MarkUnsupported();
             if (!request.Result.IncludesTotalCount && request.LatestPerKey is null && !request.Distinct)
                 filter = And(filter, RenderContinuation(order, cursor, options));
         }
@@ -127,7 +150,7 @@ public sealed class MongoQueryRenderer
                 reduction,
                 options,
                 sourcePrefix);
-            return new MongoQueryCommand(
+            return new MongoQueryEmission(new MongoQueryCommand(
                 filter,
                 new BsonDocument(order.Select(term =>
                     new BsonElement(term.Column.Name, term.Direction == OrderDirection.Ascending ? 1 : -1))),
@@ -139,7 +162,7 @@ public sealed class MongoQueryRenderer
                 matchNone,
                 order.Select(term => term.Column.Name).ToArray(),
                 reductionPipeline,
-                expectedIndex?.Name);
+                expectedIndex?.Name), StructuredShape: null);
         }
 
         var projection = request.Projection.AllColumns
@@ -149,8 +172,19 @@ public sealed class MongoQueryRenderer
             new BsonElement(term.Column.Name, term.Direction == OrderDirection.Ascending ? 1 : -1)));
         var pipeline = RenderPipeline(physicalCollectionName ?? request.Table.Value, baseFilter, cursor,
             request.LatestPerKey, order, projection, request.Paging, request.Result.IncludesTotalCount,
-            options, sourcePrefix, request.Distinct);
-        return new MongoQueryCommand(
+            options, sourcePrefix, request.Distinct, fieldPath: null, evidence: evidence,
+            projectionAllColumns: request.Projection.AllColumns, hasLookahead: hasLookahead);
+        if (pipeline.Count == 0)
+        {
+            evidence?.RecordProjection(request.Projection.AllColumns, projection.Names);
+            evidence?.RecordPaging(
+                request.Paging.Offset,
+                request.Paging.Limit,
+                request.Paging.ContinuationToken is not null,
+                hasLookahead,
+                request.Result.IncludesTotalCount);
+        }
+        var command = new MongoQueryCommand(
             filter,
             sort,
             projection,
@@ -162,6 +196,7 @@ public sealed class MongoQueryRenderer
             order.Select(term => term.Column.Name).ToArray(),
             pipeline,
             expectedIndex?.Name);
+        return new MongoQueryEmission(command, evidence?.Complete());
     }
 
     private MongoQueryCommand RenderJoined(
@@ -656,39 +691,54 @@ public sealed class MongoQueryRenderer
         Predicate predicate,
         QueryRenderOptions options,
         string table,
-        Func<ColumnRef, string>? fieldPath = null)
+        Func<ColumnRef, string>? fieldPath = null,
+        MongoExecutionEvidenceEmitter? evidence = null)
     {
         fieldPath ??= static column => column.Name;
         switch (predicate)
         {
             case Predicate.AlwaysTrue:
+                evidence?.RecordAlwaysTrue();
                 return new BsonDocument();
             case Predicate.AlwaysFalse:
+                evidence?.RecordAlwaysFalse();
                 return MatchNone();
             case Predicate.Equal equal:
-                return new BsonDocument(fieldPath(equal.Column), ToBson(equal.Value));
+            {
+                var rendered = new BsonDocument(fieldPath(equal.Column), ToBson(equal.Value));
+                evidence?.RecordEqual(equal.Column, equal.Value);
+                return rendered;
+            }
             case Predicate.In membership:
                 if (membership.Values.Distinct().Count() > options.InValueLimit)
                     throw new QueryRenderException(
                         "GW-QUERY-015",
                         $"Query on '{table}' has an In predicate on '{membership.Column.Name}' with " +
                         $"{membership.Values.Distinct().Count()} distinct values, exceeding the configured maximum of {options.InValueLimit}.");
-                return membership.Values.Length == 0
-                    ? MatchNone()
-                    : new BsonDocument(fieldPath(membership.Column), new BsonDocument("$in", new BsonArray(membership.Values.Select(ToBson))));
+                if (membership.Values.Length == 0)
+                {
+                    evidence?.RecordIn(membership.Column, membership.Values);
+                    return MatchNone();
+                }
+                var renderedIn = new BsonDocument(fieldPath(membership.Column), new BsonDocument("$in", new BsonArray(membership.Values.Select(ToBson))));
+                evidence?.RecordIn(membership.Column, membership.Values);
+                return renderedIn;
             case Predicate.Range range:
             {
                 if (range.Column.Type == QueryType.String && !IsPhysicalSearchKeyRange(range, options))
-                    return RenderStringRange(range, fieldPath);
+                    return RenderStringRange(range, fieldPath, evidence);
                 var operators = new BsonDocument();
                 if (range.Lower is not null)
                     operators.Add(range.Lower.IsInclusive ? "$gte" : "$gt", ToBson(range.Lower.Value));
                 if (range.Upper is not null)
                     operators.Add(range.Upper.IsInclusive ? "$lte" : "$lt", ToBson(range.Upper.Value));
-                return new BsonDocument(fieldPath(range.Column), operators);
+                var renderedRange = new BsonDocument(fieldPath(range.Column), operators);
+                evidence?.RecordRange(range.Column, range.Lower, range.Upper);
+                return renderedRange;
             }
             case Predicate.ColumnCompare compare:
             {
+                evidence?.MarkUnsupported();
                 var operation = new BsonDocument(
                     compare.Op switch
                     {
@@ -709,6 +759,7 @@ public sealed class MongoQueryRenderer
                 }));
             }
             case Predicate.ElementOf elementOf:
+                evidence?.MarkUnsupported();
                 if (elementOf.Set.Type is null)
                     throw new QueryRenderException("GW-SEM-TYPE-007", "An element set must declare its exact element type before rendering.");
                 if (elementOf.Values.Length == 0)
@@ -735,6 +786,7 @@ public sealed class MongoQueryRenderer
                     }));
             case Predicate.ElementSubstring elementSubstring:
             {
+                evidence?.MarkUnsupported();
                 if (elementSubstring.Set.Type != QueryType.String)
                     throw new QueryRenderException("GW-SEM-TYPE-005", "Element substring matching requires a typed string element set.");
                 if (elementSubstring.Anchor is not (Anchor.Contains or Anchor.EndsWith))
@@ -771,23 +823,31 @@ public sealed class MongoQueryRenderer
                 }));
             }
             case Predicate.Substring substring when substring.Anchor is Anchor.Contains or Anchor.EndsWith:
+                evidence?.MarkUnsupported();
                 return new BsonDocument(fieldPath(substring.Column),
                     new BsonRegularExpression(
                         Regex.Escape(substring.Needle) + (substring.Anchor == Anchor.EndsWith ? "\\z" : string.Empty),
                         string.Empty));
             case Predicate.Not not:
-                return new BsonDocument("$nor", new BsonArray { RenderPredicate(not.Inner, options, table, fieldPath) });
+                evidence?.MarkUnsupported();
+                return new BsonDocument("$nor", new BsonArray { RenderPredicate(not.Inner, options, table, fieldPath, evidence) });
             case Predicate.And and:
-                return and.Terms.Length == 0
-                    ? new BsonDocument()
-                    : new BsonDocument("$and", new BsonArray(and.Terms.Select(term => RenderPredicate(term, options, table, fieldPath))));
+                if (and.Terms.Length == 0)
+                {
+                    evidence?.RecordAlwaysTrue();
+                    return new BsonDocument();
+                }
+                return new BsonDocument("$and", new BsonArray(and.Terms.Select(term => RenderPredicate(term, options, table, fieldPath, evidence))));
             case Predicate.Or or:
+                evidence?.MarkUnsupported();
                 return or.Terms.Length == 0
                     ? MatchNone()
-                    : new BsonDocument("$or", new BsonArray(or.Terms.Select(term => RenderPredicate(term, options, table, fieldPath))));
+                    : new BsonDocument("$or", new BsonArray(or.Terms.Select(term => RenderPredicate(term, options, table, fieldPath, evidence))));
             case Predicate.StartsWith:
+                evidence?.MarkUnsupported();
                 throw new QueryRenderException("GW-QUERY-030", "This normalized predicate requires a provider-independent persisted projection and cannot be rendered directly.");
             default:
+                evidence?.MarkUnsupported();
                 throw new QueryRenderException("GW-QUERY-030", "The predicate node is outside the closed native query surface.");
         }
     }
@@ -856,7 +916,10 @@ public sealed class MongoQueryRenderer
             : ToBson(value));
     }
 
-    private BsonDocument RenderStringRange(Predicate.Range range, Func<ColumnRef, string>? fieldPath = null)
+    private BsonDocument RenderStringRange(
+        Predicate.Range range,
+        Func<ColumnRef, string>? fieldPath = null,
+        MongoExecutionEvidenceEmitter? evidence = null)
     {
         fieldPath ??= static column => column.Name;
         var path = fieldPath(range.Column);
@@ -874,7 +937,9 @@ public sealed class MongoQueryRenderer
             {
                 RenderOrdinalKey("$" + path), RenderOrdinalKey(upper.Value)
             }));
-        return new BsonDocument("$expr", new BsonDocument("$and", clauses));
+        var rendered = new BsonDocument("$expr", new BsonDocument("$and", clauses));
+        evidence?.RecordRange(range.Column, range.Lower, range.Upper, excludesNull: true);
+        return rendered;
     }
 
     private BsonDocument RenderAfter(
@@ -961,7 +1026,10 @@ public sealed class MongoQueryRenderer
         QueryRenderOptions options,
         IReadOnlyList<BsonDocument>? sourcePrefix,
         bool distinct = false,
-        Func<ColumnRef, string>? fieldPath = null)
+        Func<ColumnRef, string>? fieldPath = null,
+        MongoExecutionEvidenceEmitter? evidence = null,
+        bool projectionAllColumns = false,
+        bool hasLookahead = false)
     {
         var joinedFields = fieldPath is not null;
         fieldPath ??= static column => column.Name;
@@ -1090,6 +1158,11 @@ public sealed class MongoQueryRenderer
             if (term.Column.Type != QueryType.String && !string.Equals(orderName, valuePath, StringComparison.Ordinal))
                 orderInternalFields.Add(orderName);
             sort.Add(orderName, term.Direction == OrderDirection.Ascending ? 1 : -1);
+            evidence?.RecordOrder(
+                term,
+                nullRankEmitted: !provesNonNull,
+                ordinalStringKeyEmitted: term.Column.Type == QueryType.String && !usesPersistedOrderKey,
+                physicalSearchKeyEmitted: term.Column.Type == QueryType.String && usesPersistedOrderKey);
         }
         if (sort.ElementCount != 0)
             data.Add(new BsonDocument("$sort", sort));
@@ -1152,20 +1225,33 @@ public sealed class MongoQueryRenderer
                         renderedProjection.Add(continuationName, 1);
                 }
             }
+            // The renderer may add internal order/continuation fields to this native $project.
+            // Keep the evidence projection logical by recording the original projection input
+            // from this same emission branch, not the provider's private helper fields.
+            evidence?.RecordProjection(projectionAllColumns, projection.Names);
             data.Add(new BsonDocument("$project", renderedProjection));
         }
         else if (order.Count != 0 || latestInternalFields.Count != 0)
         {
+            evidence?.RecordProjection(allColumns: true, emittedColumns: Array.Empty<string>());
             var cleanup = new BsonDocument();
             foreach (var field in orderInternalFields.Concat(latestInternalFields).Distinct(StringComparer.Ordinal))
                 cleanup.Add(field, 0);
             if (cleanup.ElementCount != 0)
                 data.Add(new BsonDocument("$project", cleanup));
         }
+        else
+            evidence?.RecordProjection(allColumns: true, emittedColumns: Array.Empty<string>());
         if (paging.Offset is int offset)
             data.Add(new BsonDocument("$skip", offset));
         if (paging.Limit is int limit)
             data.Add(new BsonDocument("$limit", limit));
+        evidence?.RecordPaging(
+            paging.Offset,
+            paging.Limit,
+            cursor is not null,
+            hasLookahead,
+            includesTotalCount);
 
         if (includesTotalCount)
         {
