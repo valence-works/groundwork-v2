@@ -53,6 +53,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         this.connection = connection;
         this.transaction = transaction;
         this.schemaSession = schemaSession;
+        var evidenceCapture = observer is IProviderExecutionObserver ? new RelationalEvidenceCapture() : null;
         execution = new RelationalSessionExecution(
             access,
             transaction,
@@ -67,7 +68,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
             Command,
             new SqlitePointReadAdapter(),
             observer,
-            "sqlite");
+            "sqlite", evidenceCapture);
         crud = new RelationalSessionCrud(
             unit,
             UserColumns,
@@ -93,7 +94,9 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
                 return default;
             },
             observer,
-            "sqlite");
+            "sqlite", evidenceCapture,
+            (command, options, _, collect) => ValueTask.FromResult(
+                InspectExecutionPlan(command, options, collect, evidenceCapture)));
         aggregations = new RelationalSessionAggregations(
             unit,
             access,
@@ -164,7 +167,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         }));
 
     public ValueTask<StoredEntry?> ReadAsync(StorageKey key, CancellationToken cancellationToken = default) =>
-        Completed(cancellationToken, () => Read(key));
+        Completed(cancellationToken, () => ReadPublicCore(key, RelationalExecution.Asynchronous(cancellationToken)));
 
     public ValueTask<CrossScopeQueryResult> QueryAcrossScopesAsync(
         QueryRequest request,
@@ -272,10 +275,23 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
 
     private void AssertExplainPlan(RelationalQueryCommand query, QueryRenderOptions options)
     {
-        if (query.IsMatchNone || !ExplainAssertionMode.ShouldAssert(query.SelectedIndex)) return;
-        var logicalIndex = query.SelectedIndex!;
-        var physicalIndex = options.ResolvePhysicalIndexName(logicalIndex);
+        InspectExecutionPlan(query, options, collectEvidence: false, capture: null).Assert?.Invoke();
+    }
+
+    private RelationalQueryPlanInspection InspectExecutionPlan(RelationalQueryCommand query,
+        QueryRenderOptions options, bool collectEvidence, RelationalEvidenceCapture? capture)
+    {
+        var assert = !query.IsMatchNone && ExplainAssertionMode.ShouldAssert(query.SelectedIndex);
+        var collect = collectEvidence && !query.IsMatchNone && query.Statements.Length == 1;
+        var unavailable = collectEvidence
+            ? new ProviderPlanEvidence(ProviderEvidenceAvailability.Unsupported) : ProviderPlanEvidence.NotRequested;
+        if (!assert && !collect)
+            return new(unavailable);
+        var logicalIndex = query.SelectedIndex;
+        var physicalIndex = logicalIndex is null ? null : options.ResolvePhysicalIndexName(logicalIndex);
         var plans = new List<string>(query.Statements.Length);
+        var nativeRows = new List<SqliteNativePlanRow>();
+        var mappedColumns = true;
         foreach (var statement in query.Statements)
         {
             using var explain = Command("EXPLAIN QUERY PLAN " + statement.TrimEnd().TrimEnd(';'));
@@ -283,19 +299,40 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
             using var reader = explain.ExecuteReader();
             var details = new List<string>();
             while (reader.Read())
+            {
                 details.Add(string.Join('\t', Enumerable.Range(0, reader.FieldCount).Select(index => Convert.ToString(reader.GetValue(index), CultureInfo.InvariantCulture))));
+                if (collect)
+                {
+                    if (reader.FieldCount == 4)
+                        nativeRows.Add(new(reader.GetInt32(0), reader.GetInt32(1), reader.GetString(3)));
+                    else
+                        mappedColumns = false;
+                }
+            }
             plans.Add(string.Join(Environment.NewLine, details));
         }
         var rawPlan = string.Join(Environment.NewLine, plans);
-        ExplainAssertionMode.AssertChosenIndex(
-            "SQLite", logicalIndex, physicalIndex, query.IndexHintApplied, rawPlan,
-            plans.All(plan => SqliteExplainPlanInspector.ChoseIndex(plan, physicalIndex)));
+        bool? chosen = physicalIndex is null ? null : plans.All(plan => SqliteExplainPlanInspector.ChoseIndex(plan, physicalIndex));
+        var forest = collect && mappedColumns ? SqliteNativePlanMapper.Map(
+            nativeRows, Unit.Name, capture!.Target(Unit, ProviderScopeBindingMode.Unknown).PhysicalTargetId,
+            capture.Index, PhysicalIndexNames().ToDictionary(pair => pair.Value, pair => pair.Key, StringComparer.Ordinal)) : null;
+        var evidence = !collect ? unavailable : chosen is null && forest is null
+            ? new ProviderPlanEvidence(ProviderEvidenceAvailability.Unsupported, collectionCommandCount: plans.Count)
+            : new ProviderPlanEvidence(
+                ProviderEvidenceAvailability.Collected, ProviderPlanProvenance.EstimatedExplain,
+                choseExpectedIndex: chosen, expectedLogicalIndex: logicalIndex,
+                chosenPhysicalIndexId: chosen == true ? capture!.Index(physicalIndex!) : null,
+                collectionCommandCount: plans.Count, winningPlan: forest);
+        return new(evidence, assert ? () => ExplainAssertionMode.AssertChosenIndex(
+            "SQLite", logicalIndex!, physicalIndex!, query.IndexHintApplied, rawPlan, chosen == true) : null);
     }
 
-    public StoredEntry? Read(StorageKey key)
+    public StoredEntry? Read(StorageKey key) => ReadPublicCore(key, RelationalExecution.Synchronous);
+
+    private StoredEntry? ReadPublicCore(StorageKey key, RelationalExecution mode)
     {
         pointReads.ValidatePublicRead();
-        return Execute(() => pointReads.ReadPublic(key, RelationalExecution.Synchronous)
+        return Execute(() => pointReads.ReadPublic(key, mode)
             .GetAwaiter().GetResult());
     }
 
@@ -1832,6 +1869,15 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
 
     private sealed class SqlitePointReadAdapter : IRelationalPointReadAdapter
     {
+        public string EvidenceProviderName => "SQLite";
+
+        public ProviderPointReadLockMode EvidenceLockMode(bool forUpdate) => ProviderPointReadLockMode.None;
+
+        public RelationalPointReadPredicate RenderEquality(StorageUnit unit, ColumnDefinition column,
+            string parameter, bool exactStringKeys, bool collectEvidence) =>
+            RelationalPointReadPredicate.WithKeyBound(Equality(column, parameter, exactStringKeys),
+                unit, column, collectEvidence);
+
         public string QuoteIdentifier(string identifier) => Quote(identifier);
 
         public string Equality(ColumnDefinition column, string parameter, bool exactStringKeys) =>

@@ -178,7 +178,7 @@ internal static class RelationalSessionPolicy
             Projection.ColumnsOnly([.. request.Projection.Columns, scope]));
     }
 
-    private static ColumnRef? QueryColumn(StorageUnit unit, string name)
+    internal static ColumnRef? QueryColumn(StorageUnit unit, string name)
     {
         var column = unit.Columns.Single(item => item.Name == name);
         return column.Type switch

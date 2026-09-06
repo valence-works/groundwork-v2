@@ -9,28 +9,17 @@ internal static class PostgreSqlExplainPlanInspector
         try
         {
             using var document = JsonDocument.Parse(rawPlan);
-            return ContainsIndexScan(document.RootElement, physicalIndex);
+            if (document.RootElement.ValueKind != JsonValueKind.Array ||
+                document.RootElement.GetArrayLength() != 1 ||
+                document.RootElement[0].ValueKind != JsonValueKind.Object ||
+                !document.RootElement[0].TryGetProperty("Plan", out var plan) ||
+                plan.ValueKind != JsonValueKind.Object)
+                return false;
+            return PostgreSqlNativePlanMapper.ContainsChosenIndex(plan, physicalIndex);
         }
         catch (JsonException)
         {
             return false;
         }
-    }
-
-    private static bool ContainsIndexScan(JsonElement element, string physicalIndex)
-    {
-        if (element.ValueKind == JsonValueKind.Object)
-        {
-            if (element.TryGetProperty("Node Type", out var nodeType) &&
-                element.TryGetProperty("Index Name", out var indexName) &&
-                nodeType.ValueKind == JsonValueKind.String &&
-                indexName.ValueKind == JsonValueKind.String &&
-                nodeType.GetString() is "Index Scan" or "Index Only Scan" &&
-                string.Equals(indexName.GetString(), physicalIndex, StringComparison.Ordinal))
-                return true;
-            return element.EnumerateObject().Any(property => ContainsIndexScan(property.Value, physicalIndex));
-        }
-        return element.ValueKind == JsonValueKind.Array &&
-               element.EnumerateArray().Any(item => ContainsIndexScan(item, physicalIndex));
     }
 }

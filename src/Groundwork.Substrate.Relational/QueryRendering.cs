@@ -223,7 +223,8 @@ public static class RelationalQueryResultReader
         RelationalQueryCommand query,
         Func<string, object?, object?> decode,
         DbTransaction? transaction,
-        RelationalExecution mode)
+        RelationalExecution mode,
+        Action? onIssuing = null)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(query);
@@ -236,6 +237,7 @@ public static class RelationalQueryResultReader
         }
         mode.CancellationToken.ThrowIfCancellationRequested();
         using var command = CreateCommand(connection, query, transaction);
+        onIssuing?.Invoke();
         await using var readerScope = await mode.ExecuteReader(command).ConfigureAwait(false);
         var reader = readerScope.Reader;
         var rows = new List<IReadOnlyDictionary<string, object?>>();
@@ -343,7 +345,7 @@ public static class RelationalQueryResultReader
 /// Shared SQL renderer for the public relational dialect seam. Provider assemblies supply the
 /// dialect, budget, paging syntax, and (where supported) index-hint syntax.
 /// </summary>
-public abstract class RelationalQueryRenderer
+public abstract partial class RelationalQueryRenderer
 {
     private const string SourceAlias = "__groundwork_source";
     private const string TargetAlias = "__groundwork_target";
@@ -402,11 +404,15 @@ public abstract class RelationalQueryRenderer
     {
         ArgumentNullException.ThrowIfNull(request);
         if (request.Join is not null)
+        {
+            executionShape.Value?.Unsupported();
             return RenderJoined(request, options);
+        }
         options ??= QueryRenderOptions.Default;
         request = QueryElementSearchKeyRewriter.Rewrite(
             QuerySearchKeyRewriter.Rewrite(request, options.SearchKeyColumns),
             options.ElementSearchKeyColumns);
+        executionShape.Value?.Begin(request, options);
         if (options.InValueLimit <= 0)
             throw new ArgumentOutOfRangeException(nameof(options), "The In value limit must be positive.");
 
@@ -1297,11 +1303,15 @@ public abstract class RelationalQueryRenderer
             string.Equals(mapping.PhysicalColumn, column.Name, StringComparison.Ordinal));
 
     /// <summary>Renders one selected expression and preserves the model column name as its result alias.</summary>
-    protected virtual string RenderSelection(ColumnRef column) =>
-        RenderColumn(column) + " AS " + dialect.QuoteIdentifier(
+    protected virtual string RenderSelection(ColumnRef column)
+    {
+        var native = RenderColumn(column) + " AS " + dialect.QuoteIdentifier(
             joinedColumnScope.Value is { } scope
                 ? scope.Field(column)
                 : column.Name);
+        executionShape.Value?.Selection(column);
+        return native;
+    }
 
     /// <summary>True when a computed order column must be selected even for <see cref="Projection.All"/>.</summary>
     protected virtual bool RequiresExplicitSelection(ColumnRef column) => false;
@@ -1314,6 +1324,7 @@ public abstract class RelationalQueryRenderer
         ICollection<QueryRenderParameter> parameters,
         ref int parameterIndex)
     {
+        executionShape.Value?.Paging();
         if (paging.Offset is null && paging.Limit is null)
             return string.Empty;
         var text = string.Empty;
@@ -1322,12 +1333,14 @@ public abstract class RelationalQueryRenderer
             var name = "p" + parameterIndex++;
             parameters.Add(new QueryRenderParameter(name, QueryType.Int32, limit));
             text += " LIMIT @" + name;
+            executionShape.Value?.Limit(limit);
         }
         if (paging.Offset is int offset)
         {
             var name = "p" + parameterIndex++;
             parameters.Add(new QueryRenderParameter(name, QueryType.Int32, offset));
             text += " OFFSET @" + name;
+            executionShape.Value?.Offset(offset);
         }
         return text;
     }
@@ -1368,6 +1381,8 @@ public abstract class RelationalQueryRenderer
         int inValueLimit,
         string table)
     {
+        if (predicate is not (Predicate.AlwaysTrue or Predicate.Equal or Predicate.Range or Predicate.And))
+            executionShape.Value?.Unsupported();
         switch (predicate)
         {
             case Predicate.AlwaysTrue:
@@ -1439,8 +1454,12 @@ public abstract class RelationalQueryRenderer
     {
         var expression = RenderColumn(column);
         if (value.Kind == QueryConstantKind.Null)
+        {
+            executionShape.Value?.Unsupported();
             return expression + " IS NULL";
+        }
         var name = AddParameter(column, value, parameters, ref parameterIndex);
+        executionShape.Value?.ComparisonPredicate(column, ProviderPredicateOperator.Equal);
         return "(" + expression + " IS NOT NULL AND " + expression + " = @" + name + ")";
     }
 
@@ -1468,15 +1487,21 @@ public abstract class RelationalQueryRenderer
     {
         var expression = RenderColumn(range.Column);
         var parts = new List<string> { expression + " IS NOT NULL" };
+        if (range.Lower is null && range.Upper is null)
+            executionShape.Value?.Unsupported();
         if (range.Lower is not null)
         {
             var name = AddParameter(range.Column, range.Lower.Value, parameters, ref parameterIndex);
             parts.Add(expression + (range.Lower.IsInclusive ? " >= @" : " > @") + name);
+            executionShape.Value?.ComparisonPredicate(range.Column, ProviderPredicateOperator.LowerBound,
+                range.Lower.IsInclusive ? ProviderPredicateBoundInclusivity.Inclusive : ProviderPredicateBoundInclusivity.Exclusive);
         }
         if (range.Upper is not null)
         {
             var name = AddParameter(range.Column, range.Upper.Value, parameters, ref parameterIndex);
             parts.Add(expression + (range.Upper.IsInclusive ? " <= @" : " < @") + name);
+            executionShape.Value?.ComparisonPredicate(range.Column, ProviderPredicateOperator.UpperBound,
+                range.Upper.IsInclusive ? ProviderPredicateBoundInclusivity.Inclusive : ProviderPredicateBoundInclusivity.Exclusive);
         }
         return "(" + string.Join(" AND ", parts) + ")";
     }
@@ -1581,6 +1606,8 @@ public abstract class RelationalQueryRenderer
     protected virtual string RenderOrderTerm(OrderTerm term)
     {
         var expression = RenderColumn(term.Column);
+        executionShape.Value?.Order(term,
+            term.Column.IsNullable ? [ProviderOrderingTransform.NullRank] : []);
         var direction = term.Direction == OrderDirection.Ascending ? "ASC" : "DESC";
         if (!term.Column.IsNullable)
             return expression + " " + direction;

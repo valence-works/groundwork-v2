@@ -53,6 +53,9 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         this.transaction = transaction;
         this.schemaSession = schemaSession;
         commandObserver = observer;
+        var evidenceCapture = observer is IProviderExecutionObserver
+            ? new RelationalEvidenceCapture(owner.InvokeStructuredObserver)
+            : null;
         execution = new RelationalSessionExecution(
             access,
             transaction,
@@ -67,7 +70,8 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
             Command,
             new PostgreSqlPointReadAdapter(this),
             observer,
-            "postgresql");
+            "postgresql",
+            evidenceCapture);
         crud = new RelationalSessionCrud(
             unit,
             UserColumns,
@@ -85,7 +89,10 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
             FromDatabase,
             AssertExplainPlan,
             observer,
-            "postgresql");
+            "postgresql",
+            evidenceCapture,
+            (command, options, mode, collect) =>
+                InspectExecutionPlan(command, options, mode, collect, evidenceCapture));
         aggregations = new RelationalSessionAggregations(
             unit,
             access,
@@ -193,6 +200,106 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         ExplainAssertionMode.AssertChosenIndex(
             "PostgreSQL", logicalIndex, physicalIndex, query.IndexHintApplied, rawPlan,
             plans.All(plan => PostgreSqlExplainPlanInspector.ChoseIndex(plan, physicalIndex)));
+    }
+
+    private async ValueTask<RelationalQueryPlanInspection> InspectExecutionPlan(
+        RelationalQueryCommand query,
+        QueryRenderOptions options,
+        RelationalExecution mode,
+        bool collectEvidence,
+        RelationalEvidenceCapture? capture)
+    {
+        var assert = !query.IsMatchNone && ExplainAssertionMode.ShouldAssert(query.SelectedIndex);
+        var collect = collectEvidence && !query.IsMatchNone && query.Statements.Length == 1;
+        var unavailable = collectEvidence
+            ? new ProviderPlanEvidence(ProviderEvidenceAvailability.Unsupported)
+            : ProviderPlanEvidence.NotRequested;
+        if (!assert && !collect)
+            return new(unavailable);
+
+        string? physicalSchema = null;
+        var catalogIndexes = new HashSet<string>(StringComparer.Ordinal);
+        if (collect)
+        {
+            // Resolve the same quoted, unqualified relation used by the query. Connection
+            // string/default-schema guesses cannot distinguish homonymous relations.
+            using var catalog = Command(
+                "SELECT n.nspname, i.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace " +
+                "LEFT JOIN pg_index x ON x.indrelid = c.oid AND x.indisvalid AND x.indislive " +
+                "LEFT JOIN pg_class i ON i.oid = x.indexrelid " +
+                "WHERE c.oid = to_regclass(@target) AND c.relkind IN ('r', 'p');");
+            catalog.Parameters.AddWithValue("target", Quote(Unit.Name));
+            await using var catalogReaderScope = await mode.ExecuteReader(catalog).ConfigureAwait(false);
+            var catalogReader = catalogReaderScope.Reader;
+            while (await mode.Read(catalogReader).ConfigureAwait(false))
+            {
+                physicalSchema = catalogReader.GetString(0);
+                if (!catalogReader.IsDBNull(1))
+                    catalogIndexes.Add(catalogReader.GetString(1));
+            }
+        }
+
+        var logicalIndex = query.SelectedIndex;
+        var physicalIndex = logicalIndex is null ? null : options.ResolvePhysicalIndexName(logicalIndex);
+        var plans = new List<string>(query.Statements.Length);
+        foreach (var statement in query.Statements)
+        {
+            using var explain = Command(ExplainCommandText(statement));
+            RelationalQueryResultReader.AddParameters(explain, query);
+            plans.Add(Convert.ToString(
+                await mode.ExecuteScalar(explain).ConfigureAwait(false),
+                CultureInfo.InvariantCulture) ?? string.Empty);
+        }
+
+        bool? chosen = physicalIndex is null
+            ? null
+            : plans.All(plan => PostgreSqlExplainPlanInspector.ChoseIndex(plan, physicalIndex));
+        var forest = collect && !string.IsNullOrWhiteSpace(physicalSchema)
+            ? PostgreSqlNativePlanMapper.Map(
+                plans[0],
+                Unit.Name,
+                physicalSchema,
+                capture!.Target(Unit, ProviderScopeBindingMode.Unknown).PhysicalTargetId,
+                capture.Index,
+                PhysicalIndexNames().ToDictionary(
+                    pair => pair.Value,
+                    pair => pair.Key,
+                    StringComparer.Ordinal),
+                catalogIndexes)
+            : null;
+        // An index-name match without a namespace-qualified target witness is not
+        // structured physical-index evidence. The legacy assertion remains separate.
+        bool? structuredChosen = forest is null || physicalIndex is null
+            ? null
+            : forest.Nodes.Any(node => node.IndexId == capture!.Index(physicalIndex));
+        var collectionCommands = plans.Count + (collect ? 1 : 0);
+        var evidence = !collect
+            ? unavailable
+            : structuredChosen is null && forest is null
+                ? new ProviderPlanEvidence(
+                    ProviderEvidenceAvailability.Unsupported,
+                    collectionCommandCount: collectionCommands)
+                : new ProviderPlanEvidence(
+                    ProviderEvidenceAvailability.Collected,
+                    ProviderPlanProvenance.EstimatedExplain,
+                    choseExpectedIndex: structuredChosen,
+                    expectedLogicalIndex: logicalIndex,
+                    chosenPhysicalIndexId: structuredChosen == true ? capture!.Index(physicalIndex!) : null,
+                    collectionCommandCount: collectionCommands,
+                    winningPlan: forest);
+
+        var rawPlan = string.Join(Environment.NewLine, plans);
+        return new(
+            evidence,
+            assert
+                ? () => ExplainAssertionMode.AssertChosenIndex(
+                    "PostgreSQL",
+                    logicalIndex!,
+                    physicalIndex!,
+                    query.IndexHintApplied,
+                    rawPlan,
+                    chosen == true)
+                : null);
     }
 
     internal static string ExplainCommandText(string statement) =>
@@ -818,6 +925,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
     {
         if (execution.IsReleased)
             return;
+        owner.ThrowIfStructuredObserverReentry();
         execution.Close();
         if (ownsConnection)
             connection.Dispose();
@@ -827,6 +935,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
     {
         if (execution.IsReleased)
             return;
+        owner.ThrowIfStructuredObserverReentry();
         execution.Close();
         if (ownsConnection)
             await connection.DisposeAsync().ConfigureAwait(false);
@@ -1833,6 +1942,16 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
     private sealed class PostgreSqlPointReadAdapter(
         PostgreSqlStorageSession session) : IRelationalPointReadAdapter
     {
+        public string EvidenceProviderName => "PostgreSQL";
+
+        public ProviderPointReadLockMode EvidenceLockMode(bool forUpdate) =>
+            forUpdate ? ProviderPointReadLockMode.ForUpdate : ProviderPointReadLockMode.None;
+
+        public RelationalPointReadPredicate RenderEquality(StorageUnit unit, ColumnDefinition column,
+            string parameter, bool exactStringKeys, bool collectEvidence) =>
+            RelationalPointReadPredicate.WithKeyBound(Equality(column, parameter, exactStringKeys),
+                unit, column, collectEvidence);
+
         public string QuoteIdentifier(string identifier) => Quote(identifier);
 
         public string Equality(ColumnDefinition column, string parameter, bool exactStringKeys) =>

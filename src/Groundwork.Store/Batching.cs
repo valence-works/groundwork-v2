@@ -604,6 +604,7 @@ public interface IBatchedStorageSession
 internal sealed class BatchContext
 {
     private readonly BatchWriteOptions options;
+    private readonly Action? beforeOperation;
     private readonly bool exactOutcomes;
     private readonly List<RowWrite> staged = [];
     private readonly List<RowWriteOutcome> completed = [];
@@ -613,9 +614,10 @@ internal sealed class BatchContext
     private Exception? failure;
     private int nextOrdinal;
 
-    internal BatchContext(BatchWriteOptions? options)
+    internal BatchContext(BatchWriteOptions? options, Action? beforeOperation = null)
     {
         this.options = options ?? BatchWriteOptions.Default;
+        this.beforeOperation = beforeOperation;
         this.options.Validate();
         exactOutcomes = this.options.OutcomeMode == BatchOutcomeMode.Exact;
     }
@@ -792,6 +794,9 @@ internal sealed class BatchContext
 
     private void EnsureHealthy()
     {
+        // A read barrier may flush queued writes before entering a provider session.
+        // Refuse callback re-entry before flushing or recording a batch failure.
+        beforeOperation?.Invoke();
         if (failure is not null)
             throw new InvalidOperationException(
                 "The unit of work contains a failed batch and must be rolled back.", failure);

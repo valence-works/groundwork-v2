@@ -123,8 +123,15 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
         return gate.Enter(new object());
     }
 
-    private IProviderCommandObserver? GuardObserver(IProviderCommandObserver? observer) =>
-        observer is null ? null : new GuardedCommandObserver(this, observer);
+    private IProviderCommandObserver? GuardObserver(IProviderCommandObserver? observer)
+    {
+        if (observer is null)
+            return null;
+
+        return observer is IProviderExecutionObserver executionObserver
+            ? new GuardedExecutionObserver(this, executionObserver)
+            : new GuardedCommandObserver(this, observer);
+    }
 
     private void InvokeObserver(Action callback)
     {
@@ -138,6 +145,13 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
         {
             observerCallbackDepth.Value = previousDepth;
         }
+    }
+
+    private T InvokeObserver<T>(Func<T> callback)
+    {
+        T result = default!;
+        InvokeObserver(() => { result = callback(); });
+        return result;
     }
 
     internal void NotifyOnAppendRegistered(IProviderCommandObserver? observer)
@@ -384,32 +398,46 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
         }
     }
 
-    private sealed class GuardedCommandObserver(
+    private class GuardedCommandObserver(
         SqliteProviderConnection owner,
         IProviderCommandObserver inner) : IProviderCommandObserver
     {
-        internal bool SupportsSessionRegistration => inner is ISessionRegistrationObserver;
+        protected SqliteProviderConnection Owner { get; } = owner;
+        protected IProviderCommandObserver Inner { get; } = inner;
+
+        internal bool SupportsSessionRegistration => Inner is ISessionRegistrationObserver;
 
         public void Observe(ProviderCommandEvent command) =>
-            owner.InvokeObserver(() => inner.Observe(command));
+            Owner.InvokeObserver(() => Inner.Observe(command));
 
         internal void OnSessionRegistrationEligibilityChecked()
         {
-            if (inner is ISessionRegistrationObserver registration)
-                owner.InvokeObserver(registration.OnSessionRegistrationEligibilityChecked);
+            if (Inner is ISessionRegistrationObserver registration)
+                Owner.InvokeObserver(registration.OnSessionRegistrationEligibilityChecked);
         }
 
         internal void OnProviderDisposalAttempted()
         {
-            if (inner is ISessionRegistrationObserver registration)
-                owner.InvokeObserver(registration.OnProviderDisposalAttempted);
+            if (Inner is ISessionRegistrationObserver registration)
+                Owner.InvokeObserver(registration.OnProviderDisposalAttempted);
         }
 
         internal void OnAppendRegistered()
         {
-            if (inner is IOnAppendRegistrationObserver registration)
-                owner.InvokeObserver(registration.OnAppendRegistered);
+            if (Inner is IOnAppendRegistrationObserver registration)
+                Owner.InvokeObserver(registration.OnAppendRegistered);
         }
+    }
+
+    private sealed class GuardedExecutionObserver(
+        SqliteProviderConnection owner,
+        IProviderExecutionObserver inner) : GuardedCommandObserver(owner, inner), IProviderExecutionObserver
+    {
+        public ProviderExecutionEvidenceOptions EvidenceOptions =>
+            Owner.InvokeObserver(() => ((IProviderExecutionObserver)Inner).EvidenceOptions);
+
+        public void ObserveExecution(ProviderExecutionEvidence evidence) =>
+            Owner.InvokeObserver(() => ((IProviderExecutionObserver)Inner).ObserveExecution(evidence));
     }
 
     /// <summary>

@@ -131,6 +131,205 @@ public sealed class RelationalStorageSessionBaseTests
         Assert.True(opened!.Closed);
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task Guarded_unit_of_work_refuses_commit_before_flush_or_transaction_mutation(bool asynchronous, bool exact)
+    {
+        var connection = new TrackingConnection();
+        var guard = new ReentryGuard { Throw = false };
+        TrackingSession? opened = null;
+        using var work = CreateGuardedWork(connection, guard, session => opened = session, BatchWriteOptions.Exact);
+        work.Stage(RowWrite.Insert(Unit(), Values("one")));
+        Assert.NotNull(opened);
+        Assert.Equal(0, opened.BatchApplyCalls);
+        guard.Throw = true;
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        {
+            if (asynchronous)
+            {
+                if (exact)
+                    await work.CommitWithOutcomesAsync();
+                else
+                    await work.CommitAsync();
+            }
+            else if (exact)
+                work.CommitWithOutcomes();
+            else
+                work.Commit();
+        });
+
+        Assert.Equal("structured observer re-entry", exception.Message);
+        Assert.False(work.IsTerminal);
+        Assert.False(opened.Closed);
+        Assert.Equal(0, opened.BatchApplyCalls);
+        Assert.Equal(0, connection.CommitCalls);
+        Assert.Equal(0, connection.RollbackCalls);
+        Assert.Equal(0, connection.TransactionDisposeCalls);
+        Assert.Equal(0, connection.ConnectionDisposeCalls);
+
+        guard.Throw = false;
+        Assert.Equal(1, work.Commit().Submitted);
+        Assert.Equal(1, opened.BatchApplyCalls);
+        Assert.Equal(1, connection.CommitCalls);
+        Assert.Equal(0, connection.RollbackCalls);
+    }
+
+    [Fact]
+    public void Guarded_unit_of_work_refuses_rollback_and_dispose_before_transaction_mutation()
+    {
+        var connection = new TrackingConnection();
+        var guard = new ReentryGuard();
+        using var work = CreateGuardedWork(connection, guard);
+
+        Assert.Throws<InvalidOperationException>(() => work.Rollback());
+        Assert.False(work.IsTerminal);
+        Assert.Equal(0, connection.CommitCalls);
+        Assert.Equal(0, connection.RollbackCalls);
+        Assert.Equal(0, connection.TransactionDisposeCalls);
+        Assert.Equal(0, connection.ConnectionDisposeCalls);
+
+        Assert.Throws<InvalidOperationException>(() => work.Dispose());
+        Assert.False(work.IsTerminal);
+        Assert.Equal(0, connection.RollbackCalls);
+
+        guard.Throw = false;
+        work.Dispose();
+        Assert.True(work.IsTerminal);
+        Assert.Equal(1, connection.RollbackCalls);
+        Assert.Equal(1, connection.TransactionDisposeCalls);
+        Assert.Equal(1, connection.ConnectionDisposeCalls);
+    }
+
+    [Fact]
+    public void Guarded_unit_of_work_refuses_stage_before_flush_and_can_continue_after_guard_release()
+    {
+        var connection = new TrackingConnection();
+        var guard = new ReentryGuard();
+        TrackingSession? opened = null;
+        using var work = CreateGuardedWork(
+            connection,
+            guard,
+            session => opened = session,
+            new BatchWriteOptions { MaxRowsPerFlush = 1 });
+        var write = RowWrite.Insert(Unit(), Values("one"));
+
+        Assert.Throws<InvalidOperationException>(() => work.Stage(write));
+        Assert.False(work.IsTerminal);
+        Assert.Null(opened);
+        Assert.Equal(0, connection.CommitCalls);
+        Assert.Equal(0, connection.RollbackCalls);
+
+        guard.Throw = false;
+        work.Stage(RowWrite.Insert(Unit(), Values("one")));
+        Assert.Equal(1, opened!.BatchApplyCalls);
+        work.Rollback();
+    }
+
+    [Fact]
+    public void Guarded_unit_of_work_refuses_open_session_before_factory_mutation()
+    {
+        var connection = new TrackingConnection();
+        var guard = new ReentryGuard();
+        TrackingSession? opened = null;
+        using var work = CreateGuardedWork(connection, guard, session => opened = session);
+
+        Assert.Throws<InvalidOperationException>(() => work.OpenSession(Unit()));
+        Assert.False(work.IsTerminal);
+        Assert.Null(opened);
+        Assert.Equal(0, connection.CommitCalls);
+        Assert.Equal(0, connection.RollbackCalls);
+        Assert.Equal(0, connection.TransactionDisposeCalls);
+        Assert.Equal(0, connection.ConnectionDisposeCalls);
+
+        guard.Throw = false;
+        _ = work.OpenSession(Unit());
+        Assert.NotNull(opened);
+        work.Rollback();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Guarded_unit_of_work_refuses_session_read_barrier_before_flushing(bool asynchronous)
+    {
+        var connection = new TrackingConnection();
+        var guard = new ReentryGuard { Throw = false };
+        TrackingSession? opened = null;
+        using var work = CreateGuardedWork(connection, guard, session => opened = session, BatchWriteOptions.Exact);
+        var session = work.OpenSession(Unit());
+        work.Stage(RowWrite.Insert(Unit(), Values("one")));
+        var key = new StorageKey(new Dictionary<string, object?> { ["id"] = "one" });
+        guard.Throw = true;
+        try
+        {
+            var failure = await Record.ExceptionAsync(async () =>
+            {
+                if (asynchronous)
+                    await session.ReadAsync(key);
+                else
+                    session.Read(key);
+            });
+            Assert.Equal(0, opened!.BatchApplyCalls);
+            var exception = Assert.IsType<InvalidOperationException>(failure);
+            Assert.Equal("structured observer re-entry", exception.Message);
+            Assert.False(work.IsTerminal);
+        }
+        finally
+        {
+            guard.Throw = false;
+        }
+
+        Assert.Equal(1, work.Commit().Submitted);
+        Assert.Equal(1, opened!.BatchApplyCalls);
+        Assert.Equal(1, connection.CommitCalls);
+        Assert.Equal(0, connection.RollbackCalls);
+    }
+
+    private static RelationalUnitOfWork CreateGuardedWork(
+        TrackingConnection connection,
+        ReentryGuard guard,
+        Action<TrackingSession>? capture = null,
+        BatchWriteOptions? options = null)
+    {
+        var transaction = connection.BeginTransaction();
+        return new RelationalUnitOfWork(
+            [Unit()],
+            options ?? BatchWriteOptions.Default,
+            declaration =>
+            {
+                var storage = new TrackingStorageAdapter(connection);
+                var session = new TrackingSession(
+                    declaration,
+                    connection,
+                    storage,
+                    new TrackingAppendAdapter(storage),
+                    transaction);
+                capture?.Invoke(session);
+                return new RelationalUnitOfWorkSession(session, session.Close);
+            },
+            new RelationalUnitOfWorkLifetime(
+                connection,
+                transaction,
+                supportsAsync: true,
+                disposeTransaction: true),
+            guard.ThrowIfReentry);
+    }
+
+    private sealed class ReentryGuard
+    {
+        internal bool Throw { get; set; } = true;
+
+        internal void ThrowIfReentry()
+        {
+            if (Throw)
+                throw new InvalidOperationException("structured observer re-entry");
+        }
+    }
+
     private static StorageValues Values(string payload) =>
         new(new Dictionary<string, object?> { ["id"] = "one", ["payload"] = payload });
 
@@ -161,12 +360,27 @@ public sealed class RelationalStorageSessionBaseTests
             append,
             retentionAdapter: null,
             onAppendRetentionOwner: connection,
-            transaction: transaction)
+            transaction: transaction), IBatchedStorageSession
     {
         internal bool Closed => IsClosed;
+        internal int BatchApplyCalls { get; private set; }
 
         internal bool ProviderWriteSawTransaction() =>
             ExecuteProviderWriteCore(_ => ValueTask.FromResult(storage.Transaction is not null));
+
+        public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes)
+        {
+            BatchApplyCalls++;
+            return writes.Select(write => new RowWriteOutcome(
+                write,
+                new WriteOutcome(WriteOutcomeStatus.Inserted))).ToArray();
+        }
+
+        public ValueTask<IReadOnlyList<RowWriteOutcome>> ApplyBatchAsync(
+            IReadOnlyList<RowWrite> writes,
+            bool exactOutcomes,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult<IReadOnlyList<RowWriteOutcome>>(ApplyBatch(writes));
     }
 
     private sealed class TrackingStorageAdapter(TrackingConnection connection)
@@ -295,6 +509,8 @@ public sealed class RelationalStorageSessionBaseTests
     {
         internal int CommitCalls { get; private set; }
         internal int RollbackCalls { get; private set; }
+        internal int TransactionDisposeCalls { get; private set; }
+        internal int ConnectionDisposeCalls { get; private set; }
 
 #pragma warning disable CS8765
         public override string ConnectionString { get; set; } = string.Empty;
@@ -306,6 +522,12 @@ public sealed class RelationalStorageSessionBaseTests
         public override void ChangeDatabase(string databaseName) { }
         public override void Close() { }
         public override void Open() { }
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+                ConnectionDisposeCalls++;
+            base.Dispose(disposing);
+        }
         protected override DbCommand CreateDbCommand() => throw new NotSupportedException();
         protected override DbTransaction BeginDbTransaction(IsolationLevel isolationLevel) =>
             new TrackingTransaction(this, isolationLevel);
@@ -318,6 +540,13 @@ public sealed class RelationalStorageSessionBaseTests
             protected override DbConnection DbConnection => connection;
             public override void Commit() => connection.CommitCalls++;
             public override void Rollback() => connection.RollbackCalls++;
+
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing)
+                    connection.TransactionDisposeCalls++;
+                base.Dispose(disposing);
+            }
         }
     }
 

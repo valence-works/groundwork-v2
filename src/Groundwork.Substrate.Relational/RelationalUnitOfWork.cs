@@ -13,6 +13,7 @@ public sealed class RelationalUnitOfWork : IUnitOfWork
     private readonly IReadOnlyDictionary<StorageUnitId, StorageUnit> units;
     private readonly Func<StorageUnit, RelationalUnitOfWorkSession> sessionFactory;
     private readonly RelationalUnitOfWorkLifetime lifetime;
+    private readonly Action? beforeOperation;
     private readonly List<RelationalUnitOfWorkSession> sessions = [];
     private readonly BatchContext batch;
     private bool terminal;
@@ -24,6 +25,16 @@ public sealed class RelationalUnitOfWork : IUnitOfWork
         BatchWriteOptions options,
         Func<StorageUnit, RelationalUnitOfWorkSession> sessionFactory,
         RelationalUnitOfWorkLifetime lifetime)
+        : this(declarations, options, sessionFactory, lifetime, beforeOperation: null)
+    {
+    }
+
+    internal RelationalUnitOfWork(
+        IEnumerable<StorageUnit> declarations,
+        BatchWriteOptions options,
+        Func<StorageUnit, RelationalUnitOfWorkSession> sessionFactory,
+        RelationalUnitOfWorkLifetime lifetime,
+        Action? beforeOperation)
     {
         ArgumentNullException.ThrowIfNull(declarations);
         ArgumentNullException.ThrowIfNull(options);
@@ -33,7 +44,8 @@ public sealed class RelationalUnitOfWork : IUnitOfWork
         units = declarations.ToDictionary(unit => unit.Id);
         this.sessionFactory = sessionFactory;
         this.lifetime = lifetime;
-        batch = new BatchContext(options);
+        this.beforeOperation = beforeOperation;
+        batch = new BatchContext(options, beforeOperation);
     }
 
     public IStorageSession OpenSession(StorageUnit unit)
@@ -66,8 +78,12 @@ public sealed class RelationalUnitOfWork : IUnitOfWork
     public BatchWriteSummary Commit() =>
         BatchWriteSummary.FromOutcomes(CompleteCommit(RelationalExecution.Synchronous).GetAwaiter().GetResult());
 
-    public async ValueTask<BatchWriteSummary> CommitAsync(CancellationToken cancellationToken = default) =>
-        BatchWriteSummary.FromOutcomes(await CompleteCommit(lifetime.Execution(cancellationToken)).ConfigureAwait(false));
+    public async ValueTask<BatchWriteSummary> CommitAsync(CancellationToken cancellationToken = default)
+    {
+        ThrowIfTerminal();
+        return BatchWriteSummary.FromOutcomes(
+            await CompleteCommit(lifetime.Execution(cancellationToken)).ConfigureAwait(false));
+    }
 
     public BatchWriteReport CommitWithOutcomes()
     {
@@ -138,6 +154,7 @@ public sealed class RelationalUnitOfWork : IUnitOfWork
 
     private void ThrowIfTerminal()
     {
+        beforeOperation?.Invoke();
         if (terminal)
             throw new InvalidOperationException("The unit of work is already terminal.");
     }
