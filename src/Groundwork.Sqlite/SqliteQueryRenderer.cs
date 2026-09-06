@@ -23,7 +23,10 @@ public sealed class SqliteQueryRenderer : RelationalQueryRenderer
     protected override string RenderColumn(ColumnRef column)
     {
         if (string.Equals(column.Name, CrossScopeQueryMaterializer.ScopeTokenColumn, StringComparison.Ordinal))
+        {
+            EvidenceUnsupported();
             return "groundwork_scope_token(" + Dialect.QuoteIdentifier(SqliteSchemaCoordinator.ScopeColumn) + ") COLLATE GROUNDWORK_UTF16_ORDINAL";
+        }
         var native = column.Type switch
         {
             QueryType.Decimal => base.RenderColumn(column) + " COLLATE GROUNDWORK_DECIMAL_18_4",
