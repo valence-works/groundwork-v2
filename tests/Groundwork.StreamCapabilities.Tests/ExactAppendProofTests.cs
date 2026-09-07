@@ -97,6 +97,37 @@ public sealed class ExactAppendProofTests
     }
 
     [SkippableFact]
+    public void MongoDB_exact_append_inserts_a_payload_with_one_range_allocation_and_one_insert_many()
+    {
+        var connectionString = LiveMongo.ConnectionString;
+        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB exact append proof.");
+        using var connection = new MongoProviderFactory().Create(connectionString!);
+        Skip.If(!connection.Capabilities.Any(capability => capability.Id == BatchWriteCapabilities.ExactAppendOutcomes),
+            "MongoDB deployment does not advertise transaction-backed exact append outcomes.");
+        var unit = GeneratedUnit("mongodb-append-payload-shape-" + Guid.NewGuid().ToString("N"));
+        connection.Schema.Apply(unit);
+        var observer = new ProviderCommandObserver();
+        var session = connection.OpenSession(unit, StorageAccess.Global, observer);
+        var instant = new DateTimeOffset(2026, 9, 7, 12, 0, 0, TimeSpan.Zero);
+        var payload = Enumerable.Range(0, 200).Select(index => Values("row-" + index, instant)).ToArray();
+
+        var committed = session.AppendWithOutcomes(new OperationId(instant, "payload-shape"), payload);
+
+        Assert.Equal(WriteOutcomeStatus.Inserted, committed.Status);
+        var generated = committed.Outcomes.Select(outcome => Convert.ToInt64(outcome.GeneratedValues!["sequence"], CultureInfo.InvariantCulture)).ToArray();
+        Assert.Equal(Enumerable.Range(0, 200).Select(index => generated[0] + index), generated);
+        // One counter command for the whole range and one ordered InsertMany, instead of a sequence
+        // allocation, an InsertOne and a high-water update per document (#425).
+        Assert.Equal(1, observer.Commands.Count(command => command.Operation == "mongodb.provider-sequence"));
+        Assert.Equal(1, observer.Commands.Count(command => command.Operation == "mongodb.append-insert-many"));
+        Assert.Equal(0, observer.Commands.Count(command => command.Operation == "mongodb.none-write"));
+
+        var replayed = session.AppendWithOutcomes(new OperationId(instant, "payload-shape"), payload);
+        Assert.Equal(WriteOutcomeStatus.Replayed, replayed.Status);
+        Assert.Equal(generated, replayed.Outcomes.Select(outcome => Convert.ToInt64(outcome.GeneratedValues!["sequence"], CultureInfo.InvariantCulture)));
+    }
+
+    [SkippableFact]
     public void MongoDB_without_transaction_fit_refuses_exact_append_before_dispatch()
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_STANDALONE_CONNECTION");

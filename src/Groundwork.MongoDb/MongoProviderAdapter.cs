@@ -47,7 +47,7 @@ internal sealed class MongoStoreConnection : IStorageProviderConnection, IQueryA
         {
             var descriptors = BatchWriteCapabilities.ForProvider(
                 "MongoDB", nativeBatch: true,
-                exactOutcomeCost: "one FindOneAndUpdate per coalesced row",
+                exactOutcomeCost: "one FindOneAndUpdate per coalesced row; an exact append costs one sequence-range allocation, one ordered InsertMany and one high-water update per payload",
                 batchCost: "uses unordered BulkWrite for aggregate commits",
                 exactAppendOutcomes: true,
                 durableHighWaterInspection: true,

@@ -555,7 +555,7 @@
         {
           "Id": "groundwork.column.provider-sequence",
           "DisplayName": "Provider-assigned monotonic sequence",
-          "Description": "MongoDB monotonically allocates a sequence in a counter collection and commits it with the row in a transaction-capable deployment; concurrent commit order may differ and each inserted row/coalesced exact write uses one additional counter command.",
+          "Description": "MongoDB monotonically allocates a sequence in a counter collection and commits it with the row in a transaction-capable deployment; concurrent commit order may differ. Each ordinary inserted row or coalesced exact write uses one additional counter command; an exact append allocates its whole payload\u0027s range with one counter command.",
           "EvidenceGated": true,
           "AdditionalCommandsPerWrite": 1
         },
