@@ -1989,10 +1989,10 @@ public sealed class SqliteProviderTests
     }
 
     [Fact]
-    public async Task Async_query_cancelled_while_waiting_for_the_provider_gate_is_refused()
+    public async Task Async_query_cancelled_while_waiting_for_the_shared_connection_gate_is_refused()
     {
-        using var store = TemporaryStore.Create();
-        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        // Shared in-memory sessions still queue behind the provider gate; file-backed sessions do not (#424).
+        using var connection = new SqliteProviderFactory().Create("Data Source=:memory:");
         var unit = new StorageUnit
         {
             Id = new StorageUnitId("linq-gate"), Name = "linq_gate",
@@ -2105,30 +2105,63 @@ public sealed class SqliteProviderTests
     }
 
     [Fact]
-    public async Task Async_write_waits_for_the_provider_gate()
+    public async Task File_backed_session_opens_and_commands_do_not_wait_for_the_provider_gate()
     {
         using var store = TemporaryStore.Create();
         using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
         var unit = new StorageUnit
         {
-            Id = new StorageUnitId("async-gate"), Name = "async_gate",
+            Id = new StorageUnitId("independent-gate"), Name = "independent_gate",
+            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["Id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        Task<StoredEntry?> pending;
+        using (((SqliteProviderConnection)connection).EnterGate())
+        {
+            pending = Task.Run(async () =>
+            {
+                var session = connection.OpenSession(unit, StorageAccess.Global);
+                await session.InsertAsync(new StorageValues(new Dictionary<string, object?> { ["Id"] = "a" }));
+                return await session.ReadAsync(new StorageKey(new Dictionary<string, object?> { ["Id"] = "a" }));
+            });
+            Assert.NotNull(await pending.WaitAsync(TimeSpan.FromSeconds(5)));
+        }
+    }
+
+    [Fact]
+    public async Task Session_reads_proceed_and_writes_wait_at_the_sqlite_lock_while_another_unit_of_work_is_open()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("uow-reader"), Name = "uow_reader",
             Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false }],
             Key = new KeyDefinition { Columns = ["Id"] }
         };
         Assert.True(connection.Schema.Apply(unit).Applied);
         var session = connection.OpenSession(unit, StorageAccess.Global);
+        Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(new StorageValues(new Dictionary<string, object?> { ["Id"] = "before" })).Status);
 
-        Task<WriteOutcome> pending;
-        using (((SqliteProviderConnection)connection).EnterGate())
-        {
-            pending = Task.Run(() =>
-                session.InsertAsync(new StorageValues(new Dictionary<string, object?> { ["Id"] = "a" })).AsTask());
-            Thread.Sleep(250);
-            Assert.False(pending.IsCompleted);
-        }
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
+        var staged = work.OpenSession(unit);
+        Assert.Equal(WriteOutcomeStatus.Inserted, staged.Insert(new StorageValues(new Dictionary<string, object?> { ["Id"] = "staged" })).Status);
 
-        Assert.Equal(WriteOutcomeStatus.Inserted, (await pending).Status);
-        Assert.NotNull(await session.ReadAsync(new StorageKey(new Dictionary<string, object?> { ["Id"] = "a" })));
+        // A reader on its own connection is not queued behind the open unit of work.
+        var read = Task.Run(() => session.Read(new StorageKey(new Dictionary<string, object?> { ["Id"] = "before" })));
+        Assert.NotNull(await read.WaitAsync(TimeSpan.FromSeconds(5)));
+        var opened = Task.Run(() => connection.OpenSession(unit, StorageAccess.Global));
+        Assert.NotNull(await opened.WaitAsync(TimeSpan.FromSeconds(5)));
+
+        // A writer waits on SQLite's own lock, through the busy timeout, until the unit of work is terminal.
+        var write = Task.Run(() => session.Insert(new StorageValues(new Dictionary<string, object?> { ["Id"] = "after" })));
+        await Task.Delay(TimeSpan.FromMilliseconds(250));
+        Assert.False(write.IsCompleted);
+        Assert.True(work.CommitWithOutcomes().IsSuccessful);
+        Assert.Equal(WriteOutcomeStatus.Inserted, (await write.WaitAsync(TimeSpan.FromSeconds(10))).Status);
+        Assert.NotNull(session.Read(new StorageKey(new Dictionary<string, object?> { ["Id"] = "staged" })));
     }
 
     [Fact]

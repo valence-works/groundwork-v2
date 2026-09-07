@@ -1845,6 +1845,11 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         SchemaSessionLease schemaSession,
         Action<SqliteTransaction> rollback) : IRelationalSessionExecutionAdapter
     {
+        // A non-owning view on an independent file connection serializes its own commands here, as the
+        // PostgreSQL and SQL Server views do, instead of on the provider gate a unit of work holds for its whole
+        // lifetime (#424). Only the shared in-memory connection still contends on that gate.
+        private readonly SemaphoreSlim? sessionGate = owner.UsesSharedSessionConnection ? null : new(1, 1);
+
         public bool SerializeAmbientReads => false;
 
         public void EnsureUsable()
@@ -1853,8 +1858,20 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
             schemaSession.EnsureCurrent();
         }
 
-        public ValueTask<IDisposable> EnterGate(RelationalExecution execution) =>
-            owner.EnterGate(execution);
+        public async ValueTask<IDisposable> EnterGate(RelationalExecution execution)
+        {
+            if (sessionGate is null)
+                return await owner.EnterGate(execution).ConfigureAwait(false);
+            await sessionGate.WaitAsync(execution.CancellationToken).ConfigureAwait(false);
+            return new SessionGateLease(sessionGate);
+        }
+
+        private sealed class SessionGateLease(SemaphoreSlim gate) : IDisposable
+        {
+            private SemaphoreSlim? remaining = gate;
+
+            public void Dispose() => Interlocked.Exchange(ref remaining, null)?.Release();
+        }
 
         public ValueTask<DbTransaction> BeginWrite(RelationalExecution execution) =>
             ValueTask.FromResult<DbTransaction>(
