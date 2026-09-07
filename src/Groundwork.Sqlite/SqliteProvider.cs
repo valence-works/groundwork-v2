@@ -30,6 +30,10 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
     };
 
     private readonly ProviderGate gate;
+    // Guards the session-connection registry against provider disposal. File-backed session opens no longer
+    // take the provider gate (#424), so this narrower lock is what keeps a registering session from being
+    // missed by a concurrent Dispose.
+    private readonly object sessionRegistry = new();
     private readonly AsyncLocal<int> observerCallbackDepth = new();
     private readonly SqliteConnection connection;
     private readonly FileStream? schemaLock;
@@ -113,12 +117,26 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
     internal ValueTask<IDisposable> EnterGate(RelationalExecution _) =>
         ValueTask.FromResult(EnterGate());
 
+    /// <summary>
+    /// A session on an independent file connection needs no provider gate to open: its schema admission and
+    /// commands run on its own connection, and SQLite's WAL and busy handling arbitrate against any unit of
+    /// work at the lock level. Only the shared in-memory connection still serializes opens behind the gate.
+    /// </summary>
+    private IDisposable? EnterSessionOpenGate() => isMemory ? EnterGate() : null;
+
     private IDisposable EnterUnitOfWorkGate()
     {
         if (gate.IsHeldByCurrentThread)
         {
             throw new InvalidOperationException(
                 "SQLite cannot begin a unit of work by re-entering provider work on the same thread.");
+        }
+        if (observerCallbackDepth.Value > 0)
+        {
+            // The observed command holds its own connection's write lock; a unit of work begun from inside the
+            // callback would wait on that lock until the busy timeout instead of deadlocking outright.
+            throw new InvalidOperationException(
+                "SQLite cannot begin a unit of work from inside a command observer callback.");
         }
         return gate.Enter(new object());
     }
@@ -202,7 +220,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
         SqliteSchemaCoordinator.ValidateAccess(unit, access);
         var physicalUnit = SqliteSchemaCoordinator.Physicalize(unit);
         observer = GuardObserver(observer);
-        using var gateLease = EnterGate();
+        using var gateLease = EnterSessionOpenGate();
         ThrowIfDisposed();
         var sessionConnection = isMemory ? connection : CreateIndependentConnection();
         try
@@ -234,7 +252,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
         SqliteSchemaCoordinator.ValidateAccess(unit, access);
         var physicalUnit = SqliteSchemaCoordinator.Physicalize(unit);
         observer = GuardObserver(observer);
-        using var gateLease = EnterGate();
+        using var gateLease = EnterSessionOpenGate();
         ThrowIfDisposed();
         var sessionConnection = isMemory ? connection : CreateIndependentConnection();
         try
@@ -359,42 +377,50 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
 
     private void DisposeResourcesWhileHoldingGate()
     {
-        if (!disposeRequested || resourcesDisposed)
-            return;
-        disposed = true;
-        resourcesDisposed = true;
-        connection.Dispose();
-        foreach (var sessionConnection in sessionConnections)
+        lock (sessionRegistry)
         {
-            sessionConnection.Dispose();
+            if (!disposeRequested || resourcesDisposed)
+                return;
+            disposed = true;
+            resourcesDisposed = true;
+            connection.Dispose();
+            foreach (var sessionConnection in sessionConnections)
+            {
+                sessionConnection.Dispose();
+            }
+            sessionConnections.Clear();
+            schemaLock?.Dispose();
         }
-        sessionConnections.Clear();
-        schemaLock?.Dispose();
     }
 
     private void RegisterSessionConnection(
         SqliteConnection sessionConnection,
         IProviderCommandObserver? observer)
     {
-        ThrowIfDisposed();
-        if (observer is GuardedCommandObserver { SupportsSessionRegistration: true } registrationObserver)
+        // Held across the eligibility callback on purpose: a Dispose that starts while a session is
+        // registering waits here and then closes that session's connection, instead of missing it.
+        lock (sessionRegistry)
         {
-            activeRegistrationObserver = registrationObserver;
-            try
+            ThrowIfDisposed();
+            if (observer is GuardedCommandObserver { SupportsSessionRegistration: true } registrationObserver)
             {
-                registrationObserver.OnSessionRegistrationEligibilityChecked();
-                ThrowIfDisposed();
-                if (!isMemory)
-                    sessionConnections.Add(sessionConnection);
+                activeRegistrationObserver = registrationObserver;
+                try
+                {
+                    registrationObserver.OnSessionRegistrationEligibilityChecked();
+                    ThrowIfDisposed();
+                    if (!isMemory)
+                        sessionConnections.Add(sessionConnection);
+                }
+                finally
+                {
+                    activeRegistrationObserver = null;
+                }
             }
-            finally
+            else if (!isMemory)
             {
-                activeRegistrationObserver = null;
+                sessionConnections.Add(sessionConnection);
             }
-        }
-        else if (!isMemory)
-        {
-            sessionConnections.Add(sessionConnection);
         }
     }
 
