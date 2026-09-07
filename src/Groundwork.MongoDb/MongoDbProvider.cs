@@ -28,7 +28,7 @@ public static class MongoCapabilities
     public static CapabilityDescriptor ProviderSequenceDescriptor { get; } = new(
         ProviderSequence,
         "Provider-assigned monotonic sequence",
-        "MongoDB monotonically allocates a sequence in a counter collection and commits it with the row in a transaction-capable deployment; concurrent commit order may differ and each inserted row/coalesced exact write uses one additional counter command.",
+        "MongoDB monotonically allocates a sequence in a counter collection and commits it with the row in a transaction-capable deployment; concurrent commit order may differ. Each ordinary inserted row or coalesced exact write uses one additional counter command; an exact append allocates its whole payload's range with one counter command.",
         EvidenceGatedByDefault: true,
         OwningModule: "groundwork-mongodb",
         AdditionalProviderCommandsPerWrite: 1);
@@ -2861,16 +2861,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         if (previous is not null)
             return ReadExistingAppend(previous, operationId, scope, fingerprint, exactOutcomes);
 
-        var outcomes = new List<MongoWriteOutcome>(values.Count);
-        foreach (var value in values)
-        {
-            var outcome = await MutateCore(value, MongoWriteOptions.Unconditional, MutationKind.Insert, mode)
-                .ConfigureAwait(false);
-            if (!outcome.Succeeded)
-                throw new InvalidOperationException("An idempotent append payload row was not accepted; the ledger and payload were rolled back.");
-            await RecordHighWater(outcome.GeneratedValues, mode).ConfigureAwait(false);
-            outcomes.Add(outcome);
-        }
+        var outcomes = await InsertAppendPayload(values, mode).ConfigureAwait(false);
         var serializedResult = ExactAppendCodec.SerializeOutcomes(
             outcomes.Select(outcome => new WriteOutcome(
                 (WriteOutcomeStatus)outcome.Status,
@@ -2889,6 +2880,129 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                     ledger.UpdateOne(transactionSession, new BsonDocument("_id", identity), completed);
             }).ConfigureAwait(false);
         return new MongoAppendExecution(MongoWriteOutcomeStatus.Inserted, outcomes);
+    }
+
+    private const string RejectedAppendRow =
+        "An idempotent append payload row was not accepted; the ledger and payload were rolled back.";
+
+    /// <summary>
+    /// Inserts an exact-append payload with one sequence-range allocation, one ordered <c>InsertMany</c> and one
+    /// high-water update instead of three commands per document (#425). It runs inside the append's transaction,
+    /// so a rejected document aborts the whole payload exactly as the per-document path did. Optimistic units keep
+    /// that per-document path: their version metadata is written per row and is not part of this batch shape.
+    /// </summary>
+    private async ValueTask<IReadOnlyList<MongoWriteOutcome>> InsertAppendPayload(
+        IReadOnlyList<MongoStorageValues> values,
+        MongoExecution mode)
+    {
+        var outcomes = new List<MongoWriteOutcome>(values.Count);
+        if (Unit.Concurrency.IsOptimistic)
+        {
+            foreach (var row in values)
+            {
+                var outcome = await MutateCore(row, MongoWriteOptions.Unconditional, MutationKind.Insert, mode)
+                    .ConfigureAwait(false);
+                if (!outcome.Succeeded)
+                    throw new InvalidOperationException(RejectedAppendRow);
+                await RecordHighWater(outcome.GeneratedValues, mode).ConfigureAwait(false);
+                outcomes.Add(outcome);
+            }
+            return outcomes;
+        }
+
+        var sequence = Unit.Columns.FirstOrDefault(column => column.Generation == ColumnGeneration.ProviderSequence);
+        if (sequence is not null && values.Any(value => value.Values.ContainsKey(sequence.Name)))
+        {
+            throw new ArgumentException(
+                $"ProviderSequence column '{sequence.Name}' is assigned by MongoDB and cannot be supplied for Insert.",
+                nameof(values));
+        }
+        var first = sequence is null ? 0L : await NextSequenceRange(sequence, values.Count, mode).ConfigureAwait(false);
+        var documents = new List<BsonDocument>(values.Count);
+        long? highWater = null;
+        for (var index = 0; index < values.Count; index++)
+        {
+            var keyValues = SearchKeyProjection.Populate(Unit, values[index].Values);
+            var generatedValues = new Dictionary<string, object?>(StringComparer.Ordinal);
+            if (sequence is not null)
+            {
+                var generated = first + index;
+                var copied = keyValues.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+                copied[sequence.Name] = generated;
+                keyValues = copied;
+                generatedValues[sequence.Name] = generated;
+                highWater = generated;
+            }
+            var identity = MongoDocumentMapper.EncodeKey(Unit, keyValues);
+            documents.Add(await MongoDocumentMapper.EncodeDocument(
+                Unit,
+                keyValues,
+                identity,
+                existing: null,
+                column => NextSequence(column, mode),
+                generatedValues: generatedValues).ConfigureAwait(false));
+            outcomes.Add(new MongoWriteOutcome(MongoWriteOutcomeStatus.Inserted, generatedValues: generatedValues));
+        }
+
+        commandObserver?.Observe(new ProviderCommandEvent(
+            "mongodb.append-insert-many",
+            "MongoDB.InsertMany(ordered)",
+            ProviderCommandKind.Write,
+            IsProbe: false));
+        var options = new InsertManyOptions { IsOrdered = true };
+        try
+        {
+            await mode.Run(
+                token => transactionSession is null
+                    ? collection.InsertManyAsync(documents, options, token)
+                    : collection.InsertManyAsync(transactionSession, documents, options, token),
+                () =>
+                {
+                    if (transactionSession is null)
+                        collection.InsertMany(documents, options);
+                    else
+                        collection.InsertMany(transactionSession, documents, options);
+                }).ConfigureAwait(false);
+        }
+        catch (MongoBulkWriteException<BsonDocument> exception) when (
+            exception.WriteErrors.Any(error => error.Category == ServerErrorCategory.DuplicateKey))
+        {
+            throw new InvalidOperationException(RejectedAppendRow, exception);
+        }
+        catch (MongoCommandException exception) when (
+            ShouldNormalizeTransientWriteConflict && IsTransientWriteConflict(exception))
+        {
+            throw new InvalidOperationException(RejectedAppendRow, exception);
+        }
+
+        if (sequence is not null && highWater is { } value)
+        {
+            await RecordHighWater(
+                new Dictionary<string, object?>(StringComparer.Ordinal) { [sequence.Name] = value },
+                mode).ConfigureAwait(false);
+        }
+        return outcomes;
+    }
+
+    /// <summary>Allocates <paramref name="count"/> consecutive sequence values with one counter command and returns the first.</summary>
+    private async ValueTask<long> NextSequenceRange(ColumnDefinition column, int count, MongoExecution mode)
+    {
+        commandObserver?.Observe(new ProviderCommandEvent(
+            "mongodb.provider-sequence",
+            "MongoDB.FindOneAndUpdate(sequence range)",
+            ProviderCommandKind.Write,
+            IsProbe: false));
+        var filter = new BsonDocument("_id", Unit.Id.Value + ":" + column.Name);
+        var update = Builders<BsonDocument>.Update.Inc("value", (long)count);
+        var options = new FindOneAndUpdateOptions<BsonDocument>
+        {
+            IsUpsert = true,
+            ReturnDocument = ReturnDocument.After
+        };
+        var allocated = await mode.Run(
+            token => state.Sequences.FindOneAndUpdateAsync(transactionSession, filter, update, options, token),
+            () => state.Sequences.FindOneAndUpdate(transactionSession, filter, update, options)).ConfigureAwait(false);
+        return allocated!["value"].ToInt64() - count + 1;
     }
 
     private static BsonDocument MissingOrLiteral(string field, string value) =>
