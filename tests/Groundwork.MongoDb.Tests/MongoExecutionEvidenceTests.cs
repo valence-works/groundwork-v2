@@ -34,7 +34,7 @@ public sealed class MongoExecutionEvidenceTests
             Projection.ColumnsOnly(id, status),
             Paging.OffsetLimit(2, 3));
         var observer = new RecordingEvidenceObserver();
-        var capture = new MongoExecutionEvidenceCapture(observer, unit, MongoStorageAccess.Global);
+        var capture = new MongoExecutionEvidenceCapture(observer, unit, MongoStorageAccess.Global, TestServerVersion);
 
         var emission = new MongoQueryRenderer().RenderWithEvidence(
             request,
@@ -89,7 +89,7 @@ public sealed class MongoExecutionEvidenceTests
             Key = new KeyDefinition { Columns = ["id"] }
         };
         var observer = new RecordingEvidenceObserver();
-        var capture = new MongoExecutionEvidenceCapture(observer, unit, MongoStorageAccess.Scoped(new StorageScope("tenant-secret")));
+        var capture = new MongoExecutionEvidenceCapture(observer, unit, MongoStorageAccess.Scoped(new StorageScope("tenant-secret")), TestServerVersion);
 
         var point = MongoExecutionEvidenceBuilder.CreatePointRead(unit, capture);
 
@@ -113,7 +113,7 @@ public sealed class MongoExecutionEvidenceTests
             [],
             Projection.All,
             Paging.None);
-        var capture = new MongoExecutionEvidenceCapture(new RecordingEvidenceObserver(), unit, MongoStorageAccess.Global);
+        var capture = new MongoExecutionEvidenceCapture(new RecordingEvidenceObserver(), unit, MongoStorageAccess.Global, TestServerVersion);
 
         var emission = new MongoQueryRenderer().RenderWithEvidence(request, QueryRenderOptions.Default, "physical", capture, false);
 
@@ -131,7 +131,7 @@ public sealed class MongoExecutionEvidenceTests
             [],
             Projection.All,
             Paging.OffsetLimit(0, 2));
-        var capture = new MongoExecutionEvidenceCapture(new RecordingEvidenceObserver(), unit, MongoStorageAccess.Global);
+        var capture = new MongoExecutionEvidenceCapture(new RecordingEvidenceObserver(), unit, MongoStorageAccess.Global, TestServerVersion);
 
         var emission = new MongoQueryRenderer().RenderWithEvidence(request, QueryRenderOptions.Default, "physical", capture, false);
 
@@ -154,7 +154,7 @@ public sealed class MongoExecutionEvidenceTests
             Projection.All,
             Paging.OffsetLimit(0, 2));
         var options = new QueryRenderOptions([index], selectedIndex: "id_index");
-        var capture = new MongoExecutionEvidenceCapture(new RecordingEvidenceObserver(), unit, MongoStorageAccess.Global);
+        var capture = new MongoExecutionEvidenceCapture(new RecordingEvidenceObserver(), unit, MongoStorageAccess.Global, TestServerVersion);
 
         var emission = new MongoQueryRenderer().RenderWithEvidence(request, options, "physical", capture, false);
 
@@ -175,7 +175,7 @@ public sealed class MongoExecutionEvidenceTests
             [new OrderTerm(id, OrderDirection.Ascending, NullOrder.First)],
             Projection.All,
             Paging.OffsetLimit(0, 2));
-        var capture = new MongoExecutionEvidenceCapture(new RecordingEvidenceObserver(), unit, MongoStorageAccess.Global);
+        var capture = new MongoExecutionEvidenceCapture(new RecordingEvidenceObserver(), unit, MongoStorageAccess.Global, TestServerVersion);
 
         var emission = new MongoQueryRenderer().RenderWithEvidence(request, QueryRenderOptions.Default, "physical", capture, false);
 
@@ -195,7 +195,7 @@ public sealed class MongoExecutionEvidenceTests
             [],
             Projection.All,
             Paging.OffsetLimit(0, 2));
-        var capture = new MongoExecutionEvidenceCapture(new RecordingEvidenceObserver(), unit, MongoStorageAccess.Global);
+        var capture = new MongoExecutionEvidenceCapture(new RecordingEvidenceObserver(), unit, MongoStorageAccess.Global, TestServerVersion);
 
         var emission = new MongoQueryRenderer().RenderWithEvidence(request, QueryRenderOptions.Default, "physical", capture, false);
 
@@ -219,7 +219,7 @@ public sealed class MongoExecutionEvidenceTests
             [],
             Projection.All,
             Paging.OffsetLimit(0, 2));
-        var capture = new MongoExecutionEvidenceCapture(new RecordingEvidenceObserver(), unit, MongoStorageAccess.Global);
+        var capture = new MongoExecutionEvidenceCapture(new RecordingEvidenceObserver(), unit, MongoStorageAccess.Global, TestServerVersion);
 
         var emission = new MongoQueryRenderer().RenderWithEvidence(request, QueryRenderOptions.Default, "physical", capture, false);
 
@@ -237,7 +237,7 @@ public sealed class MongoExecutionEvidenceTests
             [],
             Projection.All,
             Paging.OffsetLimit(0, 2));
-        var capture = new MongoExecutionEvidenceCapture(new RecordingEvidenceObserver(), unit, MongoStorageAccess.Global);
+        var capture = new MongoExecutionEvidenceCapture(new RecordingEvidenceObserver(), unit, MongoStorageAccess.Global, TestServerVersion);
 
         var emission = new MongoQueryRenderer().RenderWithEvidence(request, QueryRenderOptions.Default, "physical", capture, false);
 
@@ -263,7 +263,7 @@ public sealed class MongoExecutionEvidenceTests
                     orderByPhysicalColumn: false, preservesOrdinalIdentity: true)
             }
         };
-        var capture = new MongoExecutionEvidenceCapture(new RecordingEvidenceObserver(), unit, MongoStorageAccess.Global);
+        var capture = new MongoExecutionEvidenceCapture(new RecordingEvidenceObserver(), unit, MongoStorageAccess.Global, TestServerVersion);
 
         var emission = new MongoQueryRenderer().RenderWithEvidence(request, options, "physical", capture, false);
 
@@ -289,7 +289,7 @@ public sealed class MongoExecutionEvidenceTests
                 ["other"] = new("other", "shared_search", QuerySearchKeyPolicy.Ordinal)
             }
         };
-        var capture = new MongoExecutionEvidenceCapture(new RecordingEvidenceObserver(), unit, MongoStorageAccess.Global);
+        var capture = new MongoExecutionEvidenceCapture(new RecordingEvidenceObserver(), unit, MongoStorageAccess.Global, TestServerVersion);
 
         var emission = new MongoQueryRenderer().RenderWithEvidence(request, options, "physical", capture, false);
 
@@ -301,7 +301,7 @@ public sealed class MongoExecutionEvidenceTests
     {
         var unit = CreateSimpleUnit("mongo-evidence-callback");
         var observer = new RecordingEvidenceObserver { ThrowOnObserve = true };
-        var capture = new MongoExecutionEvidenceCapture(observer, unit, MongoStorageAccess.Global);
+        var capture = new MongoExecutionEvidenceCapture(observer, unit, MongoStorageAccess.Global, TestServerVersion);
         var invocation = capture.BeginInvocation();
 
         Assert.Throws<InvalidOperationException>(() => capture.Publish(
@@ -327,7 +327,7 @@ public sealed class MongoExecutionEvidenceTests
         {
             OnObserve = _ => Assert.Throws<InvalidOperationException>(() => capture!.ThrowIfCallbackReentry())
         };
-        capture = new MongoExecutionEvidenceCapture(observer, unit, MongoStorageAccess.Global);
+        capture = new MongoExecutionEvidenceCapture(observer, unit, MongoStorageAccess.Global, TestServerVersion);
 
         capture.Publish(
             capture.BeginInvocation(),
@@ -346,7 +346,7 @@ public sealed class MongoExecutionEvidenceTests
     {
         var unit = CreateSimpleUnit("mongo-evidence-cancelled");
         var observer = new RecordingEvidenceObserver();
-        var capture = new MongoExecutionEvidenceCapture(observer, unit, MongoStorageAccess.Global);
+        var capture = new MongoExecutionEvidenceCapture(observer, unit, MongoStorageAccess.Global, TestServerVersion);
 
         capture.Publish(
             capture.BeginInvocation(),
@@ -458,4 +458,28 @@ public sealed class MongoExecutionEvidenceTests
                 throw new InvalidOperationException("re-entry");
         }
     }
+    [Fact]
+    public void Capture_stamps_the_provider_name_and_the_connected_server_version()
+    {
+        var reads = 0;
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("mongo-evidence-provider"),
+            Name = "mongo_evidence_provider",
+            Columns = [new() { Name = "id", Type = PortableType.String, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        var capture = new MongoExecutionEvidenceCapture(new RecordingEvidenceObserver(), unit, MongoStorageAccess.Global, () =>
+        {
+            reads++;
+            return "8.0.4";
+        });
+
+        Assert.Equal(0, reads);
+        Assert.Equal(new ProviderIdentity(MongoSchemaTargets.Provider.Name, "8.0.4"), capture.Provider);
+        Assert.Equal(capture.Provider, capture.Provider);
+        Assert.Equal(1, reads);
+    }
+
+    private static string TestServerVersion() => "7.0.0-test";
 }
