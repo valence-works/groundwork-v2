@@ -48,12 +48,17 @@ public readonly record struct ProviderPlanLimit
         Value = value;
     }
 
+    /// <summary>Whether the bound was not observed, observed absent, or observed as an explicit literal.</summary>
     public ProviderNativeBoundKind Kind { get; }
+    /// <summary>The literal bound; present only for an explicit kind.</summary>
     public long? Value { get; }
 
+    /// <summary>No bound observation; never a claim that no bound exists.</summary>
     public static ProviderPlanLimit Unknown => default;
+    /// <summary>The provider observed that the operator carries no bound.</summary>
     public static ProviderPlanLimit Absent => new(ProviderNativeBoundKind.Absent, null);
 
+    /// <summary>An explicit positive literal bound the provider stated for the operator.</summary>
     public static ProviderPlanLimit Explicit(long value)
     {
         if (value <= 0)
@@ -65,6 +70,7 @@ public readonly record struct ProviderPlanLimit
 /// <summary>Runtime spill facts observed for one native plan node.</summary>
 public sealed record ProviderPlanSpillDetail
 {
+    /// <summary>Creates an observed spill fact; positive metrics are only valid for an observed spill.</summary>
     public ProviderPlanSpillDetail(bool spilled, long? spilledBytes = null, long? spilledRows = null)
     {
         if (spilledBytes is < 0)
@@ -79,6 +85,7 @@ public sealed record ProviderPlanSpillDetail
         SpilledRows = spilledRows;
     }
 
+    /// <summary>Whether the executed operator spilled, as the provider observed it.</summary>
     public bool Spilled { get; }
     /// <summary>A provider-reported metric, not necessarily physical bytes written to disk.</summary>
     public long? SpilledBytes { get; }
@@ -92,6 +99,7 @@ public sealed record ProviderPlanSpillDetail
 /// </summary>
 public sealed record ProviderPlanNodeDetails
 {
+    /// <summary>Creates a detail set; an empty sort-key collection is rejected while null stays unobserved.</summary>
     public ProviderPlanNodeDetails(
         IEnumerable<ProviderOrderTerm>? nativeSortKeys = null,
         ProviderPlanLimit nativeLimit = default,
@@ -115,8 +123,11 @@ public sealed record ProviderPlanNodeDetails
         Spill = spill;
     }
 
+    /// <summary>The observed native sort keys as logical order terms; null means not observed.</summary>
     public ImmutableArray<ProviderOrderTerm>? NativeSortKeys { get; }
+    /// <summary>The observed native bound on a limiting operator; unknown means not observed.</summary>
     public ProviderPlanLimit NativeLimit { get; }
+    /// <summary>The observed spill fact for an executed operator; null means not observed.</summary>
     public ProviderPlanSpillDetail? Spill { get; }
 }
 
@@ -133,6 +144,7 @@ public sealed record ProviderPlanNode
     {
     }
 
+    /// <summary>Creates a node with optional observed details, which must fit the operator kind.</summary>
     public ProviderPlanNode(int id, int? parentId, ProviderPlanOperator operation,
         ProviderOpaqueIdentity? targetId, ProviderOpaqueIdentity? indexId,
         string? logicalIndexName, bool? isCovering, ProviderPlanSortPurpose? sortPurpose,
@@ -193,6 +205,7 @@ public sealed record ProviderPlanNode
     public string? LogicalIndexName { get; }
     public bool? IsCovering { get; }
     public ProviderPlanSortPurpose? SortPurpose { get; }
+    /// <summary>Optional observed details for sort and limiting operators; null means none observed.</summary>
     public ProviderPlanNodeDetails? Details { get; }
 }
 
@@ -210,6 +223,7 @@ public sealed record ProviderPlanForest
     {
     }
 
+    /// <summary>Creates a forest and optionally records the observed order of its native roots.</summary>
     public ProviderPlanForest(IEnumerable<ProviderPlanNode> nodes, IEnumerable<int>? observedRootOrder)
     {
         Nodes = (nodes ?? throw new ArgumentNullException(nameof(nodes))).ToImmutableArray();
