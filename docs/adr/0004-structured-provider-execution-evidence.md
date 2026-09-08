@@ -220,6 +220,26 @@ second native node or changing parentage. Consumers checking for either kind
 of work must also consider this fused operator. It carries no numeric bound,
 spill claim or access identity; a sort purpose is optional and must be observed.
 
+Since `0.4.0-preview.19`, a sort, top-N sort or limit node may carry optional
+`ProviderPlanNodeDetails`: observed native sort keys, an observed native bound
+and an observed spill fact. Each detail is tri-state. A null detail set, a null
+sort-key collection, an `Unknown` bound kind or a null spill object means "not
+observed"; it never means no sort, no bound or no spill. Sort keys are mapped to
+logical columns through the rendered query's identity-preserving search-key
+mappings; a key that names a foreign relation, an unresolvable expression, or a
+provider-owned column without a recorded mapping leaves the whole key set
+unobserved rather than partially right. SQL Server's `datalength(column)` key is
+the one computed form mapped, as the `OrdinalStringKey` transform on its column.
+A bound is `Explicit` only where the provider states it as a literal (a SQL Server
+`TopSort` row count or `Top` constant, a MongoDB `$limit`/`limitAmount`);
+PostgreSQL's estimated explain exposes none, and `Plan Rows` is never used.
+Spill facts come only from executed observations: a SQL Server replay's
+`SpillToTempDb` warning (or its absence under runtime information) and MongoDB
+`executionStats` `usedDisk`. Estimated plans carry no spill fact, and the kernel
+refuses one on `EstimatedExplain` provenance. Sibling native roots may record
+their observed order in `ProviderPlanForest.ObservedRootOrder`, which is a
+sequence fact and still not parentage.
+
 A native predicate-filtering stage is retained as `ProviderPlanOperator.Filter`
 with its original parentage. This does not expose its expression or values,
 establish selectivity, or prove which declared predicates it enforces. It is

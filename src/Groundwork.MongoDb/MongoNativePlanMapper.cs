@@ -1,4 +1,5 @@
 using Groundwork.Kernel;
+using Groundwork.Query.Model;
 using MongoDB.Bson;
 
 namespace Groundwork.MongoDb;
@@ -49,7 +50,8 @@ internal static class MongoNativePlanMapper
         string expectedNamespace,
         ProviderOpaqueIdentity targetId,
         Func<string, ProviderOpaqueIdentity> indexIdentity,
-        IReadOnlyDictionary<string, string> logicalIndexesByPhysicalName)
+        IReadOnlyDictionary<string, string> logicalIndexesByPhysicalName,
+        IReadOnlyDictionary<string, string>? logicalColumnsByPhysical = null)
     {
         ArgumentNullException.ThrowIfNull(explain);
         ArgumentException.ThrowIfNullOrWhiteSpace(expectedNamespace);
@@ -66,17 +68,22 @@ internal static class MongoNativePlanMapper
             if (roots is null)
                 return null;
 
-            var context = new MappingContext(indexIdentity, logicalIndexesByPhysicalName);
+            var context = new MappingContext(indexIdentity, logicalIndexesByPhysicalName, logicalColumnsByPhysical);
+            var rootOrder = new List<int>();
             foreach (var root in roots)
             {
                 if (root.NativeDocument is not null)
                 {
+                    var rootId = context.NextId;
                     if (!context.ReadPlanNode(root.NativeDocument, parentId: null))
                         return null;
+                    rootOrder.Add(rootId);
                 }
                 else if (root.PipelineOperation is { } operation)
                 {
-                    context.AddPipelineStage(operation);
+                    rootOrder.Add(context.NextId);
+                    if (!context.AddPipelineStage(operation, root.Stage!, root.StageValue!))
+                        return null;
                 }
                 else
                 {
@@ -87,7 +94,9 @@ internal static class MongoNativePlanMapper
             if (context.Nodes.Count == 0 || !context.ApplyCoveringFacts())
                 return null;
 
-            return new ProviderPlanForest(context.Nodes.Select(node => node.ToPublic(targetId)));
+            // Outer aggregation stages and the cursor's winning plan are sibling roots. Their observed
+            // pipeline order is a fact; parentage between them is not, so it is recorded separately.
+            return new ProviderPlanForest(context.Nodes.Select(node => node.ToPublic(targetId)), rootOrder);
         }
         catch (ArgumentException)
         {
@@ -117,7 +126,7 @@ internal static class MongoNativePlanMapper
                 return null;
 
             var winningRoots = TryReadWinningPlan(queryPlannerValue.AsBsonDocument, expectedNamespace);
-            return winningRoots?.Select(document => new PlanRoot(document, null)).ToArray();
+            return winningRoots?.Select(document => new PlanRoot(document, null, null, null)).ToArray();
         }
 
         if (stagesCount != 1 ||
@@ -155,7 +164,7 @@ internal static class MongoNativePlanMapper
                 var winningRoots = TryReadWinningPlan(queryPlanner.AsBsonDocument, expectedNamespace);
                 if (winningRoots is null)
                     return null;
-                roots.AddRange(winningRoots.Select(document => new PlanRoot(document, null)));
+                roots.AddRange(winningRoots.Select(document => new PlanRoot(document, null, null, null)));
                 continue;
             }
 
@@ -165,7 +174,7 @@ internal static class MongoNativePlanMapper
             // Outer aggregation stages have no parent edge in Mongo's explain output. They
             // remain sibling roots; assigning a chain would invent an execution dependency
             // that ProviderPlanForest deliberately does not claim.
-            roots.Add(new PlanRoot(null, operation));
+            roots.Add(new PlanRoot(null, operation, stage, element.Value));
         }
 
         return cursorCount == 1 ? roots : null;
@@ -338,28 +347,128 @@ internal static class MongoNativePlanMapper
 
     private readonly record struct PlanRoot(
         BsonDocument? NativeDocument,
-        ProviderPlanOperator? PipelineOperation);
+        ProviderPlanOperator? PipelineOperation,
+        BsonDocument? Stage,
+        BsonValue? StageValue);
 
     private sealed class MappingContext
     {
         private readonly Func<string, ProviderOpaqueIdentity> indexIdentity;
         private readonly IReadOnlyDictionary<string, string> logicalIndexesByPhysicalName;
+        private readonly IReadOnlyDictionary<string, string>? logicalColumnsByPhysical;
         private readonly Dictionary<string, ProviderOpaqueIdentity> indexIdentities = new(StringComparer.Ordinal);
         private readonly HashSet<int> nativePlanIds = [];
         private int nextId;
 
         internal MappingContext(
             Func<string, ProviderOpaqueIdentity> indexIdentity,
-            IReadOnlyDictionary<string, string> logicalIndexesByPhysicalName)
+            IReadOnlyDictionary<string, string> logicalIndexesByPhysicalName,
+            IReadOnlyDictionary<string, string>? logicalColumnsByPhysical)
         {
             this.indexIdentity = indexIdentity;
             this.logicalIndexesByPhysicalName = logicalIndexesByPhysicalName;
+            this.logicalColumnsByPhysical = logicalColumnsByPhysical;
         }
 
         internal List<MutableNode> Nodes { get; } = [];
 
-        internal void AddPipelineStage(ProviderPlanOperator operation) =>
-            Nodes.Add(new MutableNode(nextId++, parentId: null, operation, nativeStage: null));
+                internal int NextId => nextId;
+
+        /// <summary>
+        /// An outer aggregation stage: its observed sort keys, its literal limit (fused into the sort or
+        /// standalone) and, when the explain ran with execution statistics, whether the stage used disk.
+        /// Unreadable keys leave the sort unobserved rather than wrong; a malformed literal fails the map.
+        /// </summary>
+        internal bool AddPipelineStage(ProviderPlanOperator operation, BsonDocument stage, BsonValue value)
+        {
+            var node = new MutableNode(nextId++, parentId: null, operation, nativeStage: null);
+            if (operation is ProviderPlanOperator.Sort or ProviderPlanOperator.TopNSort)
+            {
+                var document = value.AsBsonDocument;
+                var keys = document.TryGetValue("sortKey", out var sortKey) && sortKey.IsBsonDocument
+                    ? sortKey.AsBsonDocument
+                    : new BsonDocument(document.Where(element => element.Name is not ("limit" or "limitAmount")));
+                var limit = ProviderPlanLimit.Unknown;
+                if (operation == ProviderPlanOperator.TopNSort)
+                {
+                    if (!TryReadPositiveLiteral(document, "limit", out var fused))
+                        return false;
+                    limit = ProviderPlanLimit.Explicit(fused);
+                }
+                node.Details = Details(ReadSortKeys(keys), limit, ReadSpill(stage));
+            }
+            else if (operation == ProviderPlanOperator.Limit)
+            {
+                if (!value.IsInt32 && !value.IsInt64)
+                    return false;
+                var literal = value.IsInt32 ? value.AsInt32 : value.AsInt64;
+                if (literal <= 0)
+                    return false;
+                node.Details = new ProviderPlanNodeDetails(nativeLimit: ProviderPlanLimit.Explicit(literal));
+            }
+            Nodes.Add(node);
+            return true;
+        }
+
+        private static ProviderPlanNodeDetails? Details(
+            IReadOnlyList<ProviderOrderTerm>? keys,
+            ProviderPlanLimit limit,
+            ProviderPlanSpillDetail? spill) =>
+            keys is null && limit.Kind == ProviderNativeBoundKind.Unknown && spill is null
+                ? null
+                : new ProviderPlanNodeDetails(keys, limit, spill);
+
+        private IReadOnlyList<ProviderOrderTerm>? ReadSortKeys(BsonDocument keys)
+        {
+            if (keys.ElementCount == 0)
+                return null;
+            var terms = new List<ProviderOrderTerm>();
+            foreach (var element in keys)
+            {
+                if (!element.Value.IsNumeric)
+                    return null;
+                OrderDirection? direction = element.Value.ToDouble() switch
+                {
+                    1 => OrderDirection.Ascending,
+                    -1 => OrderDirection.Descending,
+                    _ => null
+                };
+                if (direction is null)
+                    return null;
+                string? logical;
+                if (logicalColumnsByPhysical is not null && logicalColumnsByPhysical.TryGetValue(element.Name, out var mapped))
+                    logical = mapped;
+                else
+                    logical = element.Name.StartsWith("__groundwork_", StringComparison.Ordinal) && element.Name != ProviderOwnedColumns.Scope
+                        ? null
+                        : element.Name;
+                if (logical is null || logical.Contains('.', StringComparison.Ordinal))
+                    return null;
+                terms.Add(new ProviderOrderTerm(logical, direction.Value, null));
+            }
+            return terms;
+        }
+
+        /// <summary>Execution-statistics explain reports whether a stage used disk; planner-only explain says nothing.</summary>
+        private static ProviderPlanSpillDetail? ReadSpill(BsonDocument stage)
+        {
+            if (!stage.TryGetValue("usedDisk", out var usedDisk) || !usedDisk.IsBoolean)
+                return null;
+            long? bytes = stage.TryGetValue("spilledDataStorageSize", out var size) && size.IsNumeric && size.ToInt64() >= 0 ? size.ToInt64() : null;
+            long? rows = stage.TryGetValue("spilledRecords", out var records) && records.IsNumeric && records.ToInt64() >= 0 ? records.ToInt64() : null;
+            return usedDisk.AsBoolean
+                ? new ProviderPlanSpillDetail(spilled: true, bytes, rows)
+                : new ProviderPlanSpillDetail(spilled: false);
+        }
+
+        private static bool TryReadPositiveLiteral(BsonDocument document, string field, out long literal)
+        {
+            literal = 0;
+            if (Count(document, field) != 1 || !document.TryGetValue(field, out var value) || !value.IsInt32 && !value.IsInt64)
+                return false;
+            literal = value.IsInt32 ? value.AsInt32 : value.AsInt64;
+            return literal > 0;
+        }
 
         internal bool ReadPlanNode(BsonDocument document, int? parentId)
         {
@@ -386,6 +495,27 @@ internal static class MongoNativePlanMapper
 
             var id = nextId++;
             var node = new MutableNode(id, parentId, operation, stageValue.AsString);
+            if (operation is ProviderPlanOperator.Sort or ProviderPlanOperator.TopNSort)
+            {
+                var keys = document.TryGetValue("sortPattern", out var pattern) && pattern.IsBsonDocument
+                    ? ReadSortKeys(pattern.AsBsonDocument)
+                    : null;
+                var limit = ProviderPlanLimit.Unknown;
+                if (operation == ProviderPlanOperator.TopNSort)
+                {
+                    if (!TryReadPositiveLiteral(document, "limitAmount", out var fused))
+                        return false;
+                    limit = ProviderPlanLimit.Explicit(fused);
+                }
+                node.Details = Details(keys, limit, ReadSpill(document));
+            }
+            else if (operation == ProviderPlanOperator.Limit)
+            {
+                if (TryReadPositiveLiteral(document, "limitAmount", out var literal))
+                    node.Details = new ProviderPlanNodeDetails(nativeLimit: ProviderPlanLimit.Explicit(literal));
+                else if (Count(document, "limitAmount") != 0)
+                    return false;
+            }
             if (operation is ProviderPlanOperator.IndexScan or ProviderPlanOperator.IndexSearch)
             {
                 if (indexName is null)
@@ -565,6 +695,7 @@ internal static class MongoNativePlanMapper
             internal ProviderOpaqueIdentity? IndexId { get; set; }
             internal string? LogicalIndexName { get; set; }
             internal bool? IsCovering { get; set; }
+            internal ProviderPlanNodeDetails? Details { get; set; }
 
             internal ProviderPlanNode ToPublic(ProviderOpaqueIdentity targetId) => new(
                 Id,
@@ -579,7 +710,8 @@ internal static class MongoNativePlanMapper
                 IndexId,
                 LogicalIndexName,
                 IsCovering,
-                null);
+                null,
+                Details);
         }
     }
 }

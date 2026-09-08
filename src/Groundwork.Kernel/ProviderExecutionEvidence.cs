@@ -556,6 +556,9 @@ public sealed record ProviderPlanEvidence
         if (availability == ProviderEvidenceAvailability.Collected &&
             choseExpectedIndex is null && chosenPhysicalIndexId is null && winningPlan is null)
             throw new ArgumentException("Collected plan evidence requires at least one typed mapped fact.", nameof(choseExpectedIndex));
+        if (provenance == ProviderPlanProvenance.EstimatedExplain &&
+            winningPlan?.Nodes.Any(node => node.Details?.Spill is not null) == true)
+            throw new ArgumentException("Estimated plan evidence cannot carry observed runtime spill facts.", nameof(winningPlan));
         if (availability == ProviderEvidenceAvailability.Failed && failureCategory is null)
             throw new ArgumentException("Failed plan evidence requires a stable failure category.", nameof(failureCategory));
         if (availability != ProviderEvidenceAvailability.Failed && failureCategory is not null)

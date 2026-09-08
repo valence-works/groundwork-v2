@@ -400,7 +400,8 @@ internal sealed class MongoNativePlanCollectionResult
                     expectedNamespace,
                     capture.Target.PhysicalTargetId,
                     capture.GetIndexIdentity,
-                    logicalIndexesByPhysicalName);
+                    logicalIndexesByPhysicalName,
+                    LogicalColumnsByPhysical(options));
             }
             catch (Exception)
             {
@@ -430,6 +431,32 @@ internal sealed class MongoNativePlanCollectionResult
                 rawPlan,
                 legacyChosen,
                 legacyAssertionRequested);
+    }
+
+    /// <summary>
+    /// The physical-to-logical field map the rendered query established through identity-preserving
+    /// search-key mappings; a rewritten key that does not preserve identity stays unmapped so the plan
+    /// mapper leaves such a sort field unobserved.
+    /// </summary>
+    private static IReadOnlyDictionary<string, string> LogicalColumnsByPhysical(QueryRenderOptions options)
+    {
+        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var mapping in options.SearchKeyColumns.Values)
+        {
+            var identityMapping = mapping.Policy == QuerySearchKeyPolicy.Ordinal && mapping.PreservesOrdinalIdentity;
+            var ordinaryMapping = mapping.Policy == QuerySearchKeyPolicy.Ordinal &&
+                string.Equals(mapping.SourceColumn, mapping.PhysicalColumn, StringComparison.Ordinal);
+            if (!identityMapping && !ordinaryMapping)
+                continue;
+            if (map.TryGetValue(mapping.PhysicalColumn, out var existing) &&
+                !string.Equals(existing, mapping.SourceColumn, StringComparison.Ordinal))
+            {
+                map.Remove(mapping.PhysicalColumn);
+                continue;
+            }
+            map[mapping.PhysicalColumn] = mapping.SourceColumn;
+        }
+        return map;
     }
 
     private static bool TryBuildLogicalIndexesByPhysicalName(

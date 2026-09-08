@@ -39,6 +39,87 @@ public enum ProviderPlanSortPurpose
     Distinct
 }
 
+/// <summary>A positive numeric bound observed on a native limiting operator.</summary>
+public readonly record struct ProviderPlanLimit
+{
+    private ProviderPlanLimit(ProviderNativeBoundKind kind, long? value)
+    {
+        Kind = kind;
+        Value = value;
+    }
+
+    public ProviderNativeBoundKind Kind { get; }
+    public long? Value { get; }
+
+    public static ProviderPlanLimit Unknown => default;
+    public static ProviderPlanLimit Absent => new(ProviderNativeBoundKind.Absent, null);
+
+    public static ProviderPlanLimit Explicit(long value)
+    {
+        if (value <= 0)
+            throw new ArgumentOutOfRangeException(nameof(value));
+        return new(ProviderNativeBoundKind.Explicit, value);
+    }
+}
+
+/// <summary>Runtime spill facts observed for one native plan node.</summary>
+public sealed record ProviderPlanSpillDetail
+{
+    public ProviderPlanSpillDetail(bool spilled, long? spilledBytes = null, long? spilledRows = null)
+    {
+        if (spilledBytes is < 0)
+            throw new ArgumentOutOfRangeException(nameof(spilledBytes));
+        if (spilledRows is < 0)
+            throw new ArgumentOutOfRangeException(nameof(spilledRows));
+        if (!spilled && (spilledBytes is > 0 || spilledRows is > 0))
+            throw new ArgumentException("No-spill observations cannot carry positive spill metrics.");
+
+        Spilled = spilled;
+        SpilledBytes = spilledBytes;
+        SpilledRows = spilledRows;
+    }
+
+    public bool Spilled { get; }
+    /// <summary>A provider-reported metric, not necessarily physical bytes written to disk.</summary>
+    public long? SpilledBytes { get; }
+    /// <summary>A provider-reported row metric; its physical meaning is provider-specific.</summary>
+    public long? SpilledRows { get; }
+}
+
+/// <summary>
+/// Optional details mapped from one native plan node. A null sort-key collection means that
+/// sort keys were not observed; it does not attest to an empty sort or to no sort.
+/// </summary>
+public sealed record ProviderPlanNodeDetails
+{
+    public ProviderPlanNodeDetails(
+        IEnumerable<ProviderOrderTerm>? nativeSortKeys = null,
+        ProviderPlanLimit nativeLimit = default,
+        ProviderPlanSpillDetail? spill = null)
+    {
+        if (nativeSortKeys is null)
+        {
+            NativeSortKeys = null;
+        }
+        else
+        {
+            var keys = nativeSortKeys.ToImmutableArray();
+            if (keys.Length == 0)
+                throw new ArgumentException("Native sort keys cannot be empty.", nameof(nativeSortKeys));
+            if (keys.Any(key => key is null))
+                throw new ArgumentException("Native sort keys cannot contain null references.", nameof(nativeSortKeys));
+            NativeSortKeys = keys;
+        }
+
+        NativeLimit = nativeLimit;
+        Spill = spill;
+    }
+
+    public ImmutableArray<ProviderOrderTerm>? NativeSortKeys { get; }
+    public ProviderPlanLimit NativeLimit { get; }
+    public ProviderPlanSpillDetail? Spill { get; }
+}
+
 /// <summary>
 /// One mapped native node. IDs are local to its forest; physical identities are opaque and
 /// capture-local. Absent optional facts are unknown, never inferred from a query declaration.
@@ -48,6 +129,14 @@ public sealed record ProviderPlanNode
     public ProviderPlanNode(int id, int? parentId, ProviderPlanOperator operation,
         ProviderOpaqueIdentity? targetId = null, ProviderOpaqueIdentity? indexId = null,
         string? logicalIndexName = null, bool? isCovering = null, ProviderPlanSortPurpose? sortPurpose = null)
+        : this(id, parentId, operation, targetId, indexId, logicalIndexName, isCovering, sortPurpose, null)
+    {
+    }
+
+    public ProviderPlanNode(int id, int? parentId, ProviderPlanOperator operation,
+        ProviderOpaqueIdentity? targetId, ProviderOpaqueIdentity? indexId,
+        string? logicalIndexName, bool? isCovering, ProviderPlanSortPurpose? sortPurpose,
+        ProviderPlanNodeDetails? details)
     {
         if (id < 0)
             throw new ArgumentOutOfRangeException(nameof(id));
@@ -74,6 +163,14 @@ public sealed record ProviderPlanNode
             if (operation is not (ProviderPlanOperator.Sort or ProviderPlanOperator.TopNSort))
                 throw new ArgumentException("A sort purpose requires a sort node.", nameof(sortPurpose));
         }
+        if (details is not null)
+        {
+            if (details.NativeSortKeys is not null && operation is not (ProviderPlanOperator.Sort or ProviderPlanOperator.TopNSort))
+                throw new ArgumentException("Native sort keys require a sort node.", nameof(details));
+            if (details.NativeLimit.Kind != ProviderNativeBoundKind.Unknown &&
+                operation is not (ProviderPlanOperator.Limit or ProviderPlanOperator.TopNSort))
+                throw new ArgumentException("A native limit requires a limiting node.", nameof(details));
+        }
 
         Id = id;
         ParentId = parentId;
@@ -83,6 +180,7 @@ public sealed record ProviderPlanNode
         LogicalIndexName = logicalIndexName;
         IsCovering = isCovering;
         SortPurpose = sortPurpose;
+        Details = details;
     }
 
     public int Id { get; }
@@ -95,6 +193,7 @@ public sealed record ProviderPlanNode
     public string? LogicalIndexName { get; }
     public bool? IsCovering { get; }
     public ProviderPlanSortPurpose? SortPurpose { get; }
+    public ProviderPlanNodeDetails? Details { get; }
 }
 
 /// <summary>
@@ -107,6 +206,11 @@ public sealed record ProviderPlanNode
 public sealed record ProviderPlanForest
 {
     public ProviderPlanForest(IEnumerable<ProviderPlanNode> nodes)
+        : this(nodes, observedRootOrder: null)
+    {
+    }
+
+    public ProviderPlanForest(IEnumerable<ProviderPlanNode> nodes, IEnumerable<int>? observedRootOrder)
     {
         Nodes = (nodes ?? throw new ArgumentNullException(nameof(nodes))).ToImmutableArray();
         if (Nodes.Length == 0 || Nodes.Any(node => node is null))
@@ -132,8 +236,26 @@ public sealed record ProviderPlanForest
             }
             verified.UnionWith(path);
         }
+
+        if (observedRootOrder is null)
+        {
+            ObservedRootOrder = null;
+            return;
+        }
+
+        var rootIds = Nodes
+            .Where(node => node.ParentId is null)
+            .Select(node => node.Id)
+            .ToHashSet();
+        var order = observedRootOrder.ToImmutableArray();
+        if (order.Length != rootIds.Count || order.Distinct().Count() != order.Length || order.Any(id => !rootIds.Contains(id)))
+            throw new ArgumentException("Observed root order must contain every native root exactly once.", nameof(observedRootOrder));
+        ObservedRootOrder = order;
     }
 
     /// <summary>All mapped nodes in provider observation order, without implied execution order.</summary>
     public ImmutableArray<ProviderPlanNode> Nodes { get; }
+
+    /// <summary>Optional provider-observed order of native roots, without implied parentage.</summary>
+    public ImmutableArray<int>? ObservedRootOrder { get; }
 }

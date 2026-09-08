@@ -68,6 +68,21 @@ and `Limit`.
 values. Its presence alone does not prove predicate identity, selectivity or
 index coverage; it carries no storage target identity.
 
+### Native node details
+
+From `0.4.0-preview.19`, `ProviderPlanNode.Details` may carry what the provider actually
+exposed on a sort, top-N sort or limit node: `NativeSortKeys` (logical columns, direction,
+null placement, supported transforms), `NativeLimit` (`Unknown`, `Absent` or `Explicit`
+with a literal value) and `Spill` (observed spilled or not, with provider-reported metrics
+when present). Treat every absent value as not observed: a consumer policy that requires a
+fact must fail closed when it is missing, and must not read a missing spill as no spill.
+Provider coverage differs and is documented per provider: PostgreSQL estimated explain
+yields sort keys only; SQL Server replay yields order columns, literal `TopSort`/`Top`
+bounds and a spill observation; MongoDB yields sort keys and literal limits from either
+explain form and `usedDisk` from `executionStats`; SQLite yields sort purpose only.
+`ProviderPlanForest.ObservedRootOrder` records the observed order of sibling roots
+(MongoDB pipeline stages) without claiming parentage.
+
 ## Retaining observations
 
 The immutable runtime types are not a default JSON wire contract. Map the actual

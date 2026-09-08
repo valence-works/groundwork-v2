@@ -265,7 +265,8 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
                     pair => pair.Value,
                     pair => pair.Key,
                     StringComparer.Ordinal),
-                catalogIndexes)
+                catalogIndexes,
+                RelationalQueryRenderer.LogicalColumnsByPhysical(options))
             : null;
         // An index-name match without a namespace-qualified target witness is not
         // structured physical-index evidence. The legacy assertion remains separate.
