@@ -90,6 +90,16 @@ public static class BatchWriteCapabilities
         "Commits all staged writes across the declared storage units in one provider transaction.",
         EvidenceGatedByDefault: true);
 
+    /// <summary>
+    /// Advertised by providers whose deployment admits one writing transaction at a time (SQLite). A
+    /// consumer that batches background writes should keep each transaction short on such a provider,
+    /// because every foreground commit waits for the running transaction, and may batch freely where
+    /// the capability is absent.
+    /// </summary>
+    public static CapabilityDescriptor SerializedWriterDescriptor { get; } = new(
+        WellKnownCapabilities.SerializedWriter,
+        "Serialized writer",
+        "Admits one writing transaction at a time; every other commit waits for the running one.");
     public static IReadOnlyList<CapabilityDescriptor> All { get; } =
         Array.AsReadOnly(new[] { StagedUnitOfWorkDescriptor, PerRowOutcomesDescriptor, ProviderSequenceDescriptor, AppendIdempotencyDescriptor, ExactAppendOutcomesDescriptor, DurableHighWaterInspectionDescriptor, ExactRetentionDescriptor, ExactRetentionAffectedKeysDescriptor, CompareAndDeleteDescriptor, SetMutationDescriptor });
 
@@ -123,7 +133,8 @@ public static class BatchWriteCapabilities
         bool atomicCommit = false,
         bool compareAndDelete = false,
         string? setMutation = null,
-        bool exactRetentionAffectedKeys = false)
+        bool exactRetentionAffectedKeys = false,
+        bool serializedWriter = false)
     {
         var persistsRelationalHighWater = nativeBatch && durableHighWaterInspection;
         var providerSequenceDescription = persistsRelationalHighWater
@@ -173,6 +184,11 @@ public static class BatchWriteCapabilities
             descriptors.Add(AtomicCommitDescriptor with
             {
                 Description = $"Commits all staged writes across declared {provider} storage units in one provider transaction."
+            });
+        if (serializedWriter)
+            descriptors.Add(SerializedWriterDescriptor with
+            {
+                Description = $"{provider} admits one writing transaction at a time; every other commit waits for the running one, so a long transaction delays unrelated writers."
             });
         if (compareAndDelete)
             descriptors.Add(CompareAndDeleteDescriptor with

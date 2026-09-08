@@ -126,6 +126,13 @@
           "AdditionalCommandsPerWrite": 0
         },
         {
+          "Id": "groundwork.operational.serialized-writer",
+          "DisplayName": "Serialized writer",
+          "Description": "SQLite admits one writing transaction at a time; every other commit waits for the running one, so a long transaction delays unrelated writers.",
+          "EvidenceGated": false,
+          "AdditionalCommandsPerWrite": 0
+        },
+        {
           "Id": "groundwork.schema.enforced-constraints",
           "DisplayName": "Enforced physical constraints",
           "Description": "The deployment enforces declared physical foreign keys and portable check constraints in its native catalog.",
