@@ -1,6 +1,8 @@
+using System.Globalization;
 using System.Xml;
 using System.Xml.Linq;
 using Groundwork.Kernel;
+using Groundwork.Query.Model;
 
 namespace Groundwork.SqlServer;
 
@@ -21,7 +23,8 @@ internal static class SqlServerNativePlanMapper
         ProviderOpaqueIdentity targetId,
         Func<string, ProviderOpaqueIdentity> indexIdentity,
         IReadOnlyDictionary<string, string> logicalIndexesByPhysicalName,
-        IReadOnlySet<string> catalogIndexes)
+        IReadOnlySet<string> catalogIndexes,
+        IReadOnlyDictionary<string, string>? logicalColumnsByPhysical = null)
     {
         ArgumentNullException.ThrowIfNull(rawPlan);
         ArgumentException.ThrowIfNullOrWhiteSpace(physicalDatabase);
@@ -83,7 +86,8 @@ internal static class SqlServerNativePlanMapper
                     targetId,
                     indexIdentity,
                     logicalIndexesByPhysicalName,
-                    catalogIndexes))
+                    catalogIndexes,
+                    logicalColumnsByPhysical))
                 return null;
 
             // This first SQL Server slice is intentionally single-source. A complete forest must
@@ -116,7 +120,8 @@ internal static class SqlServerNativePlanMapper
         ProviderOpaqueIdentity targetId,
         Func<string, ProviderOpaqueIdentity> indexIdentity,
         IReadOnlyDictionary<string, string> logicalIndexesByPhysicalName,
-        IReadOnlySet<string> catalogIndexes)
+        IReadOnlySet<string> catalogIndexes,
+        IReadOnlyDictionary<string, string>? logicalColumnsByPhysical)
     {
         if (!TryReadNodeId(source, out var id) || !ids.Add(id))
             return false;
@@ -176,19 +181,27 @@ internal static class SqlServerNativePlanMapper
                 break;
 
             case "Sort":
-                if (!TryReadOperatorChildren(source, "Sort", out children) || children.Length != 1)
-                    return false;
-                node = new ProviderPlanNode(id, parentId,
-                    source.Element(ShowPlanNamespace + "TopSort") is not null
-                        ? ProviderPlanOperator.TopNSort
-                        : ProviderPlanOperator.Sort);
-                break;
+                {
+                    if (!TryReadOperatorChildren(source, "Sort", out children) || children.Length != 1)
+                        return false;
+                    var topSort = source.Element(ShowPlanNamespace + "TopSort");
+                    var payload = topSort ?? source.Element(ShowPlanNamespace + "Sort");
+                    node = new ProviderPlanNode(id, parentId,
+                        topSort is not null ? ProviderPlanOperator.TopNSort : ProviderPlanOperator.Sort,
+                        null, null, null, null, null,
+                        ReadSortDetails(source, payload, topSort, physicalTarget, logicalColumnsByPhysical));
+                    break;
+                }
 
             case "Top":
-                if (!TryReadOperatorChildren(source, "Top", out children) || children.Length != 1)
-                    return false;
-                node = new ProviderPlanNode(id, parentId, ProviderPlanOperator.Limit);
-                break;
+                {
+                    if (!TryReadOperatorChildren(source, "Top", out children) || children.Length != 1)
+                        return false;
+                    var limit = ReadTopLimit(source.Element(ShowPlanNamespace + "Top"));
+                    node = new ProviderPlanNode(id, parentId, ProviderPlanOperator.Limit, null, null, null, null, null,
+                        limit.Kind == ProviderNativeBoundKind.Unknown ? null : new ProviderPlanNodeDetails(nativeLimit: limit));
+                    break;
+                }
 
             default:
                 // Never turn an unfamiliar SQL Server operator into a known but different fact.
@@ -209,7 +222,8 @@ internal static class SqlServerNativePlanMapper
                     targetId,
                     indexIdentity,
                     logicalIndexesByPhysicalName,
-                    catalogIndexes))
+                    catalogIndexes,
+                    logicalColumnsByPhysical))
                 return false;
         }
 
@@ -298,6 +312,202 @@ internal static class SqlServerNativePlanMapper
             .ToArray();
         return directRelOps.All(element => mappedChildren.Contains(element)) &&
                mappedChildren.All(element => element.Name == ShowPlanNamespace + "RelOp");
+    }
+
+    /// <summary>
+    /// Observed sort facts for one Sort/TopSort operator: its ORDER BY columns resolved to logical
+    /// columns (a <c>datalength(column)</c> key is the ordinal string-key transform), the TopSort row
+    /// bound when the plan carries it as a literal, and the replayed execution's spill observation.
+    /// A key that references a foreign table, an unresolvable expression or a provider-owned column
+    /// without a recorded mapping leaves the sort keys unobserved.
+    /// </summary>
+    private static ProviderPlanNodeDetails? ReadSortDetails(
+        XElement relOp,
+        XElement? payload,
+        XElement? topSort,
+        string physicalTarget,
+        IReadOnlyDictionary<string, string>? logicalColumnsByPhysical)
+    {
+        var keys = payload is null ? null : ReadOrderBy(payload, relOp, physicalTarget, logicalColumnsByPhysical);
+        var limit = ProviderPlanLimit.Unknown;
+        if (topSort is not null &&
+            long.TryParse((string?)topSort.Attribute("Rows"), NumberStyles.None, CultureInfo.InvariantCulture, out var rows) &&
+            rows > 0)
+            limit = ProviderPlanLimit.Explicit(rows);
+        var spill = ReadSpill(relOp);
+        if (keys is null && limit.Kind == ProviderNativeBoundKind.Unknown && spill is null)
+            return null;
+        return new ProviderPlanNodeDetails(keys, limit, spill);
+    }
+
+    private static IReadOnlyList<ProviderOrderTerm>? ReadOrderBy(
+        XElement payload,
+        XElement relOp,
+        string physicalTarget,
+        IReadOnlyDictionary<string, string>? logicalColumnsByPhysical)
+    {
+        var orderBy = payload.Element(ShowPlanNamespace + "OrderBy");
+        if (orderBy is null)
+            return null;
+        var terms = new List<ProviderOrderTerm>();
+        foreach (var column in orderBy.Elements(ShowPlanNamespace + "OrderByColumn"))
+        {
+            var ascending = (string?)column.Attribute("Ascending");
+            OrderDirection? direction = ascending switch
+            {
+                "1" or "true" => OrderDirection.Ascending,
+                "0" or "false" => OrderDirection.Descending,
+                _ => null
+            };
+            var reference = column.Element(ShowPlanNamespace + "ColumnReference");
+            if (direction is null || reference is null)
+                return null;
+            if (!TryResolveOrderColumn(reference, relOp, physicalTarget, logicalColumnsByPhysical, out var logicalColumn, out var transforms))
+                return null;
+            terms.Add(new ProviderOrderTerm(logicalColumn, direction.Value, null, transforms));
+        }
+        return terms.Count == 0 ? null : terms;
+    }
+
+    private static bool TryResolveOrderColumn(
+        XElement reference,
+        XElement relOp,
+        string physicalTarget,
+        IReadOnlyDictionary<string, string>? logicalColumnsByPhysical,
+        out string logicalColumn,
+        out IReadOnlyList<ProviderOrderingTransform> transforms)
+    {
+        logicalColumn = string.Empty;
+        transforms = [];
+        var columnName = (string?)reference.Attribute("Column");
+        if (string.IsNullOrWhiteSpace(columnName))
+            return false;
+        var table = (string?)reference.Attribute("Table");
+        if (table is not null)
+        {
+            if (!TryReadQuotedIdentifier(table, out var tableName) ||
+                !string.Equals(tableName, physicalTarget, StringComparison.Ordinal))
+                return false;
+            var logical = LogicalColumn(columnName, logicalColumnsByPhysical);
+            if (logical is null)
+                return false;
+            logicalColumn = logical;
+            return true;
+        }
+        // A bare column is a computed value defined elsewhere in the statement. Two renderer forms are
+        // transforms this mapper vouches for: datalength(column), the ordinal string key, and
+        // CASE WHEN column IS NULL THEN 1 ELSE 0 END, the null rank. Anything else stays unobserved.
+        var defined = relOp.Document?.Descendants(ShowPlanNamespace + "DefinedValue")
+            .FirstOrDefault(value =>
+                (string?)value.Element(ShowPlanNamespace + "ColumnReference")?.Attribute("Column") == columnName &&
+                value.Element(ShowPlanNamespace + "ColumnReference")?.Attribute("Table") is null);
+        var scalar = defined?.Element(ShowPlanNamespace + "ScalarOperator");
+        var intrinsic = scalar?.Element(ShowPlanNamespace + "Intrinsic");
+        if (intrinsic is not null &&
+            string.Equals((string?)intrinsic.Attribute("FunctionName"), "datalength", StringComparison.OrdinalIgnoreCase) &&
+            TryResolveTargetColumn(intrinsic.Element(ShowPlanNamespace + "ScalarOperator"), physicalTarget, logicalColumnsByPhysical, out var lengthColumn))
+        {
+            logicalColumn = lengthColumn;
+            transforms = [ProviderOrderingTransform.OrdinalStringKey];
+            return true;
+        }
+        var conditional = scalar?.Element(ShowPlanNamespace + "IF");
+        if (conditional is null)
+            return false;
+        var compare = conditional.Element(ShowPlanNamespace + "Condition")?
+            .Element(ShowPlanNamespace + "ScalarOperator")?
+            .Element(ShowPlanNamespace + "Compare");
+        var operands = compare?.Elements(ShowPlanNamespace + "ScalarOperator").ToArray() ?? [];
+        if (compare is null ||
+            !string.Equals((string?)compare.Attribute("CompareOp"), "IS", StringComparison.OrdinalIgnoreCase) ||
+            operands.Length != 2 ||
+            !IsConstant(operands[1], "NULL") ||
+            !IsConstant(conditional.Element(ShowPlanNamespace + "Then")?.Element(ShowPlanNamespace + "ScalarOperator"), "1") ||
+            !IsConstant(conditional.Element(ShowPlanNamespace + "Else")?.Element(ShowPlanNamespace + "ScalarOperator"), "0") ||
+            !TryResolveTargetColumn(operands[0], physicalTarget, logicalColumnsByPhysical, out var rankedColumn))
+            return false;
+        logicalColumn = rankedColumn;
+        transforms = [ProviderOrderingTransform.NullRank];
+        return true;
+    }
+
+    private static bool TryResolveTargetColumn(
+        XElement? scalarOperator,
+        string physicalTarget,
+        IReadOnlyDictionary<string, string>? logicalColumnsByPhysical,
+        out string logicalColumn)
+    {
+        logicalColumn = string.Empty;
+        var reference = scalarOperator?.Element(ShowPlanNamespace + "Identifier")?.Element(ShowPlanNamespace + "ColumnReference");
+        var table = (string?)reference?.Attribute("Table");
+        var column = (string?)reference?.Attribute("Column");
+        if (reference is null || table is null || string.IsNullOrWhiteSpace(column) ||
+            !TryReadQuotedIdentifier(table, out var tableName) ||
+            !string.Equals(tableName, physicalTarget, StringComparison.Ordinal))
+            return false;
+        var resolved = LogicalColumn(column, logicalColumnsByPhysical);
+        if (resolved is null)
+            return false;
+        logicalColumn = resolved;
+        return true;
+    }
+
+    private static bool IsConstant(XElement? scalarOperator, string expected)
+    {
+        var value = (string?)scalarOperator?.Element(ShowPlanNamespace + "Const")?.Attribute("ConstValue");
+        if (value is null)
+            return false;
+        value = value.Trim();
+        if (value.StartsWith('(') && value.EndsWith(')'))
+            value = value[1..^1];
+        return string.Equals(value, expected, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>A provider-owned physical column is logical only through its recorded search-key mapping.</summary>
+    internal static string? LogicalColumn(string physicalColumn, IReadOnlyDictionary<string, string>? logicalColumnsByPhysical)
+    {
+        if (logicalColumnsByPhysical is not null && logicalColumnsByPhysical.TryGetValue(physicalColumn, out var logical))
+            return logical;
+        // Provider-owned physical columns are logical only through a recorded mapping, except the scope
+        // column, whose identity is already the logical name evidence uses for scope facts.
+        return IsProviderOwned(physicalColumn) && physicalColumn != ProviderOwnedColumns.Scope ? null : physicalColumn;
+    }
+
+    private static bool IsProviderOwned(string column) =>
+        column.StartsWith("__groundwork_", StringComparison.Ordinal);
+
+    /// <summary>
+    /// The replayed statement's spill observation for this operator. A spill warning is an observed
+    /// spill; runtime information without one is an observed no-spill; a plan without runtime
+    /// information for this operator leaves the fact unobserved.
+    /// </summary>
+    private static ProviderPlanSpillDetail? ReadSpill(XElement relOp)
+    {
+        var spilled = relOp.Elements(ShowPlanNamespace + "Warnings")
+            .SelectMany(warnings => warnings.Elements(ShowPlanNamespace + "SpillToTempDb"))
+            .Any();
+        if (spilled)
+            return new ProviderPlanSpillDetail(spilled: true);
+        return relOp.Elements(ShowPlanNamespace + "RunTimeInformation").Any()
+            ? new ProviderPlanSpillDetail(spilled: false)
+            : null;
+    }
+
+    /// <summary>A Top operator's bound is observed only when the plan states it as a literal constant.</summary>
+    private static ProviderPlanLimit ReadTopLimit(XElement? top)
+    {
+        var constant = top?.Element(ShowPlanNamespace + "TopExpression")?
+            .Element(ShowPlanNamespace + "ScalarOperator")?
+            .Element(ShowPlanNamespace + "Const");
+        var value = (string?)constant?.Attribute("ConstValue");
+        if (value is null)
+            return ProviderPlanLimit.Unknown;
+        value = value.Trim();
+        if (value.StartsWith('(') && value.EndsWith(')'))
+            value = value[1..^1];
+        return long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var rows) && rows > 0
+            ? ProviderPlanLimit.Explicit(rows)
+            : ProviderPlanLimit.Unknown;
     }
 
     private static bool IsOperatorPayload(XElement element) =>

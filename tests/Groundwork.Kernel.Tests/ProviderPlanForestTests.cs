@@ -1,4 +1,5 @@
 using Groundwork.Kernel;
+using Groundwork.Query.Model;
 using Xunit;
 
 namespace Groundwork.Kernel.Tests;
@@ -62,6 +63,137 @@ public sealed class ProviderPlanForestTests
         Assert.Throws<ArgumentException>(() => new ProviderPlanNode(0, null, limit, indexId: Index));
         Assert.Throws<ArgumentException>(() => new ProviderPlanNode(0, null, limit, isCovering: true));
         Assert.Throws<ArgumentException>(() => new ProviderPlanNode(0, null, limit, sortPurpose: ProviderPlanSortPurpose.OrderBy));
+    }
+
+    [Fact]
+    public void Existing_positional_null_target_argument_remains_unambiguous()
+    {
+        var node = new ProviderPlanNode(0, null, ProviderPlanOperator.Sort, null);
+
+        Assert.Null(node.TargetId);
+        Assert.Null(node.Details);
+    }
+
+    [Fact]
+    public void Plan_limit_distinguishes_unknown_absent_and_positive_explicit_values()
+    {
+        Assert.Equal(ProviderNativeBoundKind.Unknown, default(ProviderPlanLimit).Kind);
+        Assert.Null(default(ProviderPlanLimit).Value);
+
+        var absent = ProviderPlanLimit.Absent;
+        Assert.Equal(ProviderNativeBoundKind.Absent, absent.Kind);
+        Assert.Null(absent.Value);
+
+        var explicitLimit = ProviderPlanLimit.Explicit(2);
+        Assert.Equal(ProviderNativeBoundKind.Explicit, explicitLimit.Kind);
+        Assert.Equal(2, explicitLimit.Value);
+        Assert.Throws<ArgumentOutOfRangeException>(() => ProviderPlanLimit.Explicit(0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => ProviderPlanLimit.Explicit(-1));
+
+        var details = new ProviderPlanNodeDetails(nativeLimit: explicitLimit);
+        var node = new ProviderPlanNode(0, null, ProviderPlanOperator.Limit, null, null, null, null, null, details);
+        Assert.Equal(explicitLimit, node.Details!.NativeLimit);
+        Assert.Throws<ArgumentException>(() => new ProviderPlanNode(
+            0, null, ProviderPlanOperator.Sort, null, null, null, null, null, details));
+    }
+
+    [Fact]
+    public void Plan_details_preserve_unobserved_and_observed_spill_states_and_reject_inconsistent_metrics()
+    {
+        Assert.Null(new ProviderPlanNodeDetails().Spill);
+
+        var noSpill = new ProviderPlanSpillDetail(spilled: false);
+        var spill = new ProviderPlanSpillDetail(spilled: true, spilledBytes: 12, spilledRows: 3);
+        Assert.False(noSpill.Spilled);
+        Assert.True(spill.Spilled);
+        Assert.Equal(12, spill.SpilledBytes);
+        Assert.Equal(3, spill.SpilledRows);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => new ProviderPlanSpillDetail(true, spilledBytes: -1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new ProviderPlanSpillDetail(true, spilledRows: -1));
+        Assert.Throws<ArgumentException>(() => new ProviderPlanSpillDetail(false, spilledBytes: 1));
+        Assert.Throws<ArgumentException>(() => new ProviderPlanSpillDetail(false, spilledRows: 1));
+    }
+
+    [Fact]
+    public void Estimated_plans_cannot_claim_observed_runtime_spill()
+    {
+        var forest = new ProviderPlanForest([
+            new(0, null, ProviderPlanOperator.Sort,
+                null, null, null, null, null,
+                new ProviderPlanNodeDetails(spill: new ProviderPlanSpillDetail(spilled: false)))
+        ]);
+
+        Assert.Throws<ArgumentException>(() => new ProviderPlanEvidence(
+            ProviderEvidenceAvailability.Collected,
+            ProviderPlanProvenance.EstimatedExplain,
+            winningPlan: forest));
+
+        var replay = new ProviderPlanEvidence(
+            ProviderEvidenceAvailability.Collected,
+            ProviderPlanProvenance.ExplainReplay,
+            winningPlan: forest);
+        Assert.Same(forest, replay.WinningPlan);
+    }
+
+    [Fact]
+    public void Native_sort_keys_are_immutable_and_only_sort_nodes_may_carry_them()
+    {
+        var terms = new List<ProviderOrderTerm>
+        {
+            new("updated", OrderDirection.Descending, NullOrder.Last)
+        };
+        var details = new ProviderPlanNodeDetails(nativeSortKeys: terms);
+        terms.Clear();
+
+        var node = new ProviderPlanNode(0, null, ProviderPlanOperator.Sort, null, null, null, null, null, details);
+        Assert.NotNull(node.Details!.NativeSortKeys);
+        Assert.Single(node.Details.NativeSortKeys!.Value);
+        Assert.Equal("updated", node.Details.NativeSortKeys.Value[0].LogicalColumn);
+
+        Assert.Null(new ProviderPlanNodeDetails().NativeSortKeys);
+        Assert.Throws<ArgumentException>(() => new ProviderPlanNodeDetails(Array.Empty<ProviderOrderTerm>()));
+        Assert.Throws<ArgumentException>(() => new ProviderPlanNodeDetails(new ProviderOrderTerm[] { null! }));
+        Assert.Throws<ArgumentException>(() => new ProviderPlanNode(
+            0, null, ProviderPlanOperator.Limit, null, null, null, null, null, details));
+    }
+
+    [Fact]
+    public void Observed_root_order_is_immutable_and_covers_each_root_once()
+    {
+        var order = new List<int> { 2, 0 };
+        var forest = new ProviderPlanForest(
+            [
+                new(2, null, ProviderPlanOperator.TableScan, targetId: Target),
+                new(0, null, ProviderPlanOperator.Sort),
+                new(1, 0, ProviderPlanOperator.Materialize)
+            ],
+            order);
+        order.Clear();
+
+        Assert.Equal(new[] { 2, 0 }, forest.ObservedRootOrder);
+        Assert.Equal(0, forest.Nodes[2].ParentId);
+        Assert.Throws<ArgumentException>(() => new ProviderPlanForest(
+            [
+                new(2, null, ProviderPlanOperator.TableScan, targetId: Target),
+                new(0, null, ProviderPlanOperator.Sort),
+                new(1, 0, ProviderPlanOperator.Materialize)
+            ],
+            [2, 2]));
+        Assert.Throws<ArgumentException>(() => new ProviderPlanForest(
+            [
+                new(2, null, ProviderPlanOperator.TableScan, targetId: Target),
+                new(0, null, ProviderPlanOperator.Sort),
+                new(1, 0, ProviderPlanOperator.Materialize)
+            ],
+            [2, 1]));
+        Assert.Throws<ArgumentException>(() => new ProviderPlanForest(
+            [
+                new(2, null, ProviderPlanOperator.TableScan, targetId: Target),
+                new(0, null, ProviderPlanOperator.Sort),
+                new(1, 0, ProviderPlanOperator.Materialize)
+            ],
+            [2]));
     }
 
     [Fact]

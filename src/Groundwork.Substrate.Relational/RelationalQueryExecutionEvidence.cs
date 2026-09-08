@@ -60,6 +60,33 @@ public abstract partial class RelationalQueryRenderer
 
     internal void EvidenceUnsupported() => executionShape.Value?.Unsupported();
 
+    /// <summary>
+    /// The physical-to-logical column map a rendered query established through its search-key
+    /// mappings, in the same identity/ordinary sense the emitted-shape collector admits. Native plan
+    /// mappers resolve observed physical sort columns through it; a rewritten search key that does not
+    /// preserve identity is deliberately absent, so such a column stays unobserved.
+    /// </summary>
+    internal static IReadOnlyDictionary<string, string> LogicalColumnsByPhysical(QueryRenderOptions options)
+    {
+        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var mapping in options.SearchKeyColumns.Values)
+        {
+            var identityMapping = mapping.Policy == QuerySearchKeyPolicy.Ordinal && mapping.PreservesOrdinalIdentity;
+            var ordinaryMapping = mapping.Policy == QuerySearchKeyPolicy.Ordinal &&
+                string.Equals(mapping.SourceColumn, mapping.PhysicalColumn, StringComparison.Ordinal);
+            if (!identityMapping && !ordinaryMapping)
+                continue;
+            if (map.TryGetValue(mapping.PhysicalColumn, out var existing) &&
+                !string.Equals(existing, mapping.SourceColumn, StringComparison.Ordinal))
+            {
+                map.Remove(mapping.PhysicalColumn);
+                continue;
+            }
+            map[mapping.PhysicalColumn] = mapping.SourceColumn;
+        }
+        return map;
+    }
+
     private sealed class QueryShapeCollector(bool hasLookahead)
     {
         private bool supported = true;

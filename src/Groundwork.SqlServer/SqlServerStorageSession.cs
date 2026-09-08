@@ -237,7 +237,8 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
                 capture!.Target(Unit, ProviderScopeBindingMode.Unknown).PhysicalTargetId,
                 capture.Index,
                 logicalIndexesByPhysical,
-                catalog.Indexes)
+                catalog.Indexes,
+                RelationalQueryRenderer.LogicalColumnsByPhysical(options))
             : null;
         // Structured choice is a consequence of a complete mapped tree, never a loose text match.
         bool? structuredChosen = forest is null || physicalIndex is null

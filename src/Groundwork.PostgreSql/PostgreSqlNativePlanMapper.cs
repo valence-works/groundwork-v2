@@ -1,5 +1,7 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Groundwork.Kernel;
+using Groundwork.Query.Model;
 
 namespace Groundwork.PostgreSql;
 
@@ -17,7 +19,8 @@ internal static class PostgreSqlNativePlanMapper
         ProviderOpaqueIdentity targetId,
         Func<string, ProviderOpaqueIdentity> indexIdentity,
         IReadOnlyDictionary<string, string> logicalIndexesByPhysicalName,
-        IReadOnlySet<string>? catalogIndexes = null)
+        IReadOnlySet<string>? catalogIndexes = null,
+        IReadOnlyDictionary<string, string>? logicalColumnsByPhysical = null)
     {
         ArgumentNullException.ThrowIfNull(rawPlan);
         if (string.IsNullOrWhiteSpace(rawPlan))
@@ -44,7 +47,8 @@ internal static class PostgreSqlNativePlanMapper
                     targetId,
                     indexIdentity,
                     logicalIndexesByPhysicalName,
-                    catalogIndexes))
+                    catalogIndexes,
+                    logicalColumnsByPhysical))
                 return null;
 
             // The initial relational evidence slice is deliberately single-source. A complete
@@ -103,7 +107,8 @@ internal static class PostgreSqlNativePlanMapper
         ProviderOpaqueIdentity targetId,
         Func<string, ProviderOpaqueIdentity> indexIdentity,
         IReadOnlyDictionary<string, string> logicalIndexesByPhysicalName,
-        IReadOnlySet<string>? catalogIndexes)
+        IReadOnlySet<string>? catalogIndexes,
+        IReadOnlyDictionary<string, string>? logicalColumnsByPhysical)
     {
         if (source.ValueKind != JsonValueKind.Object ||
             !source.TryGetProperty("Node Type", out var nodeType) ||
@@ -141,7 +146,8 @@ internal static class PostgreSqlNativePlanMapper
                 if (!TryReadSortPurpose(source, out var sortPurpose))
                     return false;
                 node = new ProviderPlanNode(nodes.Count, parentId, ProviderPlanOperator.Sort,
-                    sortPurpose: sortPurpose);
+                    null, null, null, null, sortPurpose,
+                    ReadSortDetails(source, physicalTarget, logicalColumnsByPhysical));
                 break;
 
             case "Seq Scan":
@@ -223,7 +229,8 @@ internal static class PostgreSqlNativePlanMapper
                     targetId,
                     indexIdentity,
                     logicalIndexesByPhysicalName,
-                    catalogIndexes))
+                    catalogIndexes,
+                    logicalColumnsByPhysical))
                 return false;
         }
 
@@ -292,6 +299,181 @@ internal static class PostgreSqlNativePlanMapper
         // from a field also used for aggregation and other native strategies.
         return true;
     }
+
+    private static readonly Regex SortKeyPattern = new(
+        @"^\s*(?:(?<relation>""[^""]+""|[A-Za-z_][A-Za-z0-9_]*)\.)?(?<column>""[^""]+""|[A-Za-z_][A-Za-z0-9_]*)(?:\s+(?<direction>ASC|DESC))?(?:\s+NULLS\s+(?<nulls>FIRST|LAST))?\s*$",
+        RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture);
+
+    /// <summary>
+    /// Maps the observed <c>Sort Key</c> terms of an estimated plan to logical columns. Only a plain,
+    /// optionally relation-qualified column with an optional direction and null placement is a supported
+    /// form; a function, expression, collation clause or foreign relation leaves the keys unobserved
+    /// rather than guessed. PostgreSQL's estimated explain exposes no numeric bound on a Limit node and no
+    /// runtime spill fact, so neither is claimed here.
+    /// </summary>
+    private static ProviderPlanNodeDetails? ReadSortDetails(
+        JsonElement source,
+        string physicalTarget,
+        IReadOnlyDictionary<string, string>? logicalColumnsByPhysical)
+    {
+        if (!source.TryGetProperty("Sort Key", out var sortKey) || sortKey.ValueKind != JsonValueKind.Array)
+            return null;
+        var terms = new List<ProviderOrderTerm>();
+        var subplanColumns = ReadOrdinalSubplanColumns(source, physicalTarget, logicalColumnsByPhysical);
+        foreach (var key in sortKey.EnumerateArray())
+        {
+            if (key.ValueKind != JsonValueKind.String)
+                return null;
+            var text = key.GetString()!;
+            if (TryReadTransformKey(text, physicalTarget, logicalColumnsByPhysical, subplanColumns, out var transformed))
+            {
+                terms.Add(transformed);
+                continue;
+            }
+            var match = SortKeyPattern.Match(text);
+            if (!match.Success)
+                return null;
+            var relation = Unquote(match.Groups["relation"].Value);
+            if (relation.Length != 0 && !string.Equals(relation, physicalTarget, StringComparison.Ordinal))
+                return null;
+            var logicalColumn = LogicalColumn(Unquote(match.Groups["column"].Value), logicalColumnsByPhysical);
+            if (logicalColumn is null)
+                return null;
+            var direction = match.Groups["direction"].Value == "DESC" ? OrderDirection.Descending : OrderDirection.Ascending;
+            NullOrder? nulls = match.Groups["nulls"].Value switch
+            {
+                "FIRST" => NullOrder.First,
+                "LAST" => NullOrder.Last,
+                _ => null
+            };
+            terms.Add(new ProviderOrderTerm(logicalColumn, direction, nulls));
+        }
+        return terms.Count == 0 ? null : new ProviderPlanNodeDetails(nativeSortKeys: terms);
+    }
+
+    private static readonly Regex NullRankPattern = new(
+        @"^\s*CASE\s+WHEN\s+\(?(?:(?<relation>""[^""]+""|[A-Za-z_][A-Za-z0-9_]*)\.)?(?<column>""[^""]+""|[A-Za-z_][A-Za-z0-9_]*)\s+IS\s+NULL\)?\s+THEN\s+1\s+ELSE\s+0\s+END(?:\s+(?<direction>ASC|DESC))?(?:\s+NULLS\s+(?<nulls>FIRST|LAST))?\s*$",
+        RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture | RegexOptions.IgnoreCase);
+
+    private static readonly Regex OrdinalSubplanPattern = new(
+        @"^\s*COALESCE\(\(SubPlan\s+(?<subplan>[0-9]+)\),\s*''(?:::text)?\)(?:\s+(?<direction>ASC|DESC))?(?:\s+NULLS\s+(?<nulls>FIRST|LAST))?\s*$",
+        RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture | RegexOptions.IgnoreCase);
+
+    private static readonly Regex OrdinalSubplanCallPattern = new(
+        @"^\s*unnest\(string_to_array\(\((?:(?<relation>""[^""]+""|[A-Za-z_][A-Za-z0-9_]*)\.)?(?<column>""[^""]+""|[A-Za-z_][A-Za-z0-9_]*)\)::text,\s*NULL::text\)\)\s*$",
+        RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture);
+
+    /// <summary>
+    /// The two renderer transforms a sort key can carry: the null-rank CASE, and the ordinal string key
+    /// computed by an <c>unnest(string_to_array(...))</c> subplan whose ordinal names the column.
+    /// </summary>
+    private static bool TryReadTransformKey(
+        string key,
+        string physicalTarget,
+        IReadOnlyDictionary<string, string>? logicalColumnsByPhysical,
+        IReadOnlyDictionary<int, string> subplanColumns,
+        out ProviderOrderTerm term)
+    {
+        term = null!;
+        var nullRank = NullRankPattern.Match(key);
+        if (nullRank.Success)
+        {
+            var relation = Unquote(nullRank.Groups["relation"].Value);
+            if (relation.Length != 0 && !string.Equals(relation, physicalTarget, StringComparison.Ordinal))
+                return false;
+            var logical = LogicalColumn(Unquote(nullRank.Groups["column"].Value), logicalColumnsByPhysical);
+            if (logical is null)
+                return false;
+            term = new ProviderOrderTerm(logical, Direction(nullRank), Nulls(nullRank), [ProviderOrderingTransform.NullRank]);
+            return true;
+        }
+        var ordinal = OrdinalSubplanPattern.Match(key);
+        if (!ordinal.Success ||
+            !int.TryParse(ordinal.Groups["subplan"].Value, out var subplan) ||
+            !subplanColumns.TryGetValue(subplan, out var column))
+            return false;
+        term = new ProviderOrderTerm(column, Direction(ordinal), Nulls(ordinal), [ProviderOrderingTransform.OrdinalStringKey],
+            ProviderPredicateComparison.Ordinal);
+        return true;
+    }
+
+    private static OrderDirection Direction(Match match) =>
+        string.Equals(match.Groups["direction"].Value, "DESC", StringComparison.OrdinalIgnoreCase)
+            ? OrderDirection.Descending
+            : OrderDirection.Ascending;
+
+    private static NullOrder? Nulls(Match match) => match.Groups["nulls"].Value.ToUpperInvariant() switch
+    {
+        "FIRST" => NullOrder.First,
+        "LAST" => NullOrder.Last,
+        _ => null
+    };
+
+    /// <summary>
+    /// Resolves each "SubPlan N" beneath the sort to the column its ordinal string key is computed
+    /// over, by the function scan's call. A subplan of any other shape is simply not resolved.
+    /// </summary>
+    private static IReadOnlyDictionary<int, string> ReadOrdinalSubplanColumns(
+        JsonElement sort,
+        string physicalTarget,
+        IReadOnlyDictionary<string, string>? logicalColumnsByPhysical)
+    {
+        var columns = new Dictionary<int, string>();
+        foreach (var node in Descendants(sort))
+        {
+            if (!node.TryGetProperty("Subplan Name", out var name) || name.ValueKind != JsonValueKind.String)
+                continue;
+            var label = name.GetString()!;
+            if (!label.StartsWith("SubPlan ", StringComparison.Ordinal) ||
+                !int.TryParse(label["SubPlan ".Length..], out var ordinal))
+                continue;
+            foreach (var function in Descendants(node))
+            {
+                if (!function.TryGetProperty("Function Call", out var call) || call.ValueKind != JsonValueKind.String)
+                    continue;
+                var match = OrdinalSubplanCallPattern.Match(call.GetString()!);
+                if (!match.Success)
+                    continue;
+                var relation = Unquote(match.Groups["relation"].Value);
+                if (relation.Length != 0 && !string.Equals(relation, physicalTarget, StringComparison.Ordinal))
+                    continue;
+                var logical = LogicalColumn(Unquote(match.Groups["column"].Value), logicalColumnsByPhysical);
+                if (logical is not null)
+                    columns[ordinal] = logical;
+            }
+        }
+        return columns;
+    }
+
+    private static IEnumerable<JsonElement> Descendants(JsonElement node)
+    {
+        if (node.ValueKind != JsonValueKind.Object || !node.TryGetProperty("Plans", out var plans) || plans.ValueKind != JsonValueKind.Array)
+            yield break;
+        foreach (var child in plans.EnumerateArray())
+        {
+            yield return child;
+            foreach (var descendant in Descendants(child))
+                yield return descendant;
+        }
+    }
+
+    private static string Unquote(string identifier) =>
+        identifier.Length >= 2 && identifier[0] == '"' && identifier[^1] == '"'
+            ? identifier[1..^1].Replace("\"\"", "\"", StringComparison.Ordinal)
+            : identifier;
+
+    /// <summary>A provider-owned physical column is logical only through its recorded search-key mapping.</summary>
+    internal static string? LogicalColumn(string physicalColumn, IReadOnlyDictionary<string, string>? logicalColumnsByPhysical)
+    {
+        if (logicalColumnsByPhysical is not null && logicalColumnsByPhysical.TryGetValue(physicalColumn, out var logical))
+            return logical;
+        // Provider-owned physical columns are logical only through a recorded mapping, except the scope
+        // column, whose identity is already the logical name evidence uses for scope facts.
+        return IsProviderOwned(physicalColumn) && physicalColumn != ProviderOwnedColumns.Scope ? null : physicalColumn;
+    }
+
+    private static bool IsProviderOwned(string column) =>
+        column.StartsWith("__groundwork_", StringComparison.Ordinal);
 
     private static bool IsIndexAccess(JsonElement source) =>
         source.TryGetProperty("Node Type", out var nodeType) &&
