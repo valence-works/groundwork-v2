@@ -7,6 +7,7 @@ namespace Groundwork.Substrate.Mongo;
 public sealed class MongoClientContext : IDisposable
 {
     private bool disposed;
+    private string? serverVersion;
 
     public MongoClientContext(string connectionString)
     {
@@ -33,6 +34,18 @@ public sealed class MongoClientContext : IDisposable
     {
         ThrowIfDisposed();
         return Client.StartSessionAsync(cancellationToken: cancellationToken);
+    }
+
+    /// <summary>
+    /// The connected server's version, the MongoDB counterpart of <c>DbConnection.ServerVersion</c>
+    /// that the relational providers stamp on execution evidence. Resolved once from <c>buildInfo</c>;
+    /// the cluster description only carries a wire-version approximation such as 7.0.0.
+    /// </summary>
+    public string ServerVersion()
+    {
+        ThrowIfDisposed();
+        return serverVersion ??=
+            Database.RunCommand<BsonDocument>(new BsonDocument("buildInfo", 1)).GetValue("version").AsString;
     }
 
     public bool SupportsTransactions()

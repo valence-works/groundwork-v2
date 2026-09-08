@@ -1002,7 +1002,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             evidenceInitializationDepth++;
             try
             {
-                this.evidenceCapture = new MongoExecutionEvidenceCapture(structured, Unit, Access);
+                this.evidenceCapture = new MongoExecutionEvidenceCapture(structured, Unit, Access, state.Context.ServerVersion);
             }
             finally
             {

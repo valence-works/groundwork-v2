@@ -3,6 +3,7 @@ using Groundwork.Kernel;
 using Groundwork.LiveDatabases;
 using Groundwork.MongoDb;
 using Groundwork.Query.Model;
+using MongoDB.Bson;
 using MongoDB.Driver;
 using Xunit;
 
@@ -68,6 +69,12 @@ public sealed class MongoExecutionEvidenceLiveTests
         Assert.Equal(ProviderExecutionOutcome.Succeeded, queryEvidence.Outcome);
         Assert.Equal(ProviderEvidenceAvailability.Collected, queryEvidence.ShapeAvailability);
         Assert.NotNull(queryEvidence.BoundedQuery);
+        Assert.Equal(
+            new ProviderIdentity(
+                MongoSchemaTargets.Provider.Name,
+                new MongoClient(database.ConnectionString).GetDatabase(new MongoUrl(database.ConnectionString).DatabaseName)
+                    .RunCommand<BsonDocument>(new BsonDocument("buildInfo", 1)).GetValue("version").AsString),
+            queryEvidence.Provider);
         Assert.Equal(ProviderEvidenceAvailability.NotRequested, queryEvidence.Plan.Availability);
         Assert.Equal(scopedUnit.Id, queryEvidence.Target.LogicalUnitId);
         Assert.Equal(ProviderScopeBindingMode.PhysicalTarget, queryEvidence.Target.ScopeBinding);

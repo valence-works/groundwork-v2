@@ -92,7 +92,7 @@ public sealed class MongoExecutionPlanCollectionTests
     public void Requested_plan_failure_publishes_successful_actual_evidence_then_rethrows_original_diagnostic()
     {
         var observer = new RecordingObserver();
-        var capture = new MongoExecutionEvidenceCapture(observer, CreateUnit(), MongoStorageAccess.Global);
+        var capture = new MongoExecutionEvidenceCapture(observer, CreateUnit(), MongoStorageAccess.Global, TestServerVersion);
         var invocation = capture.BeginInvocation();
         var diagnostic = new InvalidOperationException("explain diagnostic");
         var result = MongoNativePlanCollectionResult.Failed(diagnostic, legacyAssertionRequested: false);
@@ -116,7 +116,7 @@ public sealed class MongoExecutionPlanCollectionTests
     public void Observer_failure_does_not_mask_pending_plan_diagnostic()
     {
         var observer = new RecordingObserver { ThrowOnObserve = true };
-        var capture = new MongoExecutionEvidenceCapture(observer, CreateUnit(), MongoStorageAccess.Global);
+        var capture = new MongoExecutionEvidenceCapture(observer, CreateUnit(), MongoStorageAccess.Global, TestServerVersion);
         var diagnostic = new InvalidOperationException("explain diagnostic");
         var result = MongoNativePlanCollectionResult.Failed(diagnostic, legacyAssertionRequested: false);
 
@@ -136,7 +136,7 @@ public sealed class MongoExecutionPlanCollectionTests
     public void Observer_failure_propagates_when_completion_has_no_pending_diagnostic()
     {
         var observer = new RecordingObserver { ThrowOnObserve = true };
-        var capture = new MongoExecutionEvidenceCapture(observer, CreateUnit(), MongoStorageAccess.Global);
+        var capture = new MongoExecutionEvidenceCapture(observer, CreateUnit(), MongoStorageAccess.Global, TestServerVersion);
 
         var failure = Assert.Throws<InvalidOperationException>(() =>
             MongoExecutionEvidenceCompletion.PublishSuccessfulQuery(
@@ -154,7 +154,7 @@ public sealed class MongoExecutionPlanCollectionTests
     public void Observer_failure_does_not_mask_pending_legacy_assertion_failure()
     {
         var observer = new RecordingObserver { ThrowOnObserve = true };
-        var capture = new MongoExecutionEvidenceCapture(observer, CreateUnit(), MongoStorageAccess.Global);
+        var capture = new MongoExecutionEvidenceCapture(observer, CreateUnit(), MongoStorageAccess.Global, TestServerVersion);
         var diagnostic = new InvalidOperationException("legacy explain diagnostic");
         var result = MongoNativePlanCollectionResult.LegacyFailure(diagnostic);
 
@@ -174,7 +174,7 @@ public sealed class MongoExecutionPlanCollectionTests
     public void Transactional_legacy_assertion_failure_precedes_observer_failure_after_actual_success()
     {
         var observer = new RecordingObserver { ThrowOnObserve = true };
-        var capture = new MongoExecutionEvidenceCapture(observer, CreateUnit(), MongoStorageAccess.Global);
+        var capture = new MongoExecutionEvidenceCapture(observer, CreateUnit(), MongoStorageAccess.Global, TestServerVersion);
         var diagnostic = new InvalidOperationException("legacy explain diagnostic");
         ExceptionDispatchInfo? observerFailure = null;
 
@@ -210,7 +210,7 @@ public sealed class MongoExecutionPlanCollectionTests
     public void Unsupported_mapper_payload_does_not_leak_legacy_index_choice()
     {
         var observer = new RecordingObserver();
-        var capture = new MongoExecutionEvidenceCapture(observer, CreateUnit(), MongoStorageAccess.Global);
+        var capture = new MongoExecutionEvidenceCapture(observer, CreateUnit(), MongoStorageAccess.Global, TestServerVersion);
         var query = new MongoQueryCommand(
             new BsonDocument(),
             new BsonDocument(),
@@ -258,7 +258,7 @@ public sealed class MongoExecutionPlanCollectionTests
     public void Structured_index_choice_comes_only_from_the_mapped_winning_forest()
     {
         var observer = new RecordingObserver();
-        var capture = new MongoExecutionEvidenceCapture(observer, CreateUnit(), MongoStorageAccess.Global);
+        var capture = new MongoExecutionEvidenceCapture(observer, CreateUnit(), MongoStorageAccess.Global, TestServerVersion);
         var query = new MongoQueryCommand(
             new BsonDocument(),
             new BsonDocument(),
@@ -339,4 +339,5 @@ public sealed class MongoExecutionPlanCollectionTests
                 throw new InvalidOperationException("observer failure");
         }
     }
+    private static string TestServerVersion() => "7.0.0-test";
 }

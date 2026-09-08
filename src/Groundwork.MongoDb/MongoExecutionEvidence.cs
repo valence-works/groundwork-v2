@@ -77,15 +77,19 @@ internal sealed class MongoExecutionEvidenceCapture
 {
     private readonly IProviderExecutionObserver observer;
     private readonly ProviderExecutionEvidenceOptions options;
+    private readonly Func<string> serverVersion;
+    private ProviderIdentity? provider;
     private readonly Dictionary<string, ProviderOpaqueIdentity> indexIdentities = new(StringComparer.Ordinal);
     private int callbackDepth;
 
     internal MongoExecutionEvidenceCapture(
         IProviderExecutionObserver observer,
         StorageUnit unit,
-        MongoStorageAccess access)
+        MongoStorageAccess access,
+        Func<string> serverVersion)
     {
         this.observer = observer ?? throw new ArgumentNullException(nameof(observer));
+        this.serverVersion = serverVersion ?? throw new ArgumentNullException(nameof(serverVersion));
         Unit = unit ?? throw new ArgumentNullException(nameof(unit));
         Access = access ?? throw new ArgumentNullException(nameof(access));
         CaptureId = NewIdentity();
@@ -121,6 +125,11 @@ internal sealed class MongoExecutionEvidenceCapture
     internal ProviderExecutionTarget Target { get; }
 
     internal ProviderExecutionEvidenceOptions Options => options;
+
+    /// <summary>The provider identity stamped on every emission: the MongoDB provider name and the
+    /// connected server's version, resolved on first use so no command runs while the capture is
+    /// established.</summary>
+    internal ProviderIdentity Provider => provider ??= new(MongoSchemaTargets.Provider.Name, serverVersion());
 
     internal ProviderOpaqueIdentity NewIdentity() => new(Guid.NewGuid());
 
@@ -169,7 +178,7 @@ internal sealed class MongoExecutionEvidenceCapture
             commandOrdinal,
             statementOrdinal: 0);
         var evidence = new ProviderExecutionEvidence(
-            MongoSchemaTargets.Provider,
+            Provider,
             operation,
             commandKind,
             role,
