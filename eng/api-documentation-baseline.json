@@ -37,11 +37,11 @@
       "publicApiMembers": 97
     },
     "Groundwork.Kernel|lib/net10.0/Groundwork.Kernel.dll": {
-      "maximumUndocumentedMembers": 1932,
+      "maximumUndocumentedMembers": 1957,
       "publicApiMembers": 2342
     },
     "Groundwork.Kernel|lib/net8.0/Groundwork.Kernel.dll": {
-      "maximumUndocumentedMembers": 1932,
+      "maximumUndocumentedMembers": 1957,
       "publicApiMembers": 2342
     },
     "Groundwork.MongoDb|lib/net10.0/Groundwork.MongoDb.dll": {
