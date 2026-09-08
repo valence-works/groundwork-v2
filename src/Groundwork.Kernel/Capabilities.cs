@@ -681,6 +681,7 @@ public static class WellKnownCapabilities
 {
     public static readonly CapabilityId AtomicCommit = new("groundwork.operational.atomic-commit");
     public static readonly CapabilityId EnforcedConstraints = new("groundwork.schema.enforced-constraints");
+    public static readonly CapabilityId SerializedWriter = new("groundwork.operational.serialized-writer");
 
     public static IReadOnlyList<CapabilityDescriptor> All { get; } = ImmutableArray.Create(
         new CapabilityDescriptor(
@@ -691,5 +692,9 @@ public static class WellKnownCapabilities
         new CapabilityDescriptor(
             EnforcedConstraints,
             "Enforced physical constraints",
-            "The deployment enforces declared physical foreign keys and portable check constraints in its native catalog."));
+            "The deployment enforces declared physical foreign keys and portable check constraints in its native catalog."),
+        new CapabilityDescriptor(
+            SerializedWriter,
+            "Serialized writer",
+            "The deployment admits one writing transaction at a time; every other commit waits for the running one, so a long transaction delays unrelated writers."));
 }

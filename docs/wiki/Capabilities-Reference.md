@@ -35,6 +35,7 @@ test.
 | Id | Constant | Promise |
 | --- | --- | --- |
 | `groundwork.operational.atomic-commit` | `WellKnownCapabilities.AtomicCommit` | Cross-unit atomic commit across storage units |
+| `groundwork.operational.serialized-writer` | `WellKnownCapabilities.SerializedWriter` | One writing transaction at a time; other commits wait for it, so background writers should keep transactions short |
 | `groundwork.column.provider-sequence` | `BatchWriteCapabilities.ProviderSequence` | Provider-assigned strictly increasing `Int64` keys |
 | `groundwork.storage.batched-unit-of-work` | `BatchWriteCapabilities.StagedUnitOfWork` | Staged writes in a transactional unit of work |
 | `groundwork.storage.batched-outcomes` | `BatchWriteCapabilities.PerRowOutcomes` | One outcome per staged input in `Exact` mode |
@@ -74,6 +75,7 @@ if (session is ICompareAndDeleteStorageSession) { … }
 | Capability | SQLite | PostgreSQL | SQL Server | Mongo (RS) | Mongo (standalone) | InMemory |
 | --- | :-: | :-: | :-: | :-: | :-: | :-: |
 | `atomic-commit` | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| `serialized-writer` | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `provider-sequence` | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | `append-idempotency` | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | `exact-append-outcomes` | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |

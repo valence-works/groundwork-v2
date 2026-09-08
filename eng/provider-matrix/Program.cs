@@ -149,6 +149,7 @@ static string RenderProviderMatrix(MatrixDocument document)
         "groundwork.storage.exact-retention-affected-keys",
         "groundwork.schema.enforced-constraints",
         "groundwork.operational.atomic-commit",
+        "groundwork.operational.serialized-writer",
         "groundwork.storage.compare-and-delete",
         "groundwork.storage.set-mutation"
     };
@@ -200,6 +201,8 @@ static CapabilityDescriptor DescribeCapability(string id)
         return CapabilityRegistry.Default.Get(WellKnownCapabilities.EnforcedConstraints);
     if (id == WellKnownCapabilities.AtomicCommit.Value)
         return BatchWriteCapabilities.AtomicCommitDescriptor;
+    if (id == WellKnownCapabilities.SerializedWriter.Value)
+        return BatchWriteCapabilities.SerializedWriterDescriptor;
     if (id == BatchWriteCapabilities.NativeBatch.Value)
         return BatchWriteCapabilities.NativeBatchDescriptor;
     return BatchWriteCapabilities.All.Single(descriptor => descriptor.Id.Value == id);
@@ -218,6 +221,7 @@ static string ShortName(string capability) => capability switch
     "groundwork.storage.exact-retention-affected-keys" => "Affected keys",
     "groundwork.schema.enforced-constraints" => "Enforced constraints",
     "groundwork.operational.atomic-commit" => "Atomic commit",
+    "groundwork.operational.serialized-writer" => "Serialized writer",
     "groundwork.storage.compare-and-delete" => "Compare/delete",
     "groundwork.storage.set-mutation" => "Set mutation",
     _ => capability

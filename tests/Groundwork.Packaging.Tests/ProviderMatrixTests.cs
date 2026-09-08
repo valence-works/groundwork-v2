@@ -60,6 +60,10 @@ public sealed class ProviderMatrixTests
             .GetProperty("Capabilities").EnumerateArray().Select(capability => capability.GetProperty("Id").GetString()));
         Assert.Contains("groundwork.operational.atomic-commit", providerRows["sqlite"]
             .GetProperty("Capabilities").EnumerateArray().Select(capability => capability.GetProperty("Id").GetString()));
+        Assert.Contains("groundwork.operational.serialized-writer", providerRows["sqlite"]
+            .GetProperty("Capabilities").EnumerateArray().Select(capability => capability.GetProperty("Id").GetString()));
+        Assert.DoesNotContain("groundwork.operational.serialized-writer", providerRows["postgresql"]
+            .GetProperty("Capabilities").EnumerateArray().Select(capability => capability.GetProperty("Id").GetString()));
 
         var capabilities = providerRows.Values
             .SelectMany(provider => provider.GetProperty("Capabilities").EnumerateArray())
