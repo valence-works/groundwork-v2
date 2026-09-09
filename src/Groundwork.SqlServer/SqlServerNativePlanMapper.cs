@@ -180,6 +180,26 @@ internal static class SqlServerNativePlanMapper
                 node = new ProviderPlanNode(id, parentId, ProviderPlanOperator.Filter);
                 break;
 
+            case "Nested Loops":
+                {
+                    // A bookmark lookup is the row fetch of its driving seek, not a second source: SQL Server
+                    // reads the columns an index does not cover through a RID Lookup (heap) or Key Lookup
+                    // (clustered table) joined to the seek by a Nested Loops. Both operators map to
+                    // Materialize without a target, the fact MongoDB's FETCH stage reports, and the seek
+                    // stays the forest's single access node. Any other join still withholds the forest.
+                    if (!TryReadOperatorChildren(source, "NestedLoops", out children) || children.Length != 2 ||
+                        !IsBookmarkLookup(children[1], physicalDatabase, physicalSchema, physicalTarget))
+                        return false;
+                    node = new ProviderPlanNode(id, parentId, ProviderPlanOperator.Materialize);
+                    nodes.Add(node);
+                    if (!TryMapNode(children[0], id, nodes, ids, physicalDatabase, physicalSchema, physicalTarget, targetId,
+                            indexIdentity, logicalIndexesByPhysicalName, catalogIndexes, logicalColumnsByPhysical) ||
+                        !TryReadNodeId(children[1], out var lookupId) || !ids.Add(lookupId))
+                        return false;
+                    nodes.Add(new ProviderPlanNode(lookupId, id, ProviderPlanOperator.Materialize));
+                    return true;
+                }
+
             case "Sort":
                 {
                     if (!TryReadOperatorChildren(source, "Sort", out children) || children.Length != 1)
@@ -228,6 +248,22 @@ internal static class SqlServerNativePlanMapper
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// A RID Lookup or Key Lookup against the statement target: showplan renders both as an
+    /// <c>IndexScan</c> payload flagged <c>Lookup="1"</c> with no child operator.
+    /// </summary>
+    private static bool IsBookmarkLookup(XElement source, string physicalDatabase, string physicalSchema, string physicalTarget)
+    {
+        var physicalOperation = (string?)source.Attribute("PhysicalOp");
+        if (physicalOperation is not ("RID Lookup" or "Key Lookup") ||
+            !TryReadOperatorChildren(source, "IndexScan", out var children) || children.Length != 0 ||
+            !TryReadTarget(source, physicalDatabase, physicalSchema, physicalTarget))
+            return false;
+        var payload = source.Element(ShowPlanNamespace + "IndexScan");
+        return string.Equals((string?)payload?.Attribute("Lookup"), "1", StringComparison.Ordinal) ||
+               string.Equals((string?)payload?.Attribute("Lookup"), "true", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool TryReadAccess(
@@ -573,7 +609,7 @@ internal static class SqlServerNativePlanMapper
     }
 
     private static bool IsOperatorPayload(XElement element) =>
-        element.Name.LocalName is "IndexScan" or "TableScan" or "Sort" or "Top" or "TopSort" or "ComputeScalar" or "Filter";
+        element.Name.LocalName is "IndexScan" or "TableScan" or "Sort" or "Top" or "TopSort" or "ComputeScalar" or "Filter" or "NestedLoops";
 
     private static bool TryReadNodeId(XElement source, out int id) =>
         int.TryParse((string?)source.Attribute("NodeId"), out id) && id >= 0;
