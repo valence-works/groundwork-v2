@@ -186,7 +186,42 @@ public sealed class PostgreSqlQueryExecutionEvidenceTests
     }
 
     [Fact]
-    public void Non_identity_search_keys_and_count_shapes_withhold_the_whole_shape()
+    public void Declared_but_unreferenced_element_and_non_identity_search_keys_do_not_withhold_the_shape()
+    {
+        // A unit may declare element search keys and folded search keys for other columns; only a query
+        // that emits such a provider-owned physical column fails closed (#432).
+        var (table, id, payload) = Columns(nullablePayload: false);
+        var request = new QueryRequest(
+            table,
+            new Predicate.Equal(id, QueryConstant.Of(id, "secret")),
+            [new OrderTerm(id, nullOrder: NullOrder.First)],
+            Projection.ColumnsOnly(id),
+            Paging.Keyset(2));
+        var options = new QueryRenderOptions
+        {
+            SearchKeyColumns = new Dictionary<string, QuerySearchKeyColumn>(StringComparer.Ordinal)
+            {
+                [payload.Name] = new QuerySearchKeyColumn(
+                    payload.Name,
+                    "__groundwork_folded_payload",
+                    QuerySearchKeyPolicy.AsciiIgnoreCase,
+                    orderByPhysicalColumn: true)
+            },
+            ElementSearchKeyColumns = new Dictionary<string, QueryElementSearchKeyColumn>(StringComparer.Ordinal)
+            {
+                ["tags"] = new QueryElementSearchKeyColumn("tags", "__groundwork_elements_tags", QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase)
+            }
+        };
+
+        var rendered = new PostgreSqlQueryRenderer().RenderForExecution(request, options, hasLookahead: true);
+
+        var shape = Assert.IsType<ProviderBoundedQueryEvidence>(rendered.Shape);
+        Assert.Equal(id.Name, Assert.Single(shape.Ordering).LogicalColumn);
+        Assert.DoesNotContain("__groundwork_", System.Text.Json.JsonSerializer.Serialize(shape), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Referenced_non_identity_search_keys_and_count_shapes_withhold_the_whole_shape()
     {
         var (table, id, payload) = Columns(nullablePayload: false);
         var request = new QueryRequest(
@@ -215,7 +250,16 @@ public sealed class PostgreSqlQueryExecutionEvidenceTests
             ResultShape.TotalCount.Instance);
 
         var renderer = new PostgreSqlQueryRenderer();
+        // A folded search key has no logical ordinal order or comparison the fact contract can state, so a
+        // query that emits it, in a predicate or an ordering, withholds the whole shape (#432).
         Assert.Null(renderer.RenderForExecution(request, nonIdentityOptions, hasLookahead: true).Shape);
+        var foldedOrder = new QueryRequest(
+            table,
+            new Predicate.Equal(id, QueryConstant.Of(id, "secret")),
+            [new OrderTerm(payload, nullOrder: NullOrder.First)],
+            request.Projection,
+            request.Paging);
+        Assert.Null(renderer.RenderForExecution(foldedOrder, nonIdentityOptions, hasLookahead: true).Shape);
         Assert.Null(renderer.RenderForExecution(count, QueryRenderOptions.Default, hasLookahead: true).Shape);
     }
 

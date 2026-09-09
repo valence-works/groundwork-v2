@@ -69,6 +69,58 @@ public sealed class MongoNativePlanDetailTests
     }
 
     [Fact]
+    public void Renderer_computed_sort_fields_resolve_to_their_source_columns_with_transforms()
+    {
+        // The renderer's null-rank and ordinal-key $set fields are resolved from their computing stages,
+        // never exported under their computed names; a computed field without its stage stays unobserved (#432).
+        var ordinalKey = new BsonDocument("$function", new BsonDocument
+        {
+            { "body", "function(value) { return value; }" },
+            { "args", new BsonArray { "$idOrderKey" } },
+            { "lang", "js" }
+        });
+        var nullRank = new BsonDocument("$cond", new BsonArray
+        {
+            new BsonDocument("$eq", new BsonArray { "$lastSeen", BsonNull.Value }), 0, 1
+        });
+        var explain = new BsonDocument("stages", new BsonArray
+        {
+            new BsonDocument("$cursor", new BsonDocument("queryPlanner", new BsonDocument
+            {
+                { "namespace", "db.scope" },
+                { "winningPlan", new BsonDocument("stage", "COLLSCAN") }
+            })),
+            new BsonDocument("$set", new BsonDocument("_groundwork_null_rank_1", nullRank)),
+            new BsonDocument("$set", new BsonDocument("_groundwork_ordinal_key_2", ordinalKey)),
+            new BsonDocument("$set", new BsonDocument("_groundwork_order_value_3", "$id")),
+            new BsonDocument("$sort", new BsonDocument
+            {
+                { "sortKey", new BsonDocument { { "_groundwork_null_rank_1", 1 }, { "lastSeen", -1 }, { "_groundwork_ordinal_key_2", 1 }, { "_groundwork_order_value_3", 1 } } },
+                { "limit", 21 }
+            })
+        });
+        var forest = Assert.IsType<ProviderPlanForest>(Map(explain));
+        var sort = Assert.Single(forest.Nodes, node => node.Operation == ProviderPlanOperator.TopNSort);
+        Assert.Collection(sort.Details!.NativeSortKeys!.Value,
+            term => { Assert.Equal("lastSeen", term.LogicalColumn); Assert.Equal([ProviderOrderingTransform.NullRank], term.Transforms.ToArray()); },
+            term => { Assert.Equal("lastSeen", term.LogicalColumn); Assert.Empty(term.Transforms); Assert.Equal(OrderDirection.Descending, term.Direction); },
+            term => { Assert.Equal("idOrderKey", term.LogicalColumn); Assert.Equal([ProviderOrderingTransform.OrdinalStringKey], term.Transforms.ToArray()); Assert.Equal(ProviderPredicateComparison.Ordinal, term.Comparison); },
+            term => { Assert.Equal("id", term.LogicalColumn); Assert.Empty(term.Transforms); });
+        Assert.DoesNotContain("_groundwork_", System.Text.Json.JsonSerializer.Serialize(sort.Details), StringComparison.Ordinal);
+
+        var missingStage = Map(new BsonDocument("stages", new BsonArray
+        {
+            new BsonDocument("$cursor", new BsonDocument("queryPlanner", new BsonDocument
+            {
+                { "namespace", "db.scope" },
+                { "winningPlan", new BsonDocument("stage", "COLLSCAN") }
+            })),
+            new BsonDocument("$sort", new BsonDocument("sortKey", new BsonDocument("_groundwork_ordinal_key_9", 1)))
+        }));
+        Assert.Null(Assert.Single(Assert.IsType<ProviderPlanForest>(missingStage).Nodes, node => node.Operation == ProviderPlanOperator.Sort).Details);
+    }
+
+    [Fact]
     public void Provider_owned_or_nested_sort_fields_leave_keys_unobserved_and_a_bad_literal_fails_the_map()
     {
         var owned = Map(new BsonDocument("queryPlanner", new BsonDocument

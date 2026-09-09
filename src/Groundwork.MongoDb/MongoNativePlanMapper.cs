@@ -375,6 +375,14 @@ internal static class MongoNativePlanMapper
                 internal int NextId => nextId;
 
         /// <summary>
+        /// Fields the renderer computes for ordering, keyed by the name a later sort stage refers to:
+        /// a null-rank <c>$cond</c>, an ordinal-key <c>$function</c>, or a plain field copy. A field
+        /// computed by any other expression is recorded without a source so a sort over it stays
+        /// unobserved instead of exporting the computed name as if it were a logical column (#432).
+        /// </summary>
+        private readonly Dictionary<string, (string Source, ProviderOrderingTransform? Transform)?> computedFields = new(StringComparer.Ordinal);
+
+        /// <summary>
         /// An outer aggregation stage: its observed sort keys, its literal limit (fused into the sort or
         /// standalone) and, when the explain ran with execution statistics, whether the stage used disk.
         /// Unreadable keys leave the sort unobserved rather than wrong; a malformed literal fails the map.
@@ -382,6 +390,8 @@ internal static class MongoNativePlanMapper
         internal bool AddPipelineStage(ProviderPlanOperator operation, BsonDocument stage, BsonValue value)
         {
             var node = new MutableNode(nextId++, parentId: null, operation, nativeStage: null);
+            if (operation == ProviderPlanOperator.Compute)
+                RecordComputedFields(value.AsBsonDocument);
             if (operation is ProviderPlanOperator.Sort or ProviderPlanOperator.TopNSort)
             {
                 var document = value.AsBsonDocument;
@@ -418,6 +428,34 @@ internal static class MongoNativePlanMapper
                 ? null
                 : new ProviderPlanNodeDetails(keys, limit, spill);
 
+        private void RecordComputedFields(BsonDocument set)
+        {
+            foreach (var field in set)
+                computedFields[field.Name] = ReadComputedSource(field.Value);
+        }
+
+        private static (string Source, ProviderOrderingTransform? Transform)? ReadComputedSource(BsonValue expression)
+        {
+            if (expression.IsString)
+                return FieldPath(expression.AsString) is { } copied ? (copied, null) : null;
+            if (!expression.IsBsonDocument || expression.AsBsonDocument.ElementCount != 1)
+                return null;
+            var element = expression.AsBsonDocument.GetElement(0);
+            if (element.Name == "$function" && element.Value.IsBsonDocument &&
+                element.Value.AsBsonDocument.TryGetValue("args", out var args) && args.IsBsonArray &&
+                args.AsBsonArray.Count == 1 && args.AsBsonArray[0].IsString)
+                return FieldPath(args.AsBsonArray[0].AsString) is { } keyed ? (keyed, ProviderOrderingTransform.OrdinalStringKey) : null;
+            if (element.Name == "$cond" && element.Value.IsBsonArray && element.Value.AsBsonArray.Count == 3 &&
+                element.Value.AsBsonArray[0].IsBsonDocument &&
+                element.Value.AsBsonArray[0].AsBsonDocument.TryGetValue("$eq", out var equality) && equality.IsBsonArray &&
+                equality.AsBsonArray.Count == 2 && equality.AsBsonArray[0].IsString && equality.AsBsonArray[1].IsBsonNull)
+                return FieldPath(equality.AsBsonArray[0].AsString) is { } ranked ? (ranked, ProviderOrderingTransform.NullRank) : null;
+            return null;
+        }
+
+        private static string? FieldPath(string reference) =>
+            reference.Length > 1 && reference[0] == '$' && reference[1] != '$' ? reference[1..] : null;
+
         private IReadOnlyList<ProviderOrderTerm>? ReadSortKeys(BsonDocument keys)
         {
             if (keys.ElementCount == 0)
@@ -435,16 +473,40 @@ internal static class MongoNativePlanMapper
                 };
                 if (direction is null)
                     return null;
+                var physical = element.Name;
+                var transforms = new List<ProviderOrderingTransform>();
+                if (computedFields.TryGetValue(physical, out var computed))
+                {
+                    if (computed is not { } definition)
+                        return null;
+                    physical = definition.Source;
+                    if (definition.Transform is { } transform)
+                        transforms.Add(transform);
+                }
+                else if (physical.StartsWith("_groundwork_", StringComparison.Ordinal))
+                {
+                    // A renderer-computed field whose computing stage is not in the explain output.
+                    return null;
+                }
                 string? logical;
-                if (logicalColumnsByPhysical is not null && logicalColumnsByPhysical.TryGetValue(element.Name, out var mapped))
+                if (logicalColumnsByPhysical is not null && logicalColumnsByPhysical.TryGetValue(physical, out var mapped))
+                {
                     logical = mapped;
+                    if (!string.Equals(mapped, physical, StringComparison.Ordinal))
+                        transforms.Add(ProviderOrderingTransform.PhysicalSearchKey);
+                }
                 else
-                    logical = element.Name.StartsWith("__groundwork_", StringComparison.Ordinal) && element.Name != ProviderOwnedColumns.Scope
+                    logical = physical.StartsWith("__groundwork_", StringComparison.Ordinal) && physical != ProviderOwnedColumns.Scope
                         ? null
-                        : element.Name;
+                        : physical;
                 if (logical is null || logical.Contains('.', StringComparison.Ordinal))
                     return null;
-                terms.Add(new ProviderOrderTerm(logical, direction.Value, null));
+                terms.Add(new ProviderOrderTerm(
+                    logical,
+                    direction.Value,
+                    null,
+                    transforms,
+                    transforms.Contains(ProviderOrderingTransform.OrdinalStringKey) ? ProviderPredicateComparison.Ordinal : ProviderPredicateComparison.Unknown));
             }
             return terms;
         }

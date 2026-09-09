@@ -83,6 +83,20 @@ explain form and `usedDisk` from `executionStats`; SQLite yields sort purpose on
 `ProviderPlanForest.ObservedRootOrder` records the observed order of sibling roots
 (MongoDB pipeline stages) without claiming parentage.
 
+## Rewritten search keys
+
+A bounded query ordered by a persisted ordinal identity key (a
+`QuerySearchKeyColumn` with the `Ordinal` policy and `PreservesOrdinalIdentity`)
+reports the source column with the `PhysicalSearchKey` transform and the
+`Ordinal` comparison on every provider, MongoDB included (0.4.0-preview.22 and
+later). A unit may declare folded or element search keys for other columns
+without withholding the shapes of queries that do not emit them; a query that
+does emit such a provider-owned physical column fails closed. MongoDB plan sort
+keys over renderer-computed fields (`_groundwork_null_rank_N`,
+`_groundwork_ordinal_key_N`) resolve to the source column with the `NullRank`
+or `OrdinalStringKey` transform; a computed field whose stage is not in the
+explain output leaves the sort unobserved.
+
 ## Provider identity
 
 `ProviderExecutionEvidence.Provider` names the provider and the connected

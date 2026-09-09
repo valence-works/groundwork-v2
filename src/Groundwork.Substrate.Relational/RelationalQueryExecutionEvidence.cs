@@ -98,6 +98,7 @@ public abstract partial class RelationalQueryRenderer
         private readonly List<ProviderOrderTerm> ordering = [];
         private readonly Dictionary<ColumnRef, ProviderPredicateComparison> comparisons = [];
         private readonly Dictionary<string, string> logicalColumnsByPhysical = new(StringComparer.Ordinal);
+        private readonly HashSet<string> withheldColumns = new(StringComparer.Ordinal);
         private ProviderNativeBound offset = ProviderNativeBound.Absent;
         private ProviderNativeBound limit = ProviderNativeBound.Absent;
 
@@ -106,9 +107,17 @@ public abstract partial class RelationalQueryRenderer
             began = true;
             if (request.Join is not null || request.Result is not ResultShape.Rows ||
                 request.Result.IncludesTotalCount || request.LatestPerKey is not null || request.Distinct ||
-                request.Paging.ContinuationToken is not null || request.Paging.Limit is null ||
-                options.ElementSearchKeyColumns.Count != 0)
+                request.Paging.ContinuationToken is not null || request.Paging.Limit is null)
                 Unsupported();
+            // Only an ordinal identity (or ordinary) mapping orders and compares by the logical column's own
+            // ordinal order, so only those are recorded as logical columns. A unit may declare other search
+            // keys and element search keys without withholding every shape rendered against it: a query
+            // that emits such a provider-owned physical column fails closed in Column and Order (#432).
+            foreach (var mapping in options.ElementSearchKeyColumns.Values)
+            {
+                withheldColumns.Add(mapping.SourceColumn);
+                withheldColumns.Add(mapping.PhysicalColumn);
+            }
             foreach (var mapping in options.SearchKeyColumns.Values)
             {
                 var identityMapping = mapping.Policy == QuerySearchKeyPolicy.Ordinal &&
@@ -117,7 +126,8 @@ public abstract partial class RelationalQueryRenderer
                     string.Equals(mapping.SourceColumn, mapping.PhysicalColumn, StringComparison.Ordinal);
                 if (!identityMapping && !ordinaryMapping)
                 {
-                    Unsupported();
+                    withheldColumns.Add(mapping.SourceColumn);
+                    withheldColumns.Add(mapping.PhysicalColumn);
                     continue;
                 }
 
@@ -135,8 +145,9 @@ public abstract partial class RelationalQueryRenderer
         internal void Unsupported() => supported = false;
         internal void Column(ColumnRef column, ProviderPredicateComparison comparison)
         {
-            if (SearchKeyProjection.IsProviderOwnedColumn(column.Name) &&
-                !logicalColumnsByPhysical.ContainsKey(column.Name))
+            if (withheldColumns.Contains(column.Name) ||
+                (SearchKeyProjection.IsProviderOwnedColumn(column.Name) &&
+                 !logicalColumnsByPhysical.ContainsKey(column.Name)))
             {
                 Unsupported();
                 return;
@@ -164,6 +175,8 @@ public abstract partial class RelationalQueryRenderer
 
         internal void Order(OrderTerm term, IReadOnlyList<ProviderOrderingTransform> transforms)
         {
+            if (withheldColumns.Contains(term.Column.Name))
+                Unsupported();
             var comparison = Comparison(term.Column);
             var logicalColumn = LogicalColumn(term.Column);
             var transformSnapshot = transforms.ToArray();
