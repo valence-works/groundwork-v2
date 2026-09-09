@@ -77,6 +77,22 @@ public sealed class PostgreSqlNativePlanDetailTests
     }
 
     [Fact]
+    public void Parenthesized_computed_sort_keys_from_postgresql_17_map_like_the_bare_forms()
+    {
+        // PostgreSQL 17 prints computed sort expressions wrapped in parentheses and without a direction
+        // when ascending: "(COALESCE((SubPlan 1), ''::text)) NULLS FIRST" (#432).
+        var forest = Map(
+            SubplanPlan("\"(CASE WHEN (records.\\\"lastSeen\\\" IS NULL) THEN 1 ELSE 0 END)\",\"records.\\\"lastSeen\\\" DESC NULLS LAST\",\"(COALESCE((SubPlan 1), ''::text)) NULLS FIRST\"", "records"),
+            new Dictionary<string, string>(StringComparer.Ordinal));
+
+        var sort = Assert.Single(Assert.IsType<ProviderPlanForest>(forest).Nodes, node => node.Operation == ProviderPlanOperator.Sort);
+        Assert.Collection(sort.Details!.NativeSortKeys!.Value,
+            term => { Assert.Equal("lastSeen", term.LogicalColumn); Assert.Equal(ProviderOrderingTransform.NullRank, Assert.Single(term.Transforms)); },
+            term => { Assert.Equal("lastSeen", term.LogicalColumn); Assert.Equal(OrderDirection.Descending, term.Direction); Assert.Equal(NullOrder.Last, term.NullPlacement); },
+            term => { Assert.Equal("id", term.LogicalColumn); Assert.Equal(ProviderOrderingTransform.OrdinalStringKey, Assert.Single(term.Transforms)); Assert.Equal(OrderDirection.Ascending, term.Direction); Assert.Equal(NullOrder.First, term.NullPlacement); });
+    }
+
+    [Fact]
     public void Ordinal_subplan_over_a_foreign_relation_leaves_the_keys_unobserved()
     {
         var forest = Map(

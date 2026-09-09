@@ -447,7 +447,7 @@ internal sealed class MongoNativePlanCollectionResult
     /// search-key mappings; a rewritten key that does not preserve identity stays unmapped so the plan
     /// mapper leaves such a sort field unobserved.
     /// </summary>
-    private static IReadOnlyDictionary<string, string> LogicalColumnsByPhysical(QueryRenderOptions options)
+    internal static IReadOnlyDictionary<string, string> LogicalColumnsByPhysical(QueryRenderOptions options)
     {
         var map = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var mapping in options.SearchKeyColumns.Values)
@@ -612,7 +612,28 @@ internal sealed class MongoExecutionEvidenceEmitter
             .Any(group => group.Count() > 1);
         if (physicalMappings)
             unsupported = true;
+        admissibleLogicalColumnsByPhysical = MongoNativePlanCollectionResult.LogicalColumnsByPhysical(options);
+        foreach (var mapping in options.SearchKeyColumns.Values)
+        {
+            if (admissibleLogicalColumnsByPhysical.ContainsKey(mapping.PhysicalColumn))
+                continue;
+            withheldColumns.Add(mapping.SourceColumn);
+            withheldColumns.Add(mapping.PhysicalColumn);
+        }
+        foreach (var mapping in options.ElementSearchKeyColumns.Values)
+        {
+            withheldColumns.Add(mapping.SourceColumn);
+            withheldColumns.Add(mapping.PhysicalColumn);
+        }
     }
+
+    /// <summary>Physical search keys that order by the logical column's own ordinal order: ordinal identity
+    /// representations and ordinary same-column mappings. Every other rewritten key withholds the shape.</summary>
+    private readonly IReadOnlyDictionary<string, string> admissibleLogicalColumnsByPhysical;
+
+    /// <summary>Columns whose search-key mapping does not preserve the logical column's ordinal identity
+    /// (folded keys, element keys): a query that emits one of them withholds the shape (#432).</summary>
+    private readonly HashSet<string> withheldColumns = new(StringComparer.Ordinal);
 
     internal void MarkUnsupported() => unsupported = true;
 
@@ -689,9 +710,21 @@ internal sealed class MongoExecutionEvidenceEmitter
         bool ordinalStringKeyEmitted,
         bool physicalSearchKeyEmitted)
     {
-        if (!ValidateColumn(term.Column))
+        // A persisted order key that preserves the logical column's ordinal identity is the logical
+        // column's own ordinal order, reported under the source column with the PhysicalSearchKey
+        // transform as the relational providers do; any other rewritten key withholds the shape (#432).
+        var admissiblePersistedKey = physicalSearchKeyEmitted &&
+            admissibleLogicalColumnsByPhysical.ContainsKey(term.Column.Name);
+        if (admissiblePersistedKey)
+        {
+            if ((term.Column.Table != TableId.Empty && term.Column.Table != table) || withheldColumns.Contains(term.Column.Name))
+            {
+                unsupported = true;
+                return;
+            }
+        }
+        else if (!ValidateColumn(term.Column))
             return;
-
         var transforms = new List<ProviderOrderingTransform>();
         if (nullRankEmitted)
             transforms.Add(ProviderOrderingTransform.NullRank);
@@ -700,17 +733,15 @@ internal sealed class MongoExecutionEvidenceEmitter
         if (physicalSearchKeyEmitted)
         {
             transforms.Add(ProviderOrderingTransform.PhysicalSearchKey);
-            // A rewritten provider-owned search key is not yet mapped back to a complete
-            // logical ordering contract in this bounded slice.
-            unsupported = true;
+            if (!admissiblePersistedKey)
+                unsupported = true;
         }
-
         ordering.Add(new ProviderOrderTerm(
             EmittedLogicalColumn(term.Column),
             term.Direction,
             nullRankEmitted && term.NullOrder != NullOrder.ProviderDefault ? term.NullOrder : null,
             transforms,
-            term.Column.Type == QueryType.String && ordinalStringKeyEmitted
+            term.Column.Type == QueryType.String && (ordinalStringKeyEmitted || admissiblePersistedKey)
                 ? ProviderPredicateComparison.Ordinal
                 : ProviderPredicateComparison.Exact));
     }
@@ -798,7 +829,7 @@ internal sealed class MongoExecutionEvidenceEmitter
 
     private bool ValidateColumn(ColumnRef column)
     {
-        if (column.Table != TableId.Empty && column.Table != table)
+        if ((column.Table != TableId.Empty && column.Table != table) || withheldColumns.Contains(column.Name))
         {
             unsupported = true;
             return false;

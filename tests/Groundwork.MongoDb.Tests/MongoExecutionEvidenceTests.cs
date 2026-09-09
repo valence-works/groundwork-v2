@@ -271,6 +271,81 @@ public sealed class MongoExecutionEvidenceTests
     }
 
     [Fact]
+    public void Renderer_ordering_by_an_ordinal_identity_key_reports_the_source_column_with_the_physical_transform()
+    {
+        // A persisted ordinal identity key orders exactly as the logical column's ordinal order, so the
+        // shape is supported and names the source column, as the relational providers report it (#432).
+        var unit = CreateSimpleUnit("mongo-evidence-identity-order") with
+        {
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "status", Type = PortableType.String, IsNullable = false }
+            ]
+        };
+        var status = new ColumnRef(new TableId(unit.Name), "status", QueryType.String, isNullable: false);
+        var orderKey = new ColumnRef(new TableId(unit.Name), "__groundwork_ordinal_id", QueryType.String, isNullable: false);
+        var request = new QueryRequest(
+            new TableId(unit.Name),
+            new Predicate.Equal(status, QueryConstant.Of(status, "value-sentinel")),
+            [new OrderTerm(orderKey, OrderDirection.Ascending, NullOrder.First)],
+            Projection.All,
+            Paging.OffsetLimit(0, 2));
+        var options = QueryRenderOptions.Default with
+        {
+            SearchKeyColumns = new Dictionary<string, QuerySearchKeyColumn>(StringComparer.Ordinal)
+            {
+                ["id"] = new("id", "__groundwork_ordinal_id", QuerySearchKeyPolicy.Ordinal,
+                    orderByPhysicalColumn: true, supportsPrefixPredicates: false, preservesOrdinalIdentity: true)
+            }
+        };
+        var capture = new MongoExecutionEvidenceCapture(new RecordingEvidenceObserver(), unit, MongoStorageAccess.Global, TestServerVersion);
+
+        var emission = new MongoQueryRenderer().RenderWithEvidence(request, options, "physical", capture, false);
+
+        var shape = Assert.IsType<ProviderBoundedQueryEvidence>(emission.StructuredShape);
+        var order = Assert.Single(shape.Ordering);
+        Assert.Equal("id", order.LogicalColumn);
+        Assert.Contains(ProviderOrderingTransform.PhysicalSearchKey, order.Transforms);
+        Assert.DoesNotContain(ProviderOrderingTransform.OrdinalStringKey, order.Transforms);
+        Assert.Equal(ProviderPredicateComparison.Ordinal, order.Comparison);
+        Assert.DoesNotContain("__groundwork_ordinal_id", System.Text.Json.JsonSerializer.Serialize(shape), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Renderer_ordering_by_a_non_identity_persisted_key_withdraws_the_shape()
+    {
+        var unit = CreateSimpleUnit("mongo-evidence-folded-order") with
+        {
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "status", Type = PortableType.String, IsNullable = false }
+            ]
+        };
+        var status = new ColumnRef(new TableId(unit.Name), "status", QueryType.String, isNullable: false);
+        var orderKey = new ColumnRef(new TableId(unit.Name), "__groundwork_folded_id", QueryType.String, isNullable: false);
+        var request = new QueryRequest(
+            new TableId(unit.Name),
+            new Predicate.Equal(status, QueryConstant.Of(status, "value-sentinel")),
+            [new OrderTerm(orderKey, OrderDirection.Ascending, NullOrder.First)],
+            Projection.All,
+            Paging.OffsetLimit(0, 2));
+        var options = QueryRenderOptions.Default with
+        {
+            SearchKeyColumns = new Dictionary<string, QuerySearchKeyColumn>(StringComparer.Ordinal)
+            {
+                ["id"] = new("id", "__groundwork_folded_id", QuerySearchKeyPolicy.AsciiIgnoreCase, orderByPhysicalColumn: true)
+            }
+        };
+        var capture = new MongoExecutionEvidenceCapture(new RecordingEvidenceObserver(), unit, MongoStorageAccess.Global, TestServerVersion);
+
+        var emission = new MongoQueryRenderer().RenderWithEvidence(request, options, "physical", capture, false);
+
+        Assert.Null(emission.StructuredShape);
+    }
+
+    [Fact]
     public void Renderer_with_conflicting_physical_mappings_withdraws_the_shape()
     {
         var unit = CreateSimpleUnit("mongo-evidence-conflict");

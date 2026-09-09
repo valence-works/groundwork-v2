@@ -2334,6 +2334,8 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         StorageInspectionSessionExtensions.EnsureProviderSequence(Unit);
         ThrowIfDisposed();
         var filter = new BsonDocument("_id", HighWaterId());
+        // The inspection is a provider read like any other: a consumer observing round trips must see it (#439).
+        commandObserver?.Observe(new ProviderCommandEvent("mongodb.inspect", "MongoDB.Find(_id:high-water)", ProviderCommandKind.Read, IsProbe: false));
         var document = await mode.FirstOrDefault(transactionSession is null
             ? state.Metadata.Find(filter)
             : state.Metadata.Find(transactionSession, filter)).ConfigureAwait(false);
