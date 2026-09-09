@@ -220,6 +220,15 @@ second native node or changing parentage. Consumers checking for either kind
 of work must also consider this fused operator. It carries no numeric bound,
 spill claim or access identity; a sort purpose is optional and must be observed.
 
+Since `0.4.0-preview.25`, the SQL Server mapper admits one join shape: a
+`Nested Loops` whose inner child is a bookmark lookup (`RID Lookup` on a heap,
+`Key Lookup` on a clustered table, both a showplan `IndexScan` flagged
+`Lookup="1"`) against the statement target. The lookup is the row fetch of the
+seek that drives it, not a second source, so the join and the lookup map to
+`Materialize` nodes without a target, the fact MongoDB's `FETCH` stage reports,
+and the seek remains the forest's single access node. Any other join still
+withholds the whole forest.
+
 Since `0.4.0-preview.22`, a sort, top-N sort or limit node may carry optional
 `ProviderPlanNodeDetails`: observed native sort keys, an observed native bound
 and an observed spill fact. Each detail is tri-state. A null detail set, a null

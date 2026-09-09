@@ -191,6 +191,71 @@ public sealed class SqlServerNativePlanDetailTests
         Assert.Equal(OrderDirection.Descending, keys[1].Direction);
     }
 
+    /// <summary>#448: the seek-plus-lookup shape of a non-covering index seek on a heap.</summary>
+    [Fact]
+    public void Nested_loops_over_a_seek_and_its_rid_lookup_materializes_the_seek_without_a_second_source()
+    {
+        var forest = Map(Plan(
+            "<StmtSimple StatementType=\"SELECT\"><QueryPlan>" +
+            "<RelOp NodeId=\"0\" PhysicalOp=\"Top\"><Top RowCount=\"0\"><TopExpression><ScalarOperator><Identifier><ColumnReference Column=\"@p1\" /></Identifier></ScalarOperator></TopExpression>" +
+            "<RelOp NodeId=\"2\" PhysicalOp=\"Nested Loops\" LogicalOp=\"Inner Join\"><NestedLoops Optimized=\"0\" WithOrderedPrefetch=\"1\">" +
+            "<RelOp NodeId=\"4\" PhysicalOp=\"Filter\"><Filter StartupExpression=\"0\">" +
+            "<RelOp NodeId=\"5\" PhysicalOp=\"Index Seek\"><IndexScan Ordered=\"1\"><Object Database=\"[records_db]\" Schema=\"[dbo]\" Table=\"[records]\" Index=\"[PK_records]\" IndexKind=\"NonClustered\" /></IndexScan></RelOp>" +
+            "</Filter></RelOp>" +
+            Lookup(7, "RID Lookup", "<Object Database=\"[records_db]\" Schema=\"[dbo]\" Table=\"[records]\" TableReferenceId=\"-1\" IndexKind=\"Heap\" />") +
+            "</NestedLoops></RelOp></Top></RelOp></QueryPlan></StmtSimple>"));
+
+        var nodes = Assert.IsType<ProviderPlanForest>(forest).Nodes;
+        Assert.Collection(nodes,
+            node => Assert.Equal(ProviderPlanOperator.Limit, node.Operation),
+            node => { Assert.Equal(ProviderPlanOperator.Materialize, node.Operation); Assert.Equal(0, node.ParentId); Assert.Null(node.TargetId); },
+            node => { Assert.Equal(ProviderPlanOperator.Filter, node.Operation); Assert.Equal(2, node.ParentId); },
+            node => { Assert.Equal(ProviderPlanOperator.IndexSearch, node.Operation); Assert.Equal(4, node.ParentId); },
+            node => { Assert.Equal(ProviderPlanOperator.Materialize, node.Operation); Assert.Equal(7, node.Id); Assert.Equal(2, node.ParentId); Assert.Null(node.TargetId); });
+        Assert.Single(nodes, node => node.TargetId is not null);
+    }
+
+    [Fact]
+    public void Key_lookup_on_the_clustered_index_is_the_same_materialization()
+    {
+        var forest = Map(Plan(
+            "<StmtSimple StatementType=\"SELECT\"><QueryPlan>" +
+            "<RelOp NodeId=\"0\" PhysicalOp=\"Nested Loops\"><NestedLoops>" +
+            "<RelOp NodeId=\"1\" PhysicalOp=\"Index Seek\"><IndexScan><Object Database=\"[records_db]\" Schema=\"[dbo]\" Table=\"[records]\" Index=\"[PK_records]\" /></IndexScan></RelOp>" +
+            Lookup(2, "Key Lookup", "<Object Database=\"[records_db]\" Schema=\"[dbo]\" Table=\"[records]\" Index=\"[PK_records]\" IndexKind=\"Clustered\" />") +
+            "</NestedLoops></RelOp></QueryPlan></StmtSimple>"));
+
+        var nodes = Assert.IsType<ProviderPlanForest>(forest).Nodes;
+        Assert.Equal([ProviderPlanOperator.Materialize, ProviderPlanOperator.IndexSearch, ProviderPlanOperator.Materialize], nodes.Select(node => node.Operation));
+        Assert.Single(nodes, node => node.TargetId is not null);
+    }
+
+    [Theory]
+    [InlineData("<RelOp NodeId=\"2\" PhysicalOp=\"Index Seek\"><IndexScan><Object Database=\"[records_db]\" Schema=\"[dbo]\" Table=\"[records]\" Index=\"[PK_records]\" /></IndexScan></RelOp>")]
+    [InlineData("<RelOp NodeId=\"2\" PhysicalOp=\"RID Lookup\"><IndexScan Lookup=\"1\"><Object Database=\"[records_db]\" Schema=\"[dbo]\" Table=\"[other]\" IndexKind=\"Heap\" /></IndexScan></RelOp>")]
+    [InlineData("<RelOp NodeId=\"2\" PhysicalOp=\"RID Lookup\"><IndexScan><Object Database=\"[records_db]\" Schema=\"[dbo]\" Table=\"[records]\" IndexKind=\"Heap\" /></IndexScan></RelOp>")]
+    public void A_join_whose_inner_side_is_not_a_lookup_of_the_target_withholds_the_forest(string inner)
+    {
+        var forest = Map(Plan(
+            "<StmtSimple StatementType=\"SELECT\"><QueryPlan>" +
+            "<RelOp NodeId=\"0\" PhysicalOp=\"Nested Loops\"><NestedLoops>" +
+            "<RelOp NodeId=\"1\" PhysicalOp=\"Index Seek\"><IndexScan><Object Database=\"[records_db]\" Schema=\"[dbo]\" Table=\"[records]\" Index=\"[PK_records]\" /></IndexScan></RelOp>" +
+            inner + "</NestedLoops></RelOp></QueryPlan></StmtSimple>"));
+
+        Assert.Null(forest);
+    }
+
+    [Fact]
+    public void A_lookup_outside_its_join_withholds_the_forest()
+    {
+        Assert.Null(Map(Plan("<StmtSimple StatementType=\"SELECT\"><QueryPlan>" +
+            Lookup(0, "RID Lookup", "<Object Database=\"[records_db]\" Schema=\"[dbo]\" Table=\"[records]\" IndexKind=\"Heap\" />") +
+            "</QueryPlan></StmtSimple>")));
+    }
+
+    private static string Lookup(int nodeId, string physicalOp, string obj) =>
+        $"<RelOp NodeId=\"{nodeId}\" PhysicalOp=\"{physicalOp}\"><IndexScan Lookup=\"1\" Ordered=\"1\">{obj}</IndexScan></RelOp>";
+
     private static string Datalength(string expression, string column) =>
         $"<DefinedValue><ColumnReference Column=\"{expression}\" /><ScalarOperator><Intrinsic FunctionName=\"datalength\"><ScalarOperator><Identifier><ColumnReference Schema=\"[dbo]\" Table=\"[records]\" Column=\"{column}\" /></Identifier></ScalarOperator></Intrinsic></ScalarOperator></DefinedValue>";
 
