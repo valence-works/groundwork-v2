@@ -3,6 +3,7 @@ using Groundwork.Kernel;
 using Groundwork.LiveDatabases;
 using Groundwork.MongoDb;
 using Groundwork.Query.Model;
+using Groundwork.Store;
 using MongoDB.Bson;
 using MongoDB.Driver;
 using Xunit;
@@ -138,6 +139,37 @@ public sealed class MongoExecutionEvidenceLiveTests
         Assert.DoesNotContain(globalId, serialized, StringComparison.Ordinal);
         Assert.DoesNotContain(globalPayload, serialized, StringComparison.Ordinal);
         Assert.DoesNotContain(database.ConnectionString, serialized, StringComparison.Ordinal);
+    }
+
+    [SkippableFact]
+    public void Live_high_water_inspection_reports_one_read_command()
+    {
+        using var database = OwnedMongoDatabase.Create();
+        using var connection = new MongoDbProviderFactory().Create(database.ConnectionString);
+        Skip.If(connection.ProviderSequenceFit is ProviderFit.Unsupported, "Durable high-water inspection needs a provider-sequence-capable deployment.");
+        var name = "live_inspect_" + Guid.NewGuid().ToString("N")[..20];
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new() { Name = "sequence", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence },
+                new() { Name = "payload", Type = PortableType.String, IsNullable = false, MaxLength = 128 }
+            ],
+            Key = new KeyDefinition { Columns = ["sequence"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var observer = new RecordingExecutionObserver(ProviderExecutionEvidenceOptions.ShapeOnly);
+        var session = connection.OpenSession(unit, MongoStorageAccess.Global, observer);
+
+        var before = observer.Commands.Count;
+        _ = Assert.IsAssignableFrom<IStorageInspectionSession>(session).Inspect();
+
+        var command = Assert.Single(observer.Commands.Skip(before));
+        Assert.Equal("mongodb.inspect", command.Operation);
+        Assert.Equal(ProviderCommandKind.Read, command.Kind);
+        Assert.False(command.IsProbe);
     }
 
     [SkippableFact]
