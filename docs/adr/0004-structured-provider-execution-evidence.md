@@ -228,8 +228,15 @@ observed"; it never means no sort, no bound or no spill. Sort keys are mapped to
 logical columns through the rendered query's identity-preserving search-key
 mappings; a key that names a foreign relation, an unresolvable expression, or a
 provider-owned column without a recorded mapping leaves the whole key set
-unobserved rather than partially right. SQL Server's `datalength(column)` key is
-the one computed form mapped, as the `OrdinalStringKey` transform on its column.
+unobserved rather than partially right. SQL Server renders an ordinal string key
+as the binary-collated column followed by `datalength(column)`; the mapper folds
+that adjacent pair into one `OrdinalStringKey` term with an `Ordinal` comparison,
+and reports the collated column alone (the optimizer drops the trailing length key
+once a unique column precedes it) as a plain term whose comparison is still
+`Ordinal`, because every column the rendered query maps ordinally is declared
+with the binary collation. A `datalength(column)` key without its collated column
+ahead of it stays the bare `OrdinalStringKey` transform. A key on the separate
+physical column of an ordinal identity mapping carries `PhysicalSearchKey`.
 A bound is `Explicit` only where the provider states it as a literal (a SQL Server
 `TopSort` row count or `Top` constant, a MongoDB `$limit`/`limitAmount`);
 PostgreSQL's estimated explain exposes none, and `Plan Rows` is never used.
