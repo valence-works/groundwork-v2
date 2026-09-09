@@ -24,7 +24,8 @@ internal static class SqlServerNativePlanMapper
         Func<string, ProviderOpaqueIdentity> indexIdentity,
         IReadOnlyDictionary<string, string> logicalIndexesByPhysicalName,
         IReadOnlySet<string> catalogIndexes,
-        IReadOnlyDictionary<string, string>? logicalColumnsByPhysical = null)
+        IReadOnlyDictionary<string, string>? logicalColumnsByPhysical = null,
+        string? primaryKeyIndex = null)
     {
         ArgumentNullException.ThrowIfNull(rawPlan);
         ArgumentException.ThrowIfNullOrWhiteSpace(physicalDatabase);
@@ -87,7 +88,8 @@ internal static class SqlServerNativePlanMapper
                     indexIdentity,
                     logicalIndexesByPhysicalName,
                     catalogIndexes,
-                    logicalColumnsByPhysical))
+                    logicalColumnsByPhysical,
+                    primaryKeyIndex))
                 return null;
 
             // This first SQL Server slice is intentionally single-source. A complete forest must
@@ -121,7 +123,8 @@ internal static class SqlServerNativePlanMapper
         Func<string, ProviderOpaqueIdentity> indexIdentity,
         IReadOnlyDictionary<string, string> logicalIndexesByPhysicalName,
         IReadOnlySet<string> catalogIndexes,
-        IReadOnlyDictionary<string, string>? logicalColumnsByPhysical)
+        IReadOnlyDictionary<string, string>? logicalColumnsByPhysical,
+        string? primaryKeyIndex)
     {
         if (!TryReadNodeId(source, out var id) || !ids.Add(id))
             return false;
@@ -149,10 +152,12 @@ internal static class SqlServerNativePlanMapper
                             out var indexId,
                             out var logicalIndex))
                         return false;
-                    var operation = physicalOperation is "Index Seek" or "Clustered Index Seek"
-                        ? ProviderPlanOperator.IndexSearch
-                        : ProviderPlanOperator.IndexScan;
-                    node = new ProviderPlanNode(id, parentId, operation, targetId, indexId, logicalIndex);
+                    var seek = physicalOperation is "Index Seek" or "Clustered Index Seek";
+                    // A seek on the table's primary-key index is the key search itself, the fact SQLite's
+                    // rowid lookup and MongoDB's _id search report; the key is not an index identity.
+                    node = seek && primaryKeyIndex is not null && IsIndexNamed(source, primaryKeyIndex)
+                        ? new ProviderPlanNode(id, parentId, ProviderPlanOperator.PrimaryKeySearch, targetId: targetId)
+                        : new ProviderPlanNode(id, parentId, seek ? ProviderPlanOperator.IndexSearch : ProviderPlanOperator.IndexScan, targetId, indexId, logicalIndex);
                     break;
                 }
 
@@ -193,7 +198,7 @@ internal static class SqlServerNativePlanMapper
                     node = new ProviderPlanNode(id, parentId, ProviderPlanOperator.Materialize);
                     nodes.Add(node);
                     if (!TryMapNode(children[0], id, nodes, ids, physicalDatabase, physicalSchema, physicalTarget, targetId,
-                            indexIdentity, logicalIndexesByPhysicalName, catalogIndexes, logicalColumnsByPhysical) ||
+                            indexIdentity, logicalIndexesByPhysicalName, catalogIndexes, logicalColumnsByPhysical, primaryKeyIndex) ||
                         !TryReadNodeId(children[1], out var lookupId) || !ids.Add(lookupId))
                         return false;
                     nodes.Add(new ProviderPlanNode(lookupId, id, ProviderPlanOperator.Materialize));
@@ -243,7 +248,8 @@ internal static class SqlServerNativePlanMapper
                     indexIdentity,
                     logicalIndexesByPhysicalName,
                     catalogIndexes,
-                    logicalColumnsByPhysical))
+                    logicalColumnsByPhysical,
+                    primaryKeyIndex))
                 return false;
         }
 
@@ -295,6 +301,14 @@ internal static class SqlServerNativePlanMapper
 
         indexId = indexIdentity(physicalIndex);
         return indexId is not null;
+    }
+
+    private static bool IsIndexNamed(XElement source, string physicalIndex)
+    {
+        var objects = ReadAccessObjects(source);
+        return objects.Length == 1 &&
+               TryReadQuotedIdentifier(objects[0].Attribute("Index")?.Value, out var index) &&
+               string.Equals(index, physicalIndex, StringComparison.Ordinal);
     }
 
     private static bool TryReadTarget(
