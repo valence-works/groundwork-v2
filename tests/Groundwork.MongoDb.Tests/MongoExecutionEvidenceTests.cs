@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using Groundwork.Kernel;
 using Groundwork.MongoDb;
 using Groundwork.Query.Model;
@@ -268,6 +269,28 @@ public sealed class MongoExecutionEvidenceTests
         var emission = new MongoQueryRenderer().RenderWithEvidence(request, options, "physical", capture, false);
 
         Assert.Null(emission.StructuredShape);
+    }
+
+    [Fact]
+    public void Renderer_orders_a_declared_non_null_column_without_a_null_rank_when_no_index_is_selected()
+    {
+        // The unit declaration is a non-null witness like the selected index (#441).
+        var unit = CreateSimpleUnit("mongo-evidence-declared-non-null");
+        var id = new ColumnRef(new TableId(unit.Name), "id", QueryType.String, isNullable: false);
+        var request = new QueryRequest(
+            new TableId(unit.Name),
+            new Predicate.Equal(id, QueryConstant.Of(id, "value-sentinel")),
+            [new OrderTerm(id, OrderDirection.Ascending, NullOrder.First)],
+            Projection.All,
+            Paging.OffsetLimit(0, 2));
+        var options = QueryRenderOptions.Default with { NonNullColumns = ImmutableHashSet.Create(StringComparer.Ordinal, "id") };
+        var capture = new MongoExecutionEvidenceCapture(new RecordingEvidenceObserver(), unit, MongoStorageAccess.Global, TestServerVersion);
+
+        var emission = new MongoQueryRenderer().RenderWithEvidence(request, options, "physical", capture, false);
+
+        var order = Assert.Single(Assert.IsType<ProviderBoundedQueryEvidence>(emission.StructuredShape).Ordering);
+        Assert.DoesNotContain(ProviderOrderingTransform.NullRank, order.Transforms);
+        Assert.Null(order.NullPlacement);
     }
 
     [Fact]

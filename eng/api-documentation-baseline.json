@@ -90,7 +90,7 @@
     },
     "Groundwork.Query.Model|lib/netstandard2.0/Groundwork.Query.Model.dll": {
       "maximumUndocumentedMembers": 740,
-      "publicApiMembers": 797
+      "publicApiMembers": 798
     },
     "Groundwork.Query.Planning|lib/netstandard2.0/Groundwork.Query.Planning.dll": {
       "maximumUndocumentedMembers": 132,
@@ -182,8 +182,8 @@
     }
   },
   "publicApiSnapshots": {
-    "net10.0": "38fb28d719357738e7b888e6aedc1e7687286b6fed589b2a9682e6bf3c1c31e3",
-    "net8.0": "914b82f410bb89cc12a230415db834f64c89862e2d369823e99a3d2f8aaf487e"
+    "net10.0": "950bafd8bdb301117bd7c87c9fd0bdc4de6a6916f26b0986b5227b1019006704",
+    "net8.0": "e6e7a039a01f533cf57d54f4282213cae20ef9c3f7deb2936c2c0906c11aac26"
   },
   "schemaVersion": 1
 }

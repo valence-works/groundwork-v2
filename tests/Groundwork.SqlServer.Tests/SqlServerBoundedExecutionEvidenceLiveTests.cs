@@ -95,13 +95,12 @@ public sealed class SqlServerBoundedExecutionEvidenceLiveTests(SqlServerFixture 
             {
                 Assert.Equal("id", id.LogicalColumn);
                 Assert.Equal(OrderDirection.Ascending, id.Direction);
-                // The request uses provider-default options without a selected index proof. The
-                // shared renderer therefore emits its conservative null-rank guard even though
-                // the storage declaration and ColumnRef mark id as non-nullable; evidence records
-                // the emitted order expression, not the declaration's nullability.
-                Assert.Equal(NullOrder.First, id.NullPlacement);
+                // The request selects no index, but the unit-derived options declare id required, and
+                // the renderer accepts that declaration as the non-null witness (#441): no null rank is
+                // emitted and evidence records the plain ordinal ordering it actually emitted.
+                Assert.Null(id.NullPlacement);
                 Assert.Equal(
-                    new[] { ProviderOrderingTransform.NullRank, ProviderOrderingTransform.OrdinalStringKey },
+                    new[] { ProviderOrderingTransform.OrdinalStringKey },
                     id.Transforms.ToArray());
                 Assert.Equal(ProviderPredicateComparison.Ordinal, id.Comparison);
             });

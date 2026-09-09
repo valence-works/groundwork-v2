@@ -1353,11 +1353,15 @@ public abstract partial class RelationalQueryRenderer
 
     private OrderTerm ResolveOrderTerm(OrderTerm term, QueryRenderOptions options)
     {
+        // The unit declaration (applied as NOT NULL) and the selected index are both non-null witnesses
+        // for an ordering column; a query that nominates no index keeps a plain ordering (#441).
         var selectedIndex = options.FindSelectedIndex();
-        var provesNonNull = selectedIndex is not null &&
-            selectedIndex.Columns.Any(column => string.Equals(column, term.Column.Name, StringComparison.Ordinal)) &&
-            !selectedIndex.NullableColumns.Contains(term.Column.Name) &&
-            (joinedColumnScope.Value is not { } scope || term.Column.Table == scope.Join.SourceTable);
+        var sourceColumn = joinedColumnScope.Value is not { } scope || term.Column.Table == scope.Join.SourceTable;
+        var provesNonNull = sourceColumn &&
+            (options.NonNullColumns.Contains(term.Column.Name) ||
+             (selectedIndex is not null &&
+              selectedIndex.Columns.Any(column => string.Equals(column, term.Column.Name, StringComparison.Ordinal)) &&
+              !selectedIndex.NullableColumns.Contains(term.Column.Name)));
         var column = term.Column;
         var carrier = new ColumnRef(
             column.Table,
