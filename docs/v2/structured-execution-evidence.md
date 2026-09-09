@@ -70,7 +70,7 @@ index coverage; it carries no storage target identity.
 
 ### Native node details
 
-From `0.4.0-preview.24`, `ProviderPlanNode.Details` may carry what the provider actually
+From `0.4.0-preview.25`, `ProviderPlanNode.Details` may carry what the provider actually
 exposed on a sort, top-N sort or limit node: `NativeSortKeys` (logical columns, direction,
 null placement, supported transforms), `NativeLimit` (`Unknown`, `Absent` or `Explicit`
 with a literal value) and `Spill` (observed spilled or not, with provider-reported metrics
@@ -88,7 +88,7 @@ explain form and `usedDisk` from `executionStats`; SQLite yields sort purpose on
 A bounded query ordered by a persisted ordinal identity key (a
 `QuerySearchKeyColumn` with the `Ordinal` policy and `PreservesOrdinalIdentity`)
 reports the source column with the `PhysicalSearchKey` transform and the
-`Ordinal` comparison on every provider, MongoDB included (0.4.0-preview.24 and
+`Ordinal` comparison on every provider, MongoDB included (0.4.0-preview.25 and
 later). A unit may declare folded or element search keys for other columns
 without withholding the shapes of queries that do not emit them; a query that
 does emit such a provider-owned physical column fails closed. MongoDB plan sort
@@ -102,7 +102,7 @@ explain output leaves the sort unobserved.
 `ProviderExecutionEvidence.Provider` names the provider and the connected
 server's version on every provider: the relational providers stamp
 `DbConnection.ServerVersion`, and MongoDB stamps the server version resolved once
-from `buildInfo` (0.4.0-preview.24 and later;
+from `buildInfo` (0.4.0-preview.25 and later;
 earlier previews stamped the fixed schema identity `1.0`). A consumer that
 records the server version it probed can require the two to match before
 admitting a capture.
