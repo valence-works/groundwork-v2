@@ -113,6 +113,17 @@ public sealed class RelationalSessionPolicyTests
         // An ordinary selected route still keeps the logical column its index covers.
         var ordinary = SearchKeyQueryMappings.For(SearchKeyProjection.Expand(declared), selectedIndex: "by_name_order")["name"];
         Assert.Equal("name", ordinary.PhysicalColumn);
+
+        // Options built from the logical declaration still learn that the persisted key is non-null.
+        var name = new ColumnRef(new TableId(declared.Name), "name", QueryType.String, false, 32);
+        var prepared = RelationalSessionPolicy.PrepareQuery(
+            SearchKeyProjection.Expand(declared),
+            StorageAccess.Global,
+            new QueryRequest(new TableId(declared.Name), Predicate.AlwaysTrue.Instance, [new OrderTerm(name, OrderDirection.Ascending, NullOrder.First)], Projection.ColumnsOnly(name), Paging.None),
+            declared.CreateQueryRenderOptions(selectedIndex: null),
+            new Dictionary<string, string>());
+        Assert.Contains("__groundwork_ordinal_name", prepared.RenderOptions.NonNullColumns);
+        Assert.Equal("__groundwork_ordinal_name", prepared.RenderOptions.SearchKeyColumns["name"].PhysicalColumn);
     }
 
     [Fact]

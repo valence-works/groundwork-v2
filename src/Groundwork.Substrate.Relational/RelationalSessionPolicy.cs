@@ -154,6 +154,10 @@ internal static class RelationalSessionPolicy
                 .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
             SearchKeyColumns = SearchKeyQueryMappings.For(unit, selectedIndex),
             ElementSearchKeyColumns = SearchKeyQueryMappings.ElementFor(unit),
+            // The session's unit carries the expanded search-key columns, so a persisted ordinal
+            // identity key is a declared non-null ordering witness even when the caller built its
+            // options from the logical declaration (#443).
+            NonNullColumns = suppliedOptions.NonNullColumns.Union(unit.Columns.Where(column => !column.IsNullable).Select(column => column.Name)),
             LatestPartitionColumns = crossScope ? [scopeToken] : suppliedOptions.LatestPartitionColumns
         };
     }

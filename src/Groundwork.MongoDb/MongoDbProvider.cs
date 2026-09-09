@@ -1070,7 +1070,9 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                     .Where(pair => !suppliedOptions.PhysicalIndexNames.ContainsKey(pair.Key)))
                 .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
             SearchKeyColumns = SearchKeyQueryMappings.For(Unit, suppliedOptions.FindSelectedIndex()?.Name),
-            ElementSearchKeyColumns = SearchKeyQueryMappings.ElementFor(Unit)
+            ElementSearchKeyColumns = SearchKeyQueryMappings.ElementFor(Unit),
+            // The expanded unit's persisted ordinal identity keys are declared non-null witnesses (#443).
+            NonNullColumns = suppliedOptions.NonNullColumns.Union(Unit.Columns.Where(column => !column.IsNullable).Select(column => column.Name))
         };
         var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);
         var reduction = executionSource.Result as ResultShape.Reduction;
