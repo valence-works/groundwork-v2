@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using Groundwork.Kernel;
 using Groundwork.PostgreSql;
 using Groundwork.Query.Model;
@@ -183,6 +184,27 @@ public sealed class PostgreSqlQueryExecutionEvidenceTests
 
         Assert.Null(renderer.RenderForExecution(distinct, QueryRenderOptions.Default, hasLookahead: true).Shape);
         Assert.Null(renderer.RenderForExecution(continuation, QueryRenderOptions.Default, hasLookahead: true).Shape);
+    }
+
+    [Fact]
+    public void Declared_non_null_columns_order_without_a_null_rank_when_no_index_is_selected()
+    {
+        // The unit declaration is a non-null witness like the selected index (#441).
+        var (table, id, payload) = Columns(nullablePayload: false);
+        var request = new QueryRequest(
+            table,
+            new Predicate.Equal(payload, QueryConstant.Of(payload, "secret")),
+            [new OrderTerm(id, nullOrder: NullOrder.First)],
+            Projection.ColumnsOnly(id, payload),
+            Paging.Keyset(2));
+        var declared = new QueryRenderOptions { NonNullColumns = ImmutableHashSet.Create(StringComparer.Ordinal, id.Name) };
+
+        var withDeclaration = new PostgreSqlQueryRenderer().RenderForExecution(request, declared, hasLookahead: true);
+        var withoutDeclaration = new PostgreSqlQueryRenderer().RenderForExecution(request, QueryRenderOptions.Default, hasLookahead: true);
+
+        Assert.DoesNotContain(" IS NULL THEN ", withDeclaration.Command.CommandText, StringComparison.Ordinal);
+        Assert.DoesNotContain(ProviderOrderingTransform.NullRank, Assert.Single(Assert.IsType<ProviderBoundedQueryEvidence>(withDeclaration.Shape).Ordering).Transforms);
+        Assert.Contains(" IS NULL THEN ", withoutDeclaration.Command.CommandText, StringComparison.Ordinal);
     }
 
     [Fact]

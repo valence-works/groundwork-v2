@@ -868,10 +868,13 @@ public sealed class MongoQueryRenderer
         QueryRenderOptions options,
         bool joinedFields)
     {
+        // The unit declaration and the selected index are both non-null witnesses (#441).
         var selectedIndex = options.FindSelectedIndex();
-        return !joinedFields && selectedIndex is not null &&
-            selectedIndex.Columns.Contains(column.Name, StringComparer.Ordinal) &&
-            !selectedIndex.NullableColumns.Contains(column.Name);
+        return !joinedFields &&
+            (options.NonNullColumns.Contains(column.Name) ||
+             (selectedIndex is not null &&
+              selectedIndex.Columns.Contains(column.Name, StringComparer.Ordinal) &&
+              !selectedIndex.NullableColumns.Contains(column.Name)));
     }
 
     private BsonDocument RenderContinuation(

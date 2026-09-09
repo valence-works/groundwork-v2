@@ -239,10 +239,20 @@ public sealed record QueryRenderOptions
         SearchKeyColumns = ImmutableDictionary<string, QuerySearchKeyColumn>.Empty.WithComparers(StringComparer.Ordinal);
         ElementSearchKeyColumns = ImmutableDictionary<string, QueryElementSearchKeyColumn>.Empty.WithComparers(StringComparer.Ordinal);
         LatestPartitionColumns = ImmutableArray<ColumnRef>.Empty;
+        NonNullColumns = ImmutableHashSet<string>.Empty.WithComparer(StringComparer.Ordinal);
     }
 
     /// <summary>Provider defaults are used unless a declaration explicitly requests pinning.</summary>
     public static QueryRenderOptions Default { get; } = new();
+
+    /// <summary>
+    /// Columns the storage unit declares as required. A renderer treats such a column as non-null when
+    /// it orders by it, exactly as it does for a column the selected index proves non-null, so a query
+    /// that nominates no index still emits a plain ordering for a required column (#441).
+    /// <see cref="StorageUnit"/>-derived options fill this from the unit declaration; the schema applies
+    /// the same declaration as NOT NULL.
+    /// </summary>
+    public ImmutableHashSet<string> NonNullColumns { get; init; }
 
     public ImmutableArray<QueryIndexDeclaration> Indexes { get; init; }
     public string? SelectedIndex { get; }

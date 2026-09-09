@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
 
@@ -37,7 +38,13 @@ public static class StorageUnitQueryRenderOptions
             }),
             QueryIndexPinning.ProviderDefault,
             includesNulls: index.MissingValues == MissingValueBehavior.Included));
-        var options = new QueryRenderOptions(indexes, selectedIndex);
+        var options = new QueryRenderOptions(indexes, selectedIndex) with
+        {
+            NonNullColumns = unit.Columns
+                .Where(column => !column.IsNullable)
+                .Select(column => column.Name)
+                .ToImmutableHashSet(StringComparer.Ordinal)
+        };
         _ = options.FindSelectedIndex();
         return options;
     }
