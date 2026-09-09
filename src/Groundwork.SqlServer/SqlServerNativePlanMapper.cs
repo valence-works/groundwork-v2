@@ -340,6 +340,14 @@ internal static class SqlServerNativePlanMapper
         return new ProviderPlanNodeDetails(keys, limit, spill);
     }
 
+    /// <summary>
+    /// SQL Server renders an ordinal string key as the binary-collated column followed by
+    /// <c>datalength(column)</c>, so one logical ordering term arrives as two native keys; the pair folds
+    /// into one <see cref="ProviderOrderingTransform.OrdinalStringKey"/> term. The optimizer drops the
+    /// trailing length key once a unique column precedes it, which leaves the collated column alone; that
+    /// key is still an ordinal comparison because every column the rendered query maps ordinally is
+    /// declared with the binary collation.
+    /// </summary>
     private static IReadOnlyList<ProviderOrderTerm>? ReadOrderBy(
         XElement payload,
         XElement relOp,
@@ -349,7 +357,7 @@ internal static class SqlServerNativePlanMapper
         var orderBy = payload.Element(ShowPlanNamespace + "OrderBy");
         if (orderBy is null)
             return null;
-        var terms = new List<ProviderOrderTerm>();
+        var keys = new List<OrderKey>();
         foreach (var column in orderBy.Elements(ShowPlanNamespace + "OrderByColumn"))
         {
             var ascending = (string?)column.Attribute("Ascending");
@@ -362,23 +370,78 @@ internal static class SqlServerNativePlanMapper
             var reference = column.Element(ShowPlanNamespace + "ColumnReference");
             if (direction is null || reference is null)
                 return null;
-            if (!TryResolveOrderColumn(reference, relOp, physicalTarget, logicalColumnsByPhysical, out var logicalColumn, out var transforms))
+            if (!TryResolveOrderColumn(reference, relOp, physicalTarget, logicalColumnsByPhysical, direction.Value, out var key))
                 return null;
-            terms.Add(new ProviderOrderTerm(logicalColumn, direction.Value, null, transforms));
+            keys.Add(key);
         }
-        return terms.Count == 0 ? null : terms;
+        if (keys.Count == 0)
+            return null;
+        var terms = new List<ProviderOrderTerm>(keys.Count);
+        for (var index = 0; index < keys.Count; index++)
+        {
+            var key = keys[index];
+            if (key.Form == OrderKeyForm.NullRank)
+            {
+                terms.Add(new ProviderOrderTerm(key.LogicalColumn, key.Direction, null, [ProviderOrderingTransform.NullRank]));
+                continue;
+            }
+            if (key.Form == OrderKeyForm.Length)
+            {
+                terms.Add(new ProviderOrderTerm(key.LogicalColumn, key.Direction, null, [ProviderOrderingTransform.OrdinalStringKey]));
+                continue;
+            }
+            var transforms = new List<ProviderOrderingTransform>();
+            if (key.PhysicalSearchKey)
+                transforms.Add(ProviderOrderingTransform.PhysicalSearchKey);
+            var comparison = ProviderPredicateComparison.Unknown;
+            if (key.OrdinalMapping)
+            {
+                comparison = ProviderPredicateComparison.Ordinal;
+                if (index + 1 < keys.Count &&
+                    keys[index + 1] is { Form: OrderKeyForm.Length } length &&
+                    string.Equals(length.LogicalColumn, key.LogicalColumn, StringComparison.Ordinal) &&
+                    length.Direction == key.Direction)
+                {
+                    transforms.Add(ProviderOrderingTransform.OrdinalStringKey);
+                    index++;
+                }
+            }
+            terms.Add(new ProviderOrderTerm(key.LogicalColumn, key.Direction, null, transforms, comparison));
+        }
+        return terms;
     }
+
+    private enum OrderKeyForm
+    {
+        /// <summary>The target column itself.</summary>
+        Column,
+        /// <summary><c>datalength(column)</c>, the trailing half of the ordinal string key.</summary>
+        Length,
+        /// <summary><c>CASE WHEN column IS NULL THEN 1 ELSE 0 END</c>.</summary>
+        NullRank
+    }
+
+    /// <summary>
+    /// One native order key resolved to its logical column. <paramref name="OrdinalMapping"/> is true when
+    /// the rendered query maps the column through an ordinal search-key mapping, the only kind the plan
+    /// receives; <paramref name="PhysicalSearchKey"/> when that mapping orders a separate physical column.
+    /// </summary>
+    private readonly record struct OrderKey(
+        string LogicalColumn,
+        OrderDirection Direction,
+        OrderKeyForm Form,
+        bool OrdinalMapping,
+        bool PhysicalSearchKey);
 
     private static bool TryResolveOrderColumn(
         XElement reference,
         XElement relOp,
         string physicalTarget,
         IReadOnlyDictionary<string, string>? logicalColumnsByPhysical,
-        out string logicalColumn,
-        out IReadOnlyList<ProviderOrderingTransform> transforms)
+        OrderDirection direction,
+        out OrderKey key)
     {
-        logicalColumn = string.Empty;
-        transforms = [];
+        key = default;
         var columnName = (string?)reference.Attribute("Column");
         if (string.IsNullOrWhiteSpace(columnName))
             return false;
@@ -391,7 +454,8 @@ internal static class SqlServerNativePlanMapper
             var logical = LogicalColumn(columnName, logicalColumnsByPhysical);
             if (logical is null)
                 return false;
-            logicalColumn = logical;
+            var mapped = logicalColumnsByPhysical?.ContainsKey(columnName) == true;
+            key = new OrderKey(logical, direction, OrderKeyForm.Column, mapped, mapped && !string.Equals(logical, columnName, StringComparison.Ordinal));
             return true;
         }
         // A bare column is a computed value defined elsewhere in the statement. Two renderer forms are
@@ -407,8 +471,7 @@ internal static class SqlServerNativePlanMapper
             string.Equals((string?)intrinsic.Attribute("FunctionName"), "datalength", StringComparison.OrdinalIgnoreCase) &&
             TryResolveTargetColumn(intrinsic.Element(ShowPlanNamespace + "ScalarOperator"), physicalTarget, logicalColumnsByPhysical, out var lengthColumn))
         {
-            logicalColumn = lengthColumn;
-            transforms = [ProviderOrderingTransform.OrdinalStringKey];
+            key = new OrderKey(lengthColumn, direction, OrderKeyForm.Length, false, false);
             return true;
         }
         var conditional = scalar?.Element(ShowPlanNamespace + "IF");
@@ -426,8 +489,7 @@ internal static class SqlServerNativePlanMapper
             !IsConstant(conditional.Element(ShowPlanNamespace + "Else")?.Element(ShowPlanNamespace + "ScalarOperator"), "0") ||
             !TryResolveTargetColumn(operands[0], physicalTarget, logicalColumnsByPhysical, out var rankedColumn))
             return false;
-        logicalColumn = rankedColumn;
-        transforms = [ProviderOrderingTransform.NullRank];
+        key = new OrderKey(rankedColumn, direction, OrderKeyForm.NullRank, false, false);
         return true;
     }
 

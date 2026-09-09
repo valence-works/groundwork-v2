@@ -37,19 +37,102 @@ public sealed class SqlServerNativePlanDetailTests
             "<RelOp NodeId=\"0\" PhysicalOp=\"Sort\"><Sort><OrderBy>" +
             "<OrderByColumn Ascending=\"1\"><ColumnReference Column=\"Expr1003\" /></OrderByColumn>" +
             "<OrderByColumn Ascending=\"1\"><ColumnReference Schema=\"[dbo]\" Table=\"[records]\" Column=\"id\" /></OrderByColumn></OrderBy>" +
-            "<RelOp NodeId=\"1\" PhysicalOp=\"Compute Scalar\"><ComputeScalar><DefinedValues><DefinedValue><ColumnReference Column=\"Expr1003\" />" +
-            "<ScalarOperator><Intrinsic FunctionName=\"datalength\"><ScalarOperator><Identifier><ColumnReference Schema=\"[dbo]\" Table=\"[records]\" Column=\"id\" /></Identifier></ScalarOperator></Intrinsic></ScalarOperator>" +
-            "</DefinedValue></DefinedValues>" + Scan(2) + "</ComputeScalar></RelOp></Sort></RelOp></QueryPlan></StmtSimple>"));
+            "<RelOp NodeId=\"1\" PhysicalOp=\"Compute Scalar\"><ComputeScalar><DefinedValues>" + Datalength("Expr1003", "id") + "</DefinedValues>" +
+            Scan(2) + "</ComputeScalar></RelOp></Sort></RelOp></QueryPlan></StmtSimple>"));
 
         var sort = Assert.Single(Assert.IsType<ProviderPlanForest>(forest).Nodes, node => node.Operation == ProviderPlanOperator.Sort);
         var keys = sort.Details!.NativeSortKeys!.Value;
         Assert.Equal(2, keys.Length);
         Assert.Equal("id", keys[0].LogicalColumn);
         Assert.Equal(ProviderOrderingTransform.OrdinalStringKey, Assert.Single(keys[0].Transforms));
+        Assert.Equal(ProviderPredicateComparison.Unknown, keys[0].Comparison);
         Assert.Equal("id", keys[1].LogicalColumn);
         Assert.Empty(keys[1].Transforms);
+        Assert.Equal(ProviderPredicateComparison.Unknown, keys[1].Comparison);
         Assert.Null(sort.Details.Spill);
         Assert.Equal(ProviderNativeBoundKind.Unknown, sort.Details.NativeLimit.Kind);
+    }
+
+    /// <summary>
+    /// The renderer's ordinal string key is the collated column and then its datalength; SQL Server
+    /// keeps that pair for a non-unique column and drops the length key behind the unique one.
+    /// </summary>
+    [Fact]
+    public void Collated_column_and_its_datalength_fold_into_one_ordinal_term_and_a_unique_tail_stays_ordinal()
+    {
+        var forest = Map(Plan(
+            "<StmtSimple StatementType=\"SELECT\"><QueryPlan>" +
+            "<RelOp NodeId=\"0\" PhysicalOp=\"Sort\"><Sort><OrderBy>" +
+            "<OrderByColumn Ascending=\"0\"><ColumnReference Schema=\"[dbo]\" Table=\"[records]\" Column=\"lastSeen\" /></OrderByColumn>" +
+            "<OrderByColumn Ascending=\"1\"><ColumnReference Schema=\"[dbo]\" Table=\"[records]\" Column=\"idOrderKey\" /></OrderByColumn>" +
+            "<OrderByColumn Ascending=\"1\"><ColumnReference Column=\"Expr1003\" /></OrderByColumn>" +
+            "<OrderByColumn Ascending=\"1\"><ColumnReference Schema=\"[dbo]\" Table=\"[records]\" Column=\"id\" /></OrderByColumn></OrderBy>" +
+            "<RelOp NodeId=\"1\" PhysicalOp=\"Compute Scalar\"><ComputeScalar><DefinedValues>" +
+            Datalength("Expr1003", "idOrderKey") + Datalength("Expr1004", "id") + "</DefinedValues>" +
+            Scan(2) + "</ComputeScalar></RelOp></Sort></RelOp></QueryPlan></StmtSimple>"),
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["idOrderKey"] = "idOrderKey", ["id"] = "id" });
+
+        var sort = Assert.Single(Assert.IsType<ProviderPlanForest>(forest).Nodes, node => node.Operation == ProviderPlanOperator.Sort);
+        Assert.Collection(sort.Details!.NativeSortKeys!.Value,
+            term =>
+            {
+                Assert.Equal("lastSeen", term.LogicalColumn);
+                Assert.Equal(OrderDirection.Descending, term.Direction);
+                Assert.Empty(term.Transforms);
+                Assert.Equal(ProviderPredicateComparison.Unknown, term.Comparison);
+            },
+            term =>
+            {
+                Assert.Equal("idOrderKey", term.LogicalColumn);
+                Assert.Equal(OrderDirection.Ascending, term.Direction);
+                Assert.Equal(ProviderOrderingTransform.OrdinalStringKey, Assert.Single(term.Transforms));
+                Assert.Equal(ProviderPredicateComparison.Ordinal, term.Comparison);
+            },
+            term =>
+            {
+                Assert.Equal("id", term.LogicalColumn);
+                Assert.Equal(OrderDirection.Ascending, term.Direction);
+                Assert.Empty(term.Transforms);
+                Assert.Equal(ProviderPredicateComparison.Ordinal, term.Comparison);
+            });
+    }
+
+    [Fact]
+    public void Datalength_in_the_other_direction_does_not_fold_into_its_column()
+    {
+        var forest = Map(Plan(
+            "<StmtSimple StatementType=\"SELECT\"><QueryPlan>" +
+            "<RelOp NodeId=\"0\" PhysicalOp=\"Sort\"><Sort><OrderBy>" +
+            "<OrderByColumn Ascending=\"1\"><ColumnReference Schema=\"[dbo]\" Table=\"[records]\" Column=\"id\" /></OrderByColumn>" +
+            "<OrderByColumn Ascending=\"0\"><ColumnReference Column=\"Expr1003\" /></OrderByColumn></OrderBy>" +
+            "<RelOp NodeId=\"1\" PhysicalOp=\"Compute Scalar\"><ComputeScalar><DefinedValues>" + Datalength("Expr1003", "id") + "</DefinedValues>" +
+            Scan(2) + "</ComputeScalar></RelOp></Sort></RelOp></QueryPlan></StmtSimple>"),
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["id"] = "id" });
+
+        var sort = Assert.Single(Assert.IsType<ProviderPlanForest>(forest).Nodes, node => node.Operation == ProviderPlanOperator.Sort);
+        var keys = sort.Details!.NativeSortKeys!.Value;
+        Assert.Equal(2, keys.Length);
+        Assert.Empty(keys[0].Transforms);
+        Assert.Equal(ProviderPredicateComparison.Ordinal, keys[0].Comparison);
+        Assert.Equal(OrderDirection.Descending, keys[1].Direction);
+        Assert.Equal(ProviderOrderingTransform.OrdinalStringKey, Assert.Single(keys[1].Transforms));
+    }
+
+    [Fact]
+    public void Ordinal_identity_search_key_column_orders_its_logical_column_through_the_physical_search_key()
+    {
+        var forest = Map(Plan(
+            "<StmtSimple StatementType=\"SELECT\"><QueryPlan>" +
+            "<RelOp NodeId=\"0\" PhysicalOp=\"Sort\"><Sort><OrderBy>" +
+            "<OrderByColumn Ascending=\"1\"><ColumnReference Schema=\"[dbo]\" Table=\"[records]\" Column=\"__groundwork_sk_id\" /></OrderByColumn></OrderBy>" +
+            Scan(1) + "</Sort></RelOp></QueryPlan></StmtSimple>"),
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["__groundwork_sk_id"] = "id" });
+
+        var sort = Assert.Single(Assert.IsType<ProviderPlanForest>(forest).Nodes, node => node.Operation == ProviderPlanOperator.Sort);
+        var term = Assert.Single(sort.Details!.NativeSortKeys!.Value);
+        Assert.Equal("id", term.LogicalColumn);
+        Assert.Equal(ProviderOrderingTransform.PhysicalSearchKey, Assert.Single(term.Transforms));
+        Assert.Equal(ProviderPredicateComparison.Ordinal, term.Comparison);
     }
 
     [Fact]
@@ -108,13 +191,16 @@ public sealed class SqlServerNativePlanDetailTests
         Assert.Equal(OrderDirection.Descending, keys[1].Direction);
     }
 
+    private static string Datalength(string expression, string column) =>
+        $"<DefinedValue><ColumnReference Column=\"{expression}\" /><ScalarOperator><Intrinsic FunctionName=\"datalength\"><ScalarOperator><Identifier><ColumnReference Schema=\"[dbo]\" Table=\"[records]\" Column=\"{column}\" /></Identifier></ScalarOperator></Intrinsic></ScalarOperator></DefinedValue>";
+
     private static string Scan(int nodeId) =>
         $"<RelOp NodeId=\"{nodeId}\" PhysicalOp=\"Clustered Index Scan\"><IndexScan><Object Database=\"[records_db]\" Schema=\"[dbo]\" Table=\"[records]\" Index=\"[PK_records]\" /></IndexScan></RelOp>";
 
     private static string Plan(string statement) =>
         $"<ShowPlanXML xmlns=\"{Namespace}\"><BatchSequence><Batch><Statements>" + statement + "</Statements></Batch></BatchSequence></ShowPlanXML>";
 
-    private static ProviderPlanForest? Map(string rawPlan) =>
+    private static ProviderPlanForest? Map(string rawPlan, IReadOnlyDictionary<string, string>? logicalColumnsByPhysical = null) =>
         SqlServerNativePlanMapper.Map(
             rawPlan,
             "records_db",
@@ -124,5 +210,5 @@ public sealed class SqlServerNativePlanDetailTests
             _ => new ProviderOpaqueIdentity(Guid.NewGuid()),
             new Dictionary<string, string>(StringComparer.Ordinal),
             new HashSet<string>(StringComparer.Ordinal) { "PK_records" },
-            new Dictionary<string, string>(StringComparer.Ordinal));
+            logicalColumnsByPhysical ?? new Dictionary<string, string>(StringComparer.Ordinal));
 }
