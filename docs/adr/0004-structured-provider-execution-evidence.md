@@ -220,7 +220,7 @@ second native node or changing parentage. Consumers checking for either kind
 of work must also consider this fused operator. It carries no numeric bound,
 spill claim or access identity; a sort purpose is optional and must be observed.
 
-Since `0.4.0-preview.23`, a sort, top-N sort or limit node may carry optional
+Since `0.4.0-preview.22`, a sort, top-N sort or limit node may carry optional
 `ProviderPlanNodeDetails`: observed native sort keys, an observed native bound
 and an observed spill fact. Each detail is tri-state. A null detail set, a null
 sort-key collection, an `Unknown` bound kind or a null spill object means "not
