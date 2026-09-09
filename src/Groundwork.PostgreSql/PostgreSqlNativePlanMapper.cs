@@ -352,11 +352,12 @@ internal static class PostgreSqlNativePlanMapper
     }
 
     private static readonly Regex NullRankPattern = new(
-        @"^\s*CASE\s+WHEN\s+\(?(?:(?<relation>""[^""]+""|[A-Za-z_][A-Za-z0-9_]*)\.)?(?<column>""[^""]+""|[A-Za-z_][A-Za-z0-9_]*)\s+IS\s+NULL\)?\s+THEN\s+1\s+ELSE\s+0\s+END(?:\s+(?<direction>ASC|DESC))?(?:\s+NULLS\s+(?<nulls>FIRST|LAST))?\s*$",
+        @"^\s*\(?CASE\s+WHEN\s+\(?(?:(?<relation>""[^""]+""|[A-Za-z_][A-Za-z0-9_]*)\.)?(?<column>""[^""]+""|[A-Za-z_][A-Za-z0-9_]*)\s+IS\s+NULL\)?\s+THEN\s+1\s+ELSE\s+0\s+END\)?(?:\s+(?<direction>ASC|DESC))?(?:\s+NULLS\s+(?<nulls>FIRST|LAST))?\s*$",
         RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture | RegexOptions.IgnoreCase);
 
     private static readonly Regex OrdinalSubplanPattern = new(
-        @"^\s*COALESCE\(\(SubPlan\s+(?<subplan>[0-9]+)\),\s*''(?:::text)?\)(?:\s+(?<direction>ASC|DESC))?(?:\s+NULLS\s+(?<nulls>FIRST|LAST))?\s*$",
+        // PostgreSQL 17 wraps a computed sort expression in parentheses ("(COALESCE((SubPlan 1), ''::text)) NULLS FIRST").
+        @"^\s*\(?COALESCE\(\(SubPlan\s+(?<subplan>[0-9]+)\),\s*''(?:::text)?\)\)?(?:\s+(?<direction>ASC|DESC))?(?:\s+NULLS\s+(?<nulls>FIRST|LAST))?\s*$",
         RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture | RegexOptions.IgnoreCase);
 
     private static readonly Regex OrdinalSubplanCallPattern = new(
