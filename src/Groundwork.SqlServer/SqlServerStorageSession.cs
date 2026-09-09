@@ -238,7 +238,8 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
                 capture.Index,
                 logicalIndexesByPhysical,
                 catalog.Indexes,
-                RelationalQueryRenderer.LogicalColumnsByPhysical(options))
+                RelationalQueryRenderer.LogicalColumnsByPhysical(options),
+                catalog.PrimaryKeyIndex)
             : null;
         // Structured choice is a consequence of a complete mapped tree, never a loose text match.
         bool? structuredChosen = forest is null || physicalIndex is null
@@ -275,7 +276,7 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
     private async ValueTask<SqlServerCatalogWitness?> ReadCatalogWitness(RelationalExecution mode)
     {
         using var command = Command(
-            "SELECT DB_NAME(), s.name, t.name, i.name " +
+            "SELECT DB_NAME(), s.name, t.name, i.name, i.is_primary_key " +
             "FROM sys.tables AS t " +
             "JOIN sys.schemas AS s ON s.schema_id = t.schema_id " +
             "LEFT JOIN sys.indexes AS i ON i.object_id = t.object_id " +
@@ -289,18 +290,23 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
         string? schema = null;
         string? target = null;
         var indexes = new HashSet<string>(StringComparer.Ordinal);
+        string? primaryKeyIndex = null;
         while (await mode.Read(reader).ConfigureAwait(false))
         {
             database ??= reader.IsDBNull(0) ? null : reader.GetString(0);
             schema ??= reader.IsDBNull(1) ? null : reader.GetString(1);
             target ??= reader.IsDBNull(2) ? null : reader.GetString(2);
-            if (!reader.IsDBNull(3))
-                indexes.Add(reader.GetString(3));
+            if (reader.IsDBNull(3))
+                continue;
+            var index = reader.GetString(3);
+            indexes.Add(index);
+            if (!reader.IsDBNull(4) && reader.GetBoolean(4))
+                primaryKeyIndex = index;
         }
 
         return database is null || schema is null || target is null
             ? null
-            : new(database, schema, target, indexes);
+            : new(database, schema, target, indexes, primaryKeyIndex);
     }
 
     private async ValueTask<IReadOnlyList<string>> ReadStatisticsPlans(
@@ -389,7 +395,8 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
         string Database,
         string Schema,
         string Target,
-        IReadOnlySet<string> Indexes);
+        IReadOnlySet<string> Indexes,
+        string? PrimaryKeyIndex);
 
     public StoredEntry? Read(StorageKey key) =>
         ReadEntry(key, RelationalExecution.Synchronous).GetAwaiter().GetResult();

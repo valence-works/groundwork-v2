@@ -253,6 +253,40 @@ public sealed class SqlServerNativePlanDetailTests
             "</QueryPlan></StmtSimple>")));
     }
 
+    /// <summary>#451: a seek on the table's primary-key index is the key search, not an index identity.</summary>
+    [Fact]
+    public void Seek_on_the_primary_key_index_is_a_primary_key_search_and_a_scan_of_it_stays_an_index_scan()
+    {
+        const string seek = "<StmtSimple StatementType=\"SELECT\"><QueryPlan><RelOp NodeId=\"0\" PhysicalOp=\"Index Seek\"><IndexScan Ordered=\"1\" ScanDirection=\"BACKWARD\"><Object Database=\"[records_db]\" Schema=\"[dbo]\" Table=\"[records]\" Index=\"[PK_records]\" IndexKind=\"NonClustered\" /></IndexScan></RelOp></QueryPlan></StmtSimple>";
+        var keyed = Assert.Single(Assert.IsType<ProviderPlanForest>(Map(Plan(seek), primaryKeyIndex: "PK_records")).Nodes);
+        Assert.Equal(ProviderPlanOperator.PrimaryKeySearch, keyed.Operation);
+        Assert.NotNull(keyed.TargetId);
+        Assert.Null(keyed.IndexId);
+        Assert.Null(keyed.LogicalIndexName);
+
+        var unnamed = Assert.Single(Assert.IsType<ProviderPlanForest>(Map(Plan(seek))).Nodes);
+        Assert.Equal(ProviderPlanOperator.IndexSearch, unnamed.Operation);
+        Assert.NotNull(unnamed.IndexId);
+
+        var scan = Assert.Single(Assert.IsType<ProviderPlanForest>(Map(Plan(seek.Replace("Index Seek", "Index Scan")), primaryKeyIndex: "PK_records")).Nodes);
+        Assert.Equal(ProviderPlanOperator.IndexScan, scan.Operation);
+    }
+
+    [Fact]
+    public void Primary_key_search_under_its_bookmark_lookup_stays_the_single_access_node()
+    {
+        var forest = Map(Plan(
+            "<StmtSimple StatementType=\"SELECT\"><QueryPlan>" +
+            "<RelOp NodeId=\"0\" PhysicalOp=\"Nested Loops\"><NestedLoops>" +
+            "<RelOp NodeId=\"1\" PhysicalOp=\"Index Seek\"><IndexScan><Object Database=\"[records_db]\" Schema=\"[dbo]\" Table=\"[records]\" Index=\"[PK_records]\" /></IndexScan></RelOp>" +
+            Lookup(2, "RID Lookup", "<Object Database=\"[records_db]\" Schema=\"[dbo]\" Table=\"[records]\" IndexKind=\"Heap\" />") +
+            "</NestedLoops></RelOp></QueryPlan></StmtSimple>"), primaryKeyIndex: "PK_records");
+
+        var nodes = Assert.IsType<ProviderPlanForest>(forest).Nodes;
+        Assert.Equal([ProviderPlanOperator.Materialize, ProviderPlanOperator.PrimaryKeySearch, ProviderPlanOperator.Materialize], nodes.Select(node => node.Operation));
+        Assert.Single(nodes, node => node.TargetId is not null);
+    }
+
     private static string Lookup(int nodeId, string physicalOp, string obj) =>
         $"<RelOp NodeId=\"{nodeId}\" PhysicalOp=\"{physicalOp}\"><IndexScan Lookup=\"1\" Ordered=\"1\">{obj}</IndexScan></RelOp>";
 
@@ -265,7 +299,7 @@ public sealed class SqlServerNativePlanDetailTests
     private static string Plan(string statement) =>
         $"<ShowPlanXML xmlns=\"{Namespace}\"><BatchSequence><Batch><Statements>" + statement + "</Statements></Batch></BatchSequence></ShowPlanXML>";
 
-    private static ProviderPlanForest? Map(string rawPlan, IReadOnlyDictionary<string, string>? logicalColumnsByPhysical = null) =>
+    private static ProviderPlanForest? Map(string rawPlan, IReadOnlyDictionary<string, string>? logicalColumnsByPhysical = null, string? primaryKeyIndex = null) =>
         SqlServerNativePlanMapper.Map(
             rawPlan,
             "records_db",
@@ -275,5 +309,6 @@ public sealed class SqlServerNativePlanDetailTests
             _ => new ProviderOpaqueIdentity(Guid.NewGuid()),
             new Dictionary<string, string>(StringComparer.Ordinal),
             new HashSet<string>(StringComparer.Ordinal) { "PK_records" },
-            logicalColumnsByPhysical ?? new Dictionary<string, string>(StringComparer.Ordinal));
+            logicalColumnsByPhysical ?? new Dictionary<string, string>(StringComparer.Ordinal),
+            primaryKeyIndex);
 }

@@ -220,6 +220,13 @@ second native node or changing parentage. Consumers checking for either kind
 of work must also consider this fused operator. It carries no numeric bound,
 spill claim or access identity; a sort purpose is optional and must be observed.
 
+Since `0.4.0-preview.26`, the SQL Server mapper reports an index seek on the
+table's primary-key index (the `is_primary_key` index of the catalog witness) as
+`PrimaryKeySearch` with the target and no index identity, the fact SQLite's
+rowid lookup and MongoDB's `_id` search already report; a scan of that index
+stays an `IndexScan`. A consumer that asked for a declared index whose key is
+the unit's own key can therefore recognise the provider's equivalent choice.
+
 Since `0.4.0-preview.25`, the SQL Server mapper admits one join shape: a
 `Nested Loops` whose inner child is a bookmark lookup (`RID Lookup` on a heap,
 `Key Lookup` on a clustered table, both a showplan `IndexScan` flagged
