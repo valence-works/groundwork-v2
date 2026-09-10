@@ -126,7 +126,10 @@ public sealed class PostgreSqlExecutionEvidenceTests
         Assert.Equal(ProviderPointReadBindingRole.Scope,
             Assert.Single(pointRead.KeyBounds, bound => bound.BindingRole == ProviderPointReadBindingRole.Scope).BindingRole);
         Assert.Equal(ProviderNativeBoundKind.Absent, pointRead.NativeLimit.Kind);
-        Assert.Equal(ProviderPointReadUniquenessStatus.NotObserved, pointRead.Uniqueness.Status);
+        // #423: the primary key on (scope, id) is the catalog's uniqueness witness for the scoped point read.
+        Assert.Equal(ProviderPointReadUniquenessStatus.Observed, pointRead.Uniqueness.Status);
+        Assert.Equal(new[] { "id" }, pointRead.Uniqueness.EnforcedKeyColumns.ToArray());
+        Assert.True(pointRead.Uniqueness.IncludesScopeBinding);
         Assert.True(pointRead.MaterializerReadsAtMostOne);
         Assert.Equal(ProviderPointReadLockMode.None, pointRead.LockMode);
         Assert.Equal(ProviderEvidenceAvailability.NotRequested, evidence.Plan.Availability);
@@ -139,7 +142,7 @@ public sealed class PostgreSqlExecutionEvidenceTests
     }
 
     [SkippableFact]
-    public void Public_point_read_preserves_trailing_space_payload_and_plan_opt_in_is_unsupported()
+    public void Public_point_read_preserves_trailing_space_payload_and_plan_opt_in_maps_the_key_search()
     {
         using var fixture = new Fixture();
         fixture.Observer.EvidenceOptions = ProviderExecutionEvidenceOptions.ShapeAndPlans;
@@ -148,7 +151,11 @@ public sealed class PostgreSqlExecutionEvidenceTests
 
         Assert.Equal(Fixture.SecretPayload, result!.Values.Values["payload"]);
         var evidence = Assert.Single(fixture.Observer.Executions);
-        Assert.Equal(ProviderEvidenceAvailability.Unsupported, evidence.Plan.Availability);
+        // #423: the point read's plan comes through the same explain seam as bounded queries.
+        Assert.Equal(ProviderEvidenceAvailability.Collected, evidence.Plan.Availability);
+        var access = Assert.Single(evidence.Plan.WinningPlan!.Nodes, node => node.TargetId is not null);
+        Assert.Contains(access.Operation, new[] { ProviderPlanOperator.PrimaryKeySearch, ProviderPlanOperator.IndexSearch });
+        Assert.Equal(ProviderPointReadUniquenessStatus.Observed, evidence.PointRead!.Uniqueness.Status);
         Assert.Single(fixture.Observer.Commands);
     }
 

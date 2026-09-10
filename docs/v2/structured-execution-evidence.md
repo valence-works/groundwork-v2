@@ -96,6 +96,17 @@ path. Null tests and contradictions carry no binding identity. A consumer
 comparing pages checks the branches against the ordering it asked for and the
 binding roles, never the command text.
 
+## Point reads
+
+Since 0.4.0-preview.28 a point read carries a collected native plan when plans
+are requested (the same explain seam bounded queries use, so SQLite reports a
+primary-key or index search, PostgreSQL and SQL Server the seek on the
+enforcing index, MongoDB the `_id` lookup) and a uniqueness witness that is
+`Observed` only when the provider catalog holds a valid, unfiltered unique
+index or primary key over exactly the read's key columns (scope included); the
+witness names the enforced columns and whether scope participates. `NotObserved`
+means the catalog did not prove it, never that the declaration was trusted.
+
 ## Rewritten search keys
 
 A bounded query ordered by a persisted ordinal identity key (a

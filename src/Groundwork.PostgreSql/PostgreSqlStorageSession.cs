@@ -1964,6 +1964,35 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         public object? Decode(object value, ColumnDefinition column) => FromDatabase(value, column);
 
         public string LockingClause(bool forUpdate) => forUpdate ? " FOR UPDATE" : string.Empty;
+
+        public async ValueTask<ProviderPlanEvidence> InspectPointReadPlan(
+            RelationalQueryCommand query, RelationalExecution execution, RelationalEvidenceCapture capture) =>
+            (await session.InspectExecutionPlan(query, session.Unit.CreateQueryRenderOptions(), execution,
+                collectEvidence: true, capture).ConfigureAwait(false)).Evidence;
+
+        /// <summary>Every valid, unfiltered unique index (the primary key included) on the target, with its key columns in order.</summary>
+        public async ValueTask<ProviderPointReadUniqueness> ObserveUniqueness(
+            StorageUnit unit, IReadOnlyList<string> keyColumns, RelationalExecution execution)
+        {
+            using var catalog = session.Command(
+                "SELECT i.indexrelid, a.attname FROM pg_catalog.pg_index i " +
+                "JOIN LATERAL unnest(i.indkey[0:i.indnkeyatts-1]) WITH ORDINALITY s(attnum, ordinality) ON true " +
+                "JOIN pg_catalog.pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = s.attnum " +
+                "WHERE i.indrelid = to_regclass(@target) AND i.indisunique AND i.indisvalid AND i.indpred IS NULL " +
+                "ORDER BY i.indexrelid, s.ordinality;");
+            catalog.Parameters.AddWithValue("target", Quote(unit.Name));
+            var keySets = new Dictionary<uint, List<string>>();
+            await using var readerScope = await execution.ExecuteReader(catalog).ConfigureAwait(false);
+            var reader = readerScope.Reader;
+            while (await execution.Read(reader).ConfigureAwait(false))
+            {
+                var index = (uint)reader.GetValue(0);
+                if (!keySets.TryGetValue(index, out var columns))
+                    keySets[index] = columns = [];
+                columns.Add(reader.GetString(1));
+            }
+            return RelationalPointReadUniqueness.Observe(keyColumns, keySets.Values);
+        }
     }
 
     private sealed class PostgreSqlCrudAdapter(

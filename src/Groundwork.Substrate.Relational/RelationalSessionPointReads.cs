@@ -1,6 +1,7 @@
 using System.Data.Common;
 using System.Globalization;
 using Groundwork.Kernel;
+using Groundwork.Query.Model;
 using Groundwork.Store;
 
 namespace Groundwork.Substrate.Relational;
@@ -69,6 +70,7 @@ internal sealed class RelationalSessionPointReads
             keyColumns.Add(ProviderOwnedColumns.Scope);
         }
         var clauses = new List<string>(keyColumns.Count);
+        var renderParameters = new List<QueryRenderParameter>(keyColumns.Count);
         using var command = createCommand(string.Empty);
         foreach (var name in keyColumns)
         {
@@ -84,6 +86,8 @@ internal sealed class RelationalSessionPointReads
             var predicate = adapter.RenderEquality(unit, column, parameter, exactStringKeys, evidenceObserver is not null);
             clauses.Add(predicate.Sql);
             adapter.Bind(command, parameter, value, column);
+            if (RelationalSessionPolicy.QueryTypeOf(column.Type) is { } queryType)
+                renderParameters.Add(new QueryRenderParameter(parameter.TrimStart('@'), queryType, value));
             if (keyBounds is not null)
             {
                 if (predicate.Evidence is { } bound)
@@ -104,12 +108,22 @@ internal sealed class RelationalSessionPointReads
                 ? ProviderScopeBindingMode.Predicate : ProviderScopeBindingMode.Unscoped);
         ProviderIdentity? provider = evidenceObserver is null ? null : new(
             adapter.EvidenceProviderName ?? operationPrefix, command.Connection!.ServerVersion);
+        // The uniqueness witness and the native plan are provider observations made before the read,
+        // the way bounded queries collect theirs; neither is inferred from the declaration (#423).
+        var uniqueness = shapeCollected
+            ? await adapter.ObserveUniqueness(unit, keyColumns, execution).ConfigureAwait(false)
+            : new ProviderPointReadUniqueness(ProviderPointReadUniquenessStatus.NotObserved);
         var pointRead = shapeCollected ? new ProviderPointReadEvidence(
-            keyBounds!, new(ProviderPointReadUniquenessStatus.NotObserved),
+            keyBounds!, uniqueness,
             ProviderNativeBound.Absent, materializerReadsAtMostOne: true,
             lockMode: adapter.EvidenceLockMode(forUpdate)) : null;
         var plan = evidenceOptions?.CollectNativePlans == true
-            ? new ProviderPlanEvidence(ProviderEvidenceAvailability.Unsupported)
+            ? renderParameters.Count == keyColumns.Count
+                ? await adapter.InspectPointReadPlan(
+                    new RelationalQueryCommand(command.CommandText, renderParameters, includesTotalCount: false,
+                        isMatchNone: false, selectedIndex: null, indexHintApplied: false, appliedOrder: []),
+                    execution, evidenceCapture!).ConfigureAwait(false)
+                : new ProviderPlanEvidence(ProviderEvidenceAvailability.Unsupported)
             : ProviderPlanEvidence.NotRequested;
 
         observer?.Observe(new ProviderCommandEvent(
@@ -194,6 +208,22 @@ internal interface IRelationalPointReadAdapter
 {
     string? EvidenceProviderName => null;
 
+    /// <summary>
+    /// Collects the provider's native plan for the rendered point read through the same explain seam
+    /// as bounded queries. The default reports the plan as unsupported rather than inferring one.
+    /// </summary>
+    ValueTask<ProviderPlanEvidence> InspectPointReadPlan(
+        RelationalQueryCommand query, RelationalExecution execution, RelationalEvidenceCapture capture) =>
+        new(new ProviderPlanEvidence(ProviderEvidenceAvailability.Unsupported));
+
+    /// <summary>
+    /// Observes from the provider catalog whether a unique index or primary key enforces exactly the
+    /// point read's key columns (scope included when the unit is scoped). The default observes nothing.
+    /// </summary>
+    ValueTask<ProviderPointReadUniqueness> ObserveUniqueness(
+        StorageUnit unit, IReadOnlyList<string> keyColumns, RelationalExecution execution) =>
+        new(new ProviderPointReadUniqueness(ProviderPointReadUniquenessStatus.NotObserved));
+
     ProviderPointReadLockMode EvidenceLockMode(bool forUpdate) => ProviderPointReadLockMode.Unknown;
 
     RelationalPointReadPredicate RenderEquality(StorageUnit unit, ColumnDefinition column,
@@ -209,6 +239,31 @@ internal interface IRelationalPointReadAdapter
     object? Decode(object value, ColumnDefinition column);
 
     string LockingClause(bool forUpdate);
+}
+
+/// <summary>
+/// Turns provider-observed unique key sets into the point read's uniqueness witness: a unique index or
+/// primary key whose columns are exactly the read's key columns (scope included) enforces at most one row.
+/// </summary>
+internal static class RelationalPointReadUniqueness
+{
+    internal static ProviderPointReadUniqueness Observe(
+        IReadOnlyList<string> keyColumns,
+        IEnumerable<IReadOnlyList<string>> uniqueKeySets)
+    {
+        var wanted = keyColumns.ToHashSet(StringComparer.Ordinal);
+        foreach (var uniqueColumns in uniqueKeySets)
+        {
+            if (uniqueColumns.Count != wanted.Count || !uniqueColumns.All(wanted.Contains))
+                continue;
+            var includesScope = uniqueColumns.Contains(ProviderOwnedColumns.Scope, StringComparer.Ordinal);
+            return new ProviderPointReadUniqueness(
+                ProviderPointReadUniquenessStatus.Observed,
+                uniqueColumns.Where(column => column != ProviderOwnedColumns.Scope),
+                includesScope);
+        }
+        return new ProviderPointReadUniqueness(ProviderPointReadUniquenessStatus.NotObserved);
+    }
 }
 
 internal readonly record struct RelationalPointReadPredicate(string Sql, ProviderPointReadKeyBound? Evidence)

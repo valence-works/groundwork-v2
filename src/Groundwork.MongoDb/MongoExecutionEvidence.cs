@@ -943,9 +943,14 @@ internal sealed class MongoExecutionEvidenceEmitter
 /// <summary>Builds Mongo's point-read shape from the actual key-read emitter.</summary>
 internal static class MongoExecutionEvidenceBuilder
 {
+    /// <summary>
+    /// MongoDB enforces <c>_id</c> uniqueness on every collection, and the read addresses the scope's
+    /// own collection, so the key columns encoded into <c>_id</c> are the catalog's uniqueness witness (#423).
+    /// </summary>
     internal static ProviderPointReadEvidence CreatePointRead(
         StorageUnit unit,
-        MongoExecutionEvidenceCapture capture)
+        MongoExecutionEvidenceCapture capture,
+        bool scopedCollection = false)
     {
         var keyBounds = unit.Key.Columns.Select(name =>
         {
@@ -960,7 +965,7 @@ internal static class MongoExecutionEvidenceBuilder
         });
         return new ProviderPointReadEvidence(
             keyBounds,
-            new ProviderPointReadUniqueness(ProviderPointReadUniquenessStatus.NotObserved),
+            new ProviderPointReadUniqueness(ProviderPointReadUniquenessStatus.Observed, unit.Key.Columns, scopedCollection),
             ProviderNativeBound.Explicit(1),
             materializerReadsAtMostOne: true,
             ProviderPointReadLockMode.None);

@@ -66,7 +66,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
             UserColumns,
             VersionColumnDefinition,
             Command,
-            new SqlitePointReadAdapter(),
+            new SqlitePointReadAdapter(this),
             observer,
             "sqlite", evidenceCapture);
         crud = new RelationalSessionCrud(
@@ -1884,7 +1884,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         }
     }
 
-    private sealed class SqlitePointReadAdapter : IRelationalPointReadAdapter
+    private sealed class SqlitePointReadAdapter(SqliteStorageSession session) : IRelationalPointReadAdapter
     {
         public string EvidenceProviderName => "SQLite";
 
@@ -1908,6 +1908,55 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         public object? Decode(object value, ColumnDefinition column) => FromSqlite(value, column);
 
         public string LockingClause(bool forUpdate) => string.Empty;
+
+        public ValueTask<ProviderPlanEvidence> InspectPointReadPlan(
+            RelationalQueryCommand query, RelationalExecution execution, RelationalEvidenceCapture capture) =>
+            new(session.InspectExecutionPlan(query, session.Unit.CreateQueryRenderOptions(), collectEvidence: true, capture).Evidence);
+
+        /// <summary>
+        /// Every unique index on the target (declared or the primary key's automatic index), plus a
+        /// rowid-aliased INTEGER PRIMARY KEY, which SQLite enforces without a separate index.
+        /// </summary>
+        public ValueTask<ProviderPointReadUniqueness> ObserveUniqueness(
+            StorageUnit unit, IReadOnlyList<string> keyColumns, RelationalExecution execution)
+        {
+            var keySets = new List<IReadOnlyList<string>>();
+            var indexNames = new List<string>();
+            using (var list = session.Command($"PRAGMA index_list({Quote(unit.Name)});"))
+            using (var reader = list.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    if (reader.GetInt32(2) != 0)
+                        indexNames.Add(reader.GetString(1));
+                }
+            }
+            foreach (var index in indexNames)
+            {
+                var columns = new List<string>();
+                using var info = session.Command($"PRAGMA index_info({Quote(index)});");
+                using var reader = info.ExecuteReader();
+                while (reader.Read())
+                    if (!reader.IsDBNull(2))
+                        columns.Add(reader.GetString(2));
+                if (columns.Count != 0)
+                    keySets.Add(columns);
+            }
+            var primaryKey = new List<(int Ordinal, string Name, string Type)>();
+            using (var table = session.Command($"PRAGMA table_info({Quote(unit.Name)});"))
+            using (var reader = table.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    var ordinal = reader.GetInt32(5);
+                    if (ordinal > 0)
+                        primaryKey.Add((ordinal, reader.GetString(1), reader.GetString(2)));
+                }
+            }
+            if (primaryKey.Count == 1 && string.Equals(primaryKey[0].Type, "INTEGER", StringComparison.OrdinalIgnoreCase))
+                keySets.Add([primaryKey[0].Name]);
+            return new(RelationalPointReadUniqueness.Observe(keyColumns, keySets));
+        }
     }
 }
 
