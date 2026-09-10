@@ -653,6 +653,7 @@ public sealed record ProviderPointReadEvidence
 /// </summary>
 public enum ProviderPlanWithheldReason
 {
+    /// <summary>Reserved for evidence written before the reason was recorded; never produced by a current provider.</summary>
     Unknown,
     /// <summary>The provider does not collect plans for this operation or key shape.</summary>
     NotAttempted,
