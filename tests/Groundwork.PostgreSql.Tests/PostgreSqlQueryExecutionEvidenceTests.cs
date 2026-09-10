@@ -274,7 +274,7 @@ public sealed class PostgreSqlQueryExecutionEvidenceTests
             [new QueryIndexColumn("updated", false, QueryType.Int64), new QueryIndexColumn("sequence", false, QueryType.Int64)]);
         var options = new QueryRenderOptions([index], selectedIndex: "by_updated_sequence");
         var first = new QueryRequest(table, Predicate.AlwaysTrue.Instance, order, Projection.ColumnsOnly(updated, sequence), Paging.Keyset(2));
-        var token = QueryContinuationToken.Encode(first, options, [QueryConstant.Of(updated, 41L), QueryConstant.Of(sequence, 7L)]);
+        var token = QueryContinuationToken.Encode(first, options, [QueryConstant.Of(updated, 9876543210L), QueryConstant.Of(sequence, 1234567890L)]);
         var page = new PostgreSqlQueryRenderer().RenderForExecution(
             new QueryRequest(table, Predicate.AlwaysTrue.Instance, order, Projection.ColumnsOnly(updated, sequence), Paging.Continuation(token, 2)),
             options, hasLookahead: true);
@@ -286,7 +286,9 @@ public sealed class PostgreSqlQueryExecutionEvidenceTests
         Assert.Collection(emitted.TupleBounds,
             bound => { Assert.Equal("updated", bound.LogicalColumn); Assert.Equal(ProviderPredicateOperator.UpperBound, bound.Operator); Assert.Equal(ProviderPredicateComparison.Exact, bound.Comparison); },
             bound => { Assert.Equal("sequence", bound.LogicalColumn); Assert.Equal(ProviderPredicateOperator.UpperBound, bound.Operator); });
-        Assert.DoesNotContain("41", System.Text.Json.JsonSerializer.Serialize(emitted), StringComparison.Ordinal);
+        var serialized = System.Text.Json.JsonSerializer.Serialize(emitted);
+        Assert.DoesNotContain("9876543210", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("1234567890", serialized, StringComparison.Ordinal);
         Assert.All(emitted.TupleBounds, bound => Assert.Equal(ProviderPredicateBoundInclusivity.Exclusive, bound.BoundInclusivity));
     }
 

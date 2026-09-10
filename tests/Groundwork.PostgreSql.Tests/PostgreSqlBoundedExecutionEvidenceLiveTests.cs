@@ -140,7 +140,7 @@ public sealed class PostgreSqlBoundedExecutionEvidenceLiveTests
     /// #422: paging through the scoped catalog with keyset continuation returns every row exactly once
     /// and the second page carries the emitted continuation predicate, value-free.
     /// </summary>
-    [Fact]
+    [SkippableFact]
     public void Continuation_page_reports_its_emitted_predicate_and_pages_cover_every_row_once()
     {
         using var fixture = new Fixture();
