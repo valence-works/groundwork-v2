@@ -203,10 +203,13 @@ public sealed class MongoExecutionEvidenceLiveTests
             Assert.Equal(ProviderExecutionOperation.PointRead, evidence.Operation);
             Assert.Equal(ProviderExecutionOutcome.Succeeded, evidence.Outcome);
             Assert.Equal(ProviderEvidenceAvailability.Collected, evidence.ShapeAvailability);
-            Assert.Equal(ProviderEvidenceAvailability.Unsupported, evidence.Plan.Availability);
-            Assert.Null(evidence.Plan.Provenance);
-            Assert.Null(evidence.Plan.ChosenPhysicalIndexId);
-            Assert.Null(evidence.Plan.WinningPlan);
+            // The `_id` lookup explains as the IDHACK (or 8.0 express) fast path: one primary-key search.
+            Assert.Equal(ProviderEvidenceAvailability.Collected, evidence.Plan.Availability);
+            Assert.Equal(ProviderPlanProvenance.ExplainReplay, evidence.Plan.Provenance);
+            Assert.Equal(1, evidence.Plan.CollectionCommandCount);
+            var access = Assert.Single(Assert.IsType<ProviderPlanForest>(evidence.Plan.WinningPlan).Nodes);
+            Assert.Equal(ProviderPlanOperator.PrimaryKeySearch, access.Operation);
+            Assert.Equal(evidence.Target.PhysicalTargetId, access.TargetId);
         });
         Assert.Equal(2, observer.Commands.Count);
         Assert.All(observer.Commands, command => Assert.Equal("mongodb.read", command.Operation));

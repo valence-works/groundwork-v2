@@ -27,7 +27,9 @@ public enum ProviderPlanOperator
     /// <summary>A single native operator that sorts and limits rows; no numeric bound is implied.</summary>
     TopNSort,
     /// <summary>A native stage retaining input rows that satisfy a predicate; no predicate values or selectivity are implied.</summary>
-    Filter
+    Filter,
+    /// <summary>A native streaming merge of already-ordered inputs on the merge keys it reports; no blocking sort is implied.</summary>
+    MergeOrdered
 }
 
 /// <summary>The purpose of a sort when the native plan identifies it.</summary>
@@ -177,8 +179,9 @@ public sealed record ProviderPlanNode
         }
         if (details is not null)
         {
-            if (details.NativeSortKeys is not null && operation is not (ProviderPlanOperator.Sort or ProviderPlanOperator.TopNSort))
-                throw new ArgumentException("Native sort keys require a sort node.", nameof(details));
+            if (details.NativeSortKeys is not null &&
+                operation is not (ProviderPlanOperator.Sort or ProviderPlanOperator.TopNSort or ProviderPlanOperator.MergeOrdered))
+                throw new ArgumentException("Native sort keys require a sort or ordered-merge node.", nameof(details));
             if (details.NativeLimit.Kind != ProviderNativeBoundKind.Unknown &&
                 operation is not (ProviderPlanOperator.Limit or ProviderPlanOperator.TopNSort))
                 throw new ArgumentException("A native limit requires a limiting node.", nameof(details));

@@ -99,20 +99,24 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
         if (order.Count < 2 || cursor.Count != order.Count)
             return false;
 
+        // The native tuple fast path is eligible only for the ordered key segment that a declared
+        // index actually exposes: the selected index when one is nominated, otherwise the first
+        // declared index carrying the segment (the same route an un-nominated ordinal identity
+        // orders through). Equality-prefix columns may precede that segment, but a permutation or
+        // a gap cannot describe one contiguous native key range.
         var selectedIndex = options.FindSelectedIndex();
-        if (selectedIndex is null)
-            return false;
+        IEnumerable<QueryIndexDeclaration> candidates = selectedIndex is null ? options.Indexes : [selectedIndex];
+        return candidates.Any(index => ExposesTupleSegment(index, order) && TupleTermsQualify(index, order, cursor, options));
+    }
 
-        // The native tuple fast path is eligible only for the ordered key segment that the
-        // selected index actually exposes. Equality-prefix columns may precede that segment,
-        // but a permutation or a gap cannot describe one contiguous native key range.
-        var segmentStart = -1;
-        for (var candidate = 0; candidate <= selectedIndex.Columns.Length - order.Count; candidate++)
+    private static bool ExposesTupleSegment(QueryIndexDeclaration index, IReadOnlyList<OrderTerm> order)
+    {
+        for (var candidate = 0; candidate <= index.Columns.Length - order.Count; candidate++)
         {
             var matches = true;
-            for (var index = 0; index < order.Count; index++)
+            for (var position = 0; position < order.Count; position++)
             {
-                if (!string.Equals(selectedIndex.Columns[candidate + index], order[index].Column.Name, StringComparison.Ordinal))
+                if (!string.Equals(index.Columns[candidate + position], order[position].Column.Name, StringComparison.Ordinal))
                 {
                     matches = false;
                     break;
@@ -120,27 +124,30 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
             }
 
             if (matches)
-            {
-                segmentStart = candidate;
-                break;
-            }
+                return true;
         }
 
-        if (segmentStart < 0)
-            return false;
+        return false;
+    }
 
+    private static bool TupleTermsQualify(
+        QueryIndexDeclaration index,
+        IReadOnlyList<OrderTerm> order,
+        IReadOnlyList<QueryConstant> cursor,
+        QueryRenderOptions options)
+    {
         var direction = order[0].Direction;
-        for (var index = 0; index < order.Count; index++)
+        for (var position = 0; position < order.Count; position++)
         {
-            var term = order[index];
-            var value = cursor[index];
+            var term = order[position];
+            var value = cursor[position];
             if (term.Direction != direction ||
                 term.Column.IsNullable ||
                 value.Kind == QueryConstantKind.Null ||
                 value.Type is not { } valueType ||
                 valueType != term.Column.Type ||
-                selectedIndex.NullableColumns.Contains(term.Column.Name) ||
-                !selectedIndex.ColumnTypes.TryGetValue(term.Column.Name, out var declaredType) ||
+                index.NullableColumns.Contains(term.Column.Name) ||
+                !index.ColumnTypes.TryGetValue(term.Column.Name, out var declaredType) ||
                 declaredType != term.Column.Type)
             {
                 return false;

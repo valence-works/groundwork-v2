@@ -501,12 +501,16 @@ internal static class MongoNativePlanMapper
                         : physical;
                 if (logical is null || logical.Contains('.', StringComparison.Ordinal))
                     return null;
+                // A computed ordinal key and an identity-preserving persisted search key both order the
+                // logical column by its ordinal comparison; only an unmapped physical field stays unknown.
                 terms.Add(new ProviderOrderTerm(
                     logical,
                     direction.Value,
                     null,
                     transforms,
-                    transforms.Contains(ProviderOrderingTransform.OrdinalStringKey) ? ProviderPredicateComparison.Ordinal : ProviderPredicateComparison.Unknown));
+                    transforms.Contains(ProviderOrderingTransform.OrdinalStringKey) || transforms.Contains(ProviderOrderingTransform.PhysicalSearchKey)
+                        ? ProviderPredicateComparison.Ordinal
+                        : ProviderPredicateComparison.Unknown));
             }
             return terms;
         }
@@ -571,6 +575,15 @@ internal static class MongoNativePlanMapper
                 }
                 node.Details = Details(keys, limit, ReadSpill(document));
             }
+            else if (operation == ProviderPlanOperator.MergeOrdered)
+            {
+                if (Count(document, "sortPattern") != 1 ||
+                    !document.TryGetValue("sortPattern", out var mergePattern) ||
+                    !mergePattern.IsBsonDocument ||
+                    ReadSortKeys(mergePattern.AsBsonDocument) is not { } mergeKeys)
+                    return false;
+                node.Details = Details(mergeKeys, ProviderPlanLimit.Unknown, ReadSpill(document));
+            }
             else if (operation == ProviderPlanOperator.Limit)
             {
                 if (TryReadPositiveLiteral(document, "limitAmount", out var literal))
@@ -578,6 +591,7 @@ internal static class MongoNativePlanMapper
                 else if (Count(document, "limitAmount") != 0)
                     return false;
             }
+            // A primary-key search carries the target only; the kernel forbids an index identity on it.
             if (operation is ProviderPlanOperator.IndexScan or ProviderPlanOperator.IndexSearch)
             {
                 if (indexName is null)
@@ -613,7 +627,7 @@ internal static class MongoNativePlanMapper
             {
                 var descendants = Descendants(projection.Id).ToArray();
                 var accesses = descendants
-                    .Where(node => node.Operation is ProviderPlanOperator.IndexScan or ProviderPlanOperator.IndexSearch)
+                    .Where(node => node.Operation is ProviderPlanOperator.IndexScan or ProviderPlanOperator.IndexSearch or ProviderPlanOperator.PrimaryKeySearch)
                     .ToArray();
                 if (accesses.Length == 0 || descendants.Any(node => node.Operation == ProviderPlanOperator.Materialize))
                     return false;
@@ -684,6 +698,7 @@ internal static class MongoNativePlanMapper
         {
             ProviderPlanOperator.IndexScan or
                 ProviderPlanOperator.IndexSearch or
+                ProviderPlanOperator.PrimaryKeySearch or
                 ProviderPlanOperator.TableScan => childCount == 0,
             ProviderPlanOperator.Materialize or
                 ProviderPlanOperator.Sort or
@@ -692,13 +707,17 @@ internal static class MongoNativePlanMapper
                 ProviderPlanOperator.Compute or
                 ProviderPlanOperator.Projection or
                 ProviderPlanOperator.Offset => childCount == 1,
+            ProviderPlanOperator.MergeOrdered => childCount >= 2,
             _ => false
         };
 
         private static bool IsLeaf(ProviderPlanOperator operation) => operation is
             ProviderPlanOperator.IndexScan or
             ProviderPlanOperator.IndexSearch or
+            ProviderPlanOperator.PrimaryKeySearch or
             ProviderPlanOperator.TableScan;
+
+        private const string PrimaryKeyIndexName = "_id_";
 
         private static bool TryMapPlanStage(
             BsonDocument document,
@@ -711,14 +730,27 @@ internal static class MongoNativePlanMapper
             {
                 "COLLSCAN" => ProviderPlanOperator.TableScan,
                 "IXSCAN" => ProviderPlanOperator.IndexScan,
+                // The `_id` fast path: classic IDHACK carries no index name, the 8.0 express path
+                // names the index it searches. Either is one key search of the target.
+                "IDHACK" => ProviderPlanOperator.PrimaryKeySearch,
+                "EXPRESS_IXSCAN" => ProviderPlanOperator.IndexSearch,
                 "FETCH" => ProviderPlanOperator.Materialize,
                 "SORT" => ProviderPlanOperator.Sort,
+                // The planner explodes a keyset `$or` into one bounded scan per branch and merges them
+                // on the sort pattern without a blocking sort.
+                "SORT_MERGE" => ProviderPlanOperator.MergeOrdered,
                 "LIMIT" => ProviderPlanOperator.Limit,
                 "SKIP" => ProviderPlanOperator.Offset,
                 "PROJECTION_SIMPLE" or "PROJECTION_DEFAULT" or "PROJECTION_COVERED" => ProviderPlanOperator.Projection,
                 _ => ProviderPlanOperator.Unknown
             };
-            if (operation is ProviderPlanOperator.IndexScan or ProviderPlanOperator.IndexSearch)
+            if (operation == ProviderPlanOperator.PrimaryKeySearch)
+            {
+                if (Count(document, "indexName") != 0)
+                    return false;
+                indexName = PrimaryKeyIndexName;
+            }
+            else if (operation is ProviderPlanOperator.IndexScan or ProviderPlanOperator.IndexSearch)
             {
                 if (Count(document, "indexName") != 1 ||
                     !document.TryGetValue("indexName", out var indexValue) ||
@@ -726,6 +758,8 @@ internal static class MongoNativePlanMapper
                     string.IsNullOrWhiteSpace(indexValue.AsString))
                     return false;
                 indexName = indexValue.AsString;
+                if (operation == ProviderPlanOperator.IndexSearch && indexName == PrimaryKeyIndexName)
+                    operation = ProviderPlanOperator.PrimaryKeySearch;
             }
 
             if (operation == ProviderPlanOperator.Sort)

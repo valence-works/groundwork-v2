@@ -92,7 +92,11 @@ with the prefix equalities or null tests, then an exclusive bound, a non-null
 test, or a contradiction, and whether the null alternative was emitted beside
 the bound) on SQLite, SQL Server, MongoDB and PostgreSQL's fallback, or `Tuple`
 (one exclusive bound per order term) when PostgreSQL uses its row-value fast
-path. Null tests and contradictions carry no binding identity. A consumer
+path; since 0.4.0-preview.29 that path no longer needs a nominated index and
+takes the first declared index exposing the ordered segment. MongoDB may plan
+the lexicographic page as a `MergeOrdered` of one index scan per branch (its
+`SORT_MERGE`), whose native sort keys are the page's ordering. Null tests and
+contradictions carry no binding identity. A consumer
 comparing pages checks the branches against the ordering it asked for and the
 binding roles, never the command text.
 
@@ -101,7 +105,8 @@ binding roles, never the command text.
 Since 0.4.0-preview.28 a point read carries a collected native plan when plans
 are requested (the same explain seam bounded queries use, so SQLite reports a
 primary-key or index search, PostgreSQL and SQL Server the seek on the
-enforcing index, MongoDB the `_id` lookup) and a uniqueness witness that is
+enforcing index, MongoDB the `_id` lookup, which since 0.4.0-preview.29 maps
+its `IDHACK`/express fast path to `PrimaryKeySearch`) and a uniqueness witness that is
 `Observed` only when the provider catalog holds a valid, unfiltered unique
 index or primary key over exactly the read's key columns (scope included); the
 witness names the enforced columns and whether scope participates. `NotObserved`

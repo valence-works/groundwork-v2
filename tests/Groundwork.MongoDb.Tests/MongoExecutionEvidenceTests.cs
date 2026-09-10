@@ -123,6 +123,26 @@ public sealed class MongoExecutionEvidenceTests
         Assert.Null(emission.StructuredShape);
     }
 
+    /// <summary>A total count is not a bounded query shape (ADR 0004), on MongoDB as on the relational providers.</summary>
+    [Fact]
+    public void Renderer_with_total_count_withdraws_the_shape()
+    {
+        var unit = CreateSimpleUnit("mongo-evidence-total-count");
+        var id = new ColumnRef(new TableId(unit.Name), "id", QueryType.String, isNullable: false);
+        var request = new QueryRequest(
+            new TableId(unit.Name),
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(id, OrderDirection.Ascending, NullOrder.Last)],
+            Projection.All,
+            Paging.Keyset(1),
+            result: ResultShape.TotalCount.Instance);
+        var capture = new MongoExecutionEvidenceCapture(new RecordingEvidenceObserver(), unit, MongoStorageAccess.Global, TestServerVersion);
+
+        var emission = new MongoQueryRenderer().RenderWithEvidence(request, QueryRenderOptions.Default, "physical", capture, true);
+
+        Assert.Null(emission.StructuredShape);
+    }
+
     [Fact]
     public void Renderer_without_order_does_not_retain_order_facts()
     {
