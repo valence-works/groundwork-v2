@@ -309,6 +309,15 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
             : "(" + strict + " OR " + expression + " IS NULL)";
     }
 
+    /// <summary>
+    /// The string and Guid boundaries above admit null rows whenever nulls order last, regardless of
+    /// the declared nullability; every other type takes the shared renderer's rule.
+    /// </summary>
+    protected override bool BoundaryAdmitsNull(OrderTerm term) =>
+        term.Column.Type is QueryType.String or QueryType.Guid
+            ? term.NullOrder != NullOrder.First
+            : base.BoundaryAdmitsNull(term);
+
     protected override string RenderContains(string expression, string parameter) =>
         "(DATALENGTH(@" + parameter + ") = 0 OR CHARINDEX(@" + parameter + ", " + expression + ") > 0)";
 

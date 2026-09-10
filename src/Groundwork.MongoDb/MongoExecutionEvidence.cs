@@ -597,6 +597,9 @@ internal sealed class MongoExecutionEvidenceEmitter
     private bool hasLookahead;
     private bool includesTotalCount;
     private bool unsupported;
+    private bool continuationRequested;
+    private readonly List<ProviderContinuationBranch> continuationBranches = [];
+    private List<ProviderPredicateFact>? branchEqualities;
 
     internal MongoExecutionEvidenceEmitter(
         MongoExecutionEvidenceCapture capture,
@@ -639,15 +642,71 @@ internal sealed class MongoExecutionEvidenceEmitter
 
     internal void ConfigureRequest(QueryRequest request)
     {
+        continuationRequested = request.Paging.ContinuationToken is not null;
         if (request.Join is not null ||
             request.Result is not ResultShape.Rows ||
             request.Result.IncludesTotalCount ||
             request.LatestPerKey is not null ||
-            request.Distinct ||
-            request.Paging.ContinuationToken is not null)
+            request.Distinct)
         {
             unsupported = true;
         }
+    }
+
+    /// <summary>Opens the next lexicographic keyset branch; its equalities follow, then its boundary.</summary>
+    internal void RecordContinuationBranch()
+    {
+        if (branchEqualities is not null)
+            unsupported = true;
+        branchEqualities = [];
+    }
+
+    internal void RecordContinuationEquality(OrderTerm term, bool nullCursor)
+    {
+        if (branchEqualities is null || ContinuationFact(term, nullCursor ? ProviderPredicateOperator.IsNull : ProviderPredicateOperator.Equal) is not { } fact)
+        {
+            unsupported = true;
+            return;
+        }
+        branchEqualities.Add(fact);
+    }
+
+    /// <summary>Closes the open branch with its boundary (see the relational emitter for the forms).</summary>
+    internal void RecordContinuationBoundary(OrderTerm term, bool nullCursor, bool admitsNull)
+    {
+        var @operator = nullCursor
+            ? term.NullOrder == NullOrder.First ? ProviderPredicateOperator.IsNotNull : ProviderPredicateOperator.None
+            : term.Direction == OrderDirection.Ascending ? ProviderPredicateOperator.LowerBound : ProviderPredicateOperator.UpperBound;
+        if (branchEqualities is null || ContinuationFact(term, @operator) is not { } boundary)
+        {
+            unsupported = true;
+            return;
+        }
+        continuationBranches.Add(new ProviderContinuationBranch(branchEqualities, boundary, admitsNull && !nullCursor));
+        branchEqualities = null;
+    }
+
+    private ProviderPredicateFact? ContinuationFact(OrderTerm term, ProviderPredicateOperator @operator)
+    {
+        // The same column admissibility as ordering: a persisted ordinal identity key is the logical
+        // column's own order; any other rewritten key withholds the shape.
+        var persistedKey = admissibleLogicalColumnsByPhysical.ContainsKey(term.Column.Name);
+        if (persistedKey
+                ? (term.Column.Table != TableId.Empty && term.Column.Table != table) || withheldColumns.Contains(term.Column.Name)
+                : !ValidateColumn(term.Column))
+            return null;
+        var bindsValue = @operator is not (ProviderPredicateOperator.IsNull or ProviderPredicateOperator.IsNotNull or ProviderPredicateOperator.None);
+        var inclusivity = @operator is ProviderPredicateOperator.LowerBound or ProviderPredicateOperator.UpperBound
+            ? ProviderPredicateBoundInclusivity.Exclusive
+            : ProviderPredicateBoundInclusivity.NotApplicable;
+        return new ProviderPredicateFact(
+            EmittedLogicalColumn(term.Column),
+            @operator,
+            term.Column.Type,
+            term.Column.Type == QueryType.String ? ProviderPredicateComparison.Ordinal : ProviderPredicateComparison.Exact,
+            inclusivity,
+            ProviderPredicateBindingRole.Continuation,
+            bindsValue ? capture.NewIdentity() : null);
     }
 
     internal void RecordAlwaysTrue() => predicateEmitted = true;
@@ -782,7 +841,7 @@ internal sealed class MongoExecutionEvidenceEmitter
         hasContinuation = continuation;
         hasLookahead = lookahead;
         includesTotalCount = totalCount;
-        if (continuation || totalCount || offset is < 0 || limit is not > 0)
+        if (totalCount || offset is < 0 || limit is not > 0)
             unsupported = true;
 
         nativeOffset = offset is int value
@@ -795,7 +854,12 @@ internal sealed class MongoExecutionEvidenceEmitter
 
     internal ProviderBoundedQueryEvidence? Complete()
     {
-        if (unsupported || !predicateEmitted || !projectionEmitted || nativeLimit.Kind != ProviderNativeBoundKind.Explicit)
+        if (unsupported || !predicateEmitted || !projectionEmitted || nativeLimit.Kind != ProviderNativeBoundKind.Explicit ||
+            branchEqualities is not null)
+            return null;
+        var continuation = continuationBranches.Count == 0 ? null : ProviderContinuationPredicate.Lexicographic(continuationBranches);
+        // A page that asked for continuation but emitted no represented predicate fails closed.
+        if (continuationRequested != (continuation is not null) || hasContinuation != continuationRequested)
             return null;
 
         return new ProviderBoundedQueryEvidence(
@@ -806,7 +870,8 @@ internal sealed class MongoExecutionEvidenceEmitter
             nativeLimit,
             hasContinuation,
             hasLookahead,
-            includesTotalCount);
+            includesTotalCount,
+            continuation);
     }
 
     private void AddFact(

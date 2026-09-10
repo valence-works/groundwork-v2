@@ -183,7 +183,111 @@ public sealed class PostgreSqlQueryExecutionEvidenceTests
             Paging.Continuation(token, 2));
 
         Assert.Null(renderer.RenderForExecution(distinct, QueryRenderOptions.Default, hasLookahead: true).Shape);
-        Assert.Null(renderer.RenderForExecution(continuation, QueryRenderOptions.Default, hasLookahead: true).Shape);
+
+        // A continuation page is supported since 0.4.0-preview.28 and carries its emitted predicate (#422).
+        var page = renderer.RenderForExecution(continuation, QueryRenderOptions.Default, hasLookahead: true);
+        var shape = Assert.IsType<ProviderBoundedQueryEvidence>(page.Shape);
+        Assert.True(shape.HasContinuation);
+        var emitted = Assert.IsType<ProviderContinuationPredicate>(shape.Continuation);
+        Assert.Equal(ProviderContinuationForm.Lexicographic, emitted.Form);
+        var branch = Assert.Single(emitted.Branches);
+        Assert.Empty(branch.Equalities);
+        Assert.Equal("id", branch.Boundary.LogicalColumn);
+        Assert.Equal(ProviderPredicateOperator.LowerBound, branch.Boundary.Operator);
+        Assert.Equal(ProviderPredicateBoundInclusivity.Exclusive, branch.Boundary.BoundInclusivity);
+        Assert.Equal(ProviderPredicateComparison.Ordinal, branch.Boundary.Comparison);
+        Assert.Equal(ProviderPredicateBindingRole.Continuation, branch.Boundary.BindingRole);
+        Assert.False(branch.BoundaryAdmitsNull);
+        Assert.DoesNotContain("cursor", System.Text.Json.JsonSerializer.Serialize(shape), StringComparison.Ordinal);
+    }
+
+    /// <summary>#422: two order terms give two lexicographic branches; a nullable nulls-last boundary admits null rows.</summary>
+    [Fact]
+    public void Continuation_page_records_each_lexicographic_branch_and_the_null_alternative()
+    {
+        var (table, id, payload) = Columns(nullablePayload: true);
+        ImmutableArray<OrderTerm> order = [new OrderTerm(payload, OrderDirection.Descending, NullOrder.Last), new OrderTerm(id, nullOrder: NullOrder.First)];
+        var first = new QueryRequest(table, Predicate.AlwaysTrue.Instance, order, Projection.ColumnsOnly(id, payload), Paging.Keyset(2));
+        var token = QueryContinuationToken.Encode(first, QueryRenderOptions.Default,
+            [QueryConstant.Of(payload, "cursor-payload"), QueryConstant.Of(id, "cursor-id")]);
+        var page = new PostgreSqlQueryRenderer().RenderForExecution(
+            new QueryRequest(table, Predicate.AlwaysTrue.Instance, order, Projection.ColumnsOnly(id, payload), Paging.Continuation(token, 2)),
+            QueryRenderOptions.Default, hasLookahead: true);
+
+        var emitted = Assert.IsType<ProviderContinuationPredicate>(Assert.IsType<ProviderBoundedQueryEvidence>(page.Shape).Continuation);
+        Assert.Collection(emitted.Branches,
+            branch =>
+            {
+                Assert.Empty(branch.Equalities);
+                Assert.Equal("payload", branch.Boundary.LogicalColumn);
+                Assert.Equal(ProviderPredicateOperator.UpperBound, branch.Boundary.Operator);
+                Assert.True(branch.BoundaryAdmitsNull);
+            },
+            branch =>
+            {
+                var equality = Assert.Single(branch.Equalities);
+                Assert.Equal("payload", equality.LogicalColumn);
+                Assert.Equal(ProviderPredicateOperator.Equal, equality.Operator);
+                Assert.Equal(ProviderPredicateBindingRole.Continuation, equality.BindingRole);
+                Assert.Equal("id", branch.Boundary.LogicalColumn);
+                Assert.Equal(ProviderPredicateOperator.LowerBound, branch.Boundary.Operator);
+                Assert.False(branch.BoundaryAdmitsNull);
+            });
+        Assert.Contains(" IS NULL)", page.Command.CommandText, StringComparison.Ordinal);
+        Assert.DoesNotContain("cursor-", System.Text.Json.JsonSerializer.Serialize(emitted), StringComparison.Ordinal);
+    }
+
+    /// <summary>#422: a null cursor value orders nulls-first as a non-null test; nulls-last as a contradiction.</summary>
+    [Theory]
+    [InlineData(NullOrder.First, ProviderPredicateOperator.IsNotNull)]
+    [InlineData(NullOrder.Last, ProviderPredicateOperator.None)]
+    public void Null_cursor_boundary_is_a_null_test_or_a_contradiction_without_a_binding(NullOrder nullOrder, ProviderPredicateOperator expected)
+    {
+        var (table, id, payload) = Columns(nullablePayload: true);
+        ImmutableArray<OrderTerm> order = [new OrderTerm(payload, OrderDirection.Ascending, nullOrder), new OrderTerm(id, nullOrder: NullOrder.First)];
+        var first = new QueryRequest(table, Predicate.AlwaysTrue.Instance, order, Projection.ColumnsOnly(id, payload), Paging.Keyset(2));
+        var token = QueryContinuationToken.Encode(first, QueryRenderOptions.Default,
+            [QueryConstant.Of(payload, null), QueryConstant.Of(id, "cursor-id")]);
+        var page = new PostgreSqlQueryRenderer().RenderForExecution(
+            new QueryRequest(table, Predicate.AlwaysTrue.Instance, order, Projection.ColumnsOnly(id, payload), Paging.Continuation(token, 2)),
+            QueryRenderOptions.Default, hasLookahead: true);
+
+        var emitted = Assert.IsType<ProviderContinuationPredicate>(Assert.IsType<ProviderBoundedQueryEvidence>(page.Shape).Continuation);
+        Assert.Equal(expected, emitted.Branches[0].Boundary.Operator);
+        Assert.Null(emitted.Branches[0].Boundary.BindingId);
+        var prefix = Assert.Single(emitted.Branches[1].Equalities);
+        Assert.Equal(ProviderPredicateOperator.IsNull, prefix.Operator);
+        Assert.Null(prefix.BindingId);
+    }
+
+    /// <summary>#422: the native row-value fast path is recorded as one tuple bound over every order term.</summary>
+    [Fact]
+    public void Tuple_continuation_records_one_bound_per_order_term_in_one_direction()
+    {
+        // The row-value fast path needs non-null, index-typed terms in one direction; plain string
+        // terms without a persisted identity stay on the lexicographic path.
+        var table = new TableId("records");
+        var updated = new ColumnRef(table, "updated", QueryType.Int64, isNullable: false);
+        var sequence = new ColumnRef(table, "sequence", QueryType.Int64, isNullable: false);
+        ImmutableArray<OrderTerm> order = [new OrderTerm(updated, OrderDirection.Descending, NullOrder.Last), new OrderTerm(sequence, OrderDirection.Descending, NullOrder.Last)];
+        var index = new QueryIndexDeclaration("by_updated_sequence",
+            [new QueryIndexColumn("updated", false, QueryType.Int64), new QueryIndexColumn("sequence", false, QueryType.Int64)]);
+        var options = new QueryRenderOptions([index], selectedIndex: "by_updated_sequence");
+        var first = new QueryRequest(table, Predicate.AlwaysTrue.Instance, order, Projection.ColumnsOnly(updated, sequence), Paging.Keyset(2));
+        var token = QueryContinuationToken.Encode(first, options, [QueryConstant.Of(updated, 41L), QueryConstant.Of(sequence, 7L)]);
+        var page = new PostgreSqlQueryRenderer().RenderForExecution(
+            new QueryRequest(table, Predicate.AlwaysTrue.Instance, order, Projection.ColumnsOnly(updated, sequence), Paging.Continuation(token, 2)),
+            options, hasLookahead: true);
+
+        Assert.Contains(") < (", page.Command.CommandText, StringComparison.Ordinal);
+        var emitted = Assert.IsType<ProviderContinuationPredicate>(Assert.IsType<ProviderBoundedQueryEvidence>(page.Shape).Continuation);
+        Assert.Equal(ProviderContinuationForm.Tuple, emitted.Form);
+        Assert.Empty(emitted.Branches);
+        Assert.Collection(emitted.TupleBounds,
+            bound => { Assert.Equal("updated", bound.LogicalColumn); Assert.Equal(ProviderPredicateOperator.UpperBound, bound.Operator); Assert.Equal(ProviderPredicateComparison.Exact, bound.Comparison); },
+            bound => { Assert.Equal("sequence", bound.LogicalColumn); Assert.Equal(ProviderPredicateOperator.UpperBound, bound.Operator); });
+        Assert.DoesNotContain("41", System.Text.Json.JsonSerializer.Serialize(emitted), StringComparison.Ordinal);
+        Assert.All(emitted.TupleBounds, bound => Assert.Equal(ProviderPredicateBoundInclusivity.Exclusive, bound.BoundInclusivity));
     }
 
     [Fact]

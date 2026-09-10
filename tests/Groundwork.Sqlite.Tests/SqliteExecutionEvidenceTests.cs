@@ -599,4 +599,45 @@ public sealed class SqliteExecutionEvidenceTests
             CallbackOrder.Clear();
         }
     }
+
+    /// <summary>#422: the shared lexicographic emitter records SQLite's continuation page value-free.</summary>
+    [Fact]
+    public void Continuation_page_records_its_lexicographic_branches_without_values()
+    {
+        var table = new TableId("records");
+        var updated = new ColumnRef(table, "updated", QueryType.Int64, isNullable: true);
+        var id = new ColumnRef(table, "id", QueryType.String, isNullable: false);
+        System.Collections.Immutable.ImmutableArray<OrderTerm> order =
+            [new OrderTerm(updated, OrderDirection.Descending, NullOrder.Last), new OrderTerm(id, nullOrder: NullOrder.First)];
+        var first = new QueryRequest(table, Predicate.AlwaysTrue.Instance, order, Projection.ColumnsOnly(updated, id), Paging.Keyset(2));
+        var token = QueryContinuationToken.Encode(first, QueryRenderOptions.Default, [QueryConstant.Of(updated, 4242L), QueryConstant.Of(id, "cursor-id")]);
+        var page = new SqliteQueryRenderer().RenderForExecution(
+            new QueryRequest(table, Predicate.AlwaysTrue.Instance, order, Projection.ColumnsOnly(updated, id), Paging.Continuation(token, 2)),
+            QueryRenderOptions.Default, hasLookahead: true);
+
+        var shape = Assert.IsType<ProviderBoundedQueryEvidence>(page.Shape);
+        Assert.True(shape.HasContinuation);
+        var emitted = Assert.IsType<ProviderContinuationPredicate>(shape.Continuation);
+        Assert.Equal(ProviderContinuationForm.Lexicographic, emitted.Form);
+        Assert.Collection(emitted.Branches,
+            branch =>
+            {
+                Assert.Empty(branch.Equalities);
+                Assert.Equal("updated", branch.Boundary.LogicalColumn);
+                Assert.Equal(ProviderPredicateOperator.UpperBound, branch.Boundary.Operator);
+                Assert.Equal(ProviderPredicateComparison.Exact, branch.Boundary.Comparison);
+                Assert.True(branch.BoundaryAdmitsNull);
+            },
+            branch =>
+            {
+                Assert.Equal(ProviderPredicateOperator.Equal, Assert.Single(branch.Equalities).Operator);
+                Assert.Equal("id", branch.Boundary.LogicalColumn);
+                Assert.Equal(ProviderPredicateOperator.LowerBound, branch.Boundary.Operator);
+                Assert.Equal(ProviderPredicateComparison.Ordinal, branch.Boundary.Comparison);
+                Assert.False(branch.BoundaryAdmitsNull);
+            });
+        var serialized = System.Text.Json.JsonSerializer.Serialize(shape);
+        Assert.DoesNotContain("4242", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("cursor-id", serialized, StringComparison.Ordinal);
+    }
 }

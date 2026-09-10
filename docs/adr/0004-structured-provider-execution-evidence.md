@@ -189,14 +189,28 @@ This avoids introducing a general-purpose query AST or parser solely for the
 first proof. Broader supported shapes must acquire an explicit complete
 representation before a consumer can admit them.
 
+Since `0.4.0-preview.28`, a keyset continuation page carries its emitted
+continuation predicate as `ProviderBoundedQueryEvidence.Continuation`, a
+`ProviderContinuationPredicate` in one of two forms: the lexicographic
+disjunction the shared and MongoDB renderers emit (branch `i` fixes the first
+`i` order terms with continuation-bound equalities or null tests and bounds
+term `i` with an exclusive bound, a non-null test for a null cursor ordered
+nulls-first, or a contradiction; a bound records whether the provider emitted
+the null alternative beside it), or PostgreSQL's native row-value tuple (one
+exclusive bound per order term in one direction). Null tests and
+contradictions bind no value, so their `BindingId` is null. `HasContinuation`
+is true exactly when that predicate is present; a page that asked for
+continuation but whose predicate could not be represented withholds the whole
+shape. Consumers never reconstruct the predicate from the request or the
+command text.
+
 The SQLite, PostgreSQL and SQL Server page producers support non-null equality/range
 conjunctions and ordinary columns, including exact persisted ordinal-identity
 keys. A unique physical-to-logical mapping identifies the emitted source column;
 conflicting mappings withhold the entire shape regardless of enumeration order.
 Ordering on a distinct mapped physical column records its physical-search-key
 transform, including when the shared order emitter is used. Other transformed
-search keys, element mappings, continuation pages and unmapped forms withhold
-the whole shape.
+search keys, element mappings and unmapped forms withhold the whole shape.
 String comparison and ordering report the emitted ordinal collation. An absent
 null-placement value means that no explicit null-rank expression was emitted;
 it is not a catalog witness of column nullability or uniqueness.

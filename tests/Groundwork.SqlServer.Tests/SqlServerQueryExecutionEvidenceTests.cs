@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Text.Json;
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
@@ -192,6 +193,32 @@ public sealed class SqlServerQueryExecutionEvidenceTests
             Paging.Keyset(2));
 
         Assert.Null(new SqlServerQueryRenderer().RenderForExecution(request, QueryRenderOptions.Default, hasLookahead: true).Shape);
+    }
+
+    /// <summary>
+    /// #422: SQL Server's string boundary admits null rows whenever nulls order last, even on a
+    /// non-nullable column; the evidence records exactly that, alongside the emitted SQL.
+    /// </summary>
+    [Theory]
+    [InlineData(NullOrder.First, false)]
+    [InlineData(NullOrder.Last, true)]
+    public void Continuation_boundary_admits_null_rows_exactly_when_the_rendered_sql_does(NullOrder nullOrder, bool admitsNull)
+    {
+        var (table, id, payload) = Columns(nullablePayload: false);
+        ImmutableArray<OrderTerm> order = [new OrderTerm(payload, OrderDirection.Ascending, nullOrder), new OrderTerm(id, nullOrder: NullOrder.First)];
+        var first = new QueryRequest(table, Predicate.AlwaysTrue.Instance, order, Projection.ColumnsOnly(id, payload), Paging.Keyset(2));
+        var token = QueryContinuationToken.Encode(first, QueryRenderOptions.Default,
+            [QueryConstant.Of(payload, "cursor-payload"), QueryConstant.Of(id, "cursor-id")]);
+        var page = new SqlServerQueryRenderer().RenderForExecution(
+            new QueryRequest(table, Predicate.AlwaysTrue.Instance, order, Projection.ColumnsOnly(id, payload), Paging.Continuation(token, 2)),
+            QueryRenderOptions.Default, hasLookahead: true);
+
+        var emitted = Assert.IsType<ProviderContinuationPredicate>(Assert.IsType<ProviderBoundedQueryEvidence>(page.Shape).Continuation);
+        Assert.Equal(2, emitted.Branches.Length);
+        Assert.Equal(admitsNull, emitted.Branches[0].BoundaryAdmitsNull);
+        Assert.Equal(admitsNull, page.Command.CommandText.Contains("OR [payload] COLLATE Latin1_General_100_BIN2 IS NULL", StringComparison.Ordinal));
+        Assert.Equal(ProviderPredicateOperator.LowerBound, emitted.Branches[0].Boundary.Operator);
+        Assert.DoesNotContain("cursor-", System.Text.Json.JsonSerializer.Serialize(emitted), StringComparison.Ordinal);
     }
 
     private static (TableId Table, ColumnRef Id, ColumnRef Payload) Columns(bool nullablePayload)

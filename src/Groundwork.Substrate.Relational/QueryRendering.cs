@@ -1550,18 +1550,33 @@ public abstract partial class RelationalQueryRenderer
         var alternatives = new List<string>();
         for (var boundary = 0; boundary < order.Count; boundary++)
         {
+            executionShape.Value?.ContinuationBranch();
             var terms = new List<string>();
             for (var prefix = 0; prefix < boundary; prefix++)
             {
                 var prefixTerm = ResolveOrderTerm(order[prefix], options);
                 terms.Add(RenderCursorEquality(prefixTerm.Column, cursor[prefix], parameters, ref parameterIndex, options));
+                executionShape.Value?.ContinuationEquality(prefixTerm.Column, cursor[prefix].Kind == QueryConstantKind.Null);
             }
             var boundaryTerm = ResolveOrderTerm(order[boundary], options);
             terms.Add(RenderAfter(boundaryTerm, cursor[boundary], parameters, ref parameterIndex, options));
+            executionShape.Value?.ContinuationBoundary(boundaryTerm, cursor[boundary].Kind == QueryConstantKind.Null, BoundaryAdmitsNull(boundaryTerm));
             alternatives.Add("(" + string.Join(" AND ", terms) + ")");
         }
         return alternatives.Count == 1 ? alternatives[0] : "(" + string.Join(" OR ", alternatives) + ")";
     }
+
+    /// <summary>Records a provider's native tuple continuation over the order terms in evidence.</summary>
+    protected void EvidenceContinuationTuple(IReadOnlyList<OrderTerm> order) =>
+        executionShape.Value?.ContinuationTuple(order);
+
+    /// <summary>
+    /// Whether this renderer's <see cref="RenderAfter(OrderTerm, QueryConstant, ICollection{QueryRenderParameter}, ref int)"/>
+    /// emits the null alternative beside the strict bound for a non-null cursor. Evidence records this
+    /// fact, so an override must describe exactly what the override of <c>RenderAfter</c> emits.
+    /// </summary>
+    protected virtual bool BoundaryAdmitsNull(OrderTerm term) =>
+        term.Column.IsNullable && term.NullOrder != NullOrder.First;
 
     /// <summary>Allows a provider to render a continuation equality with its resolved mappings.</summary>
     protected virtual string RenderCursorEquality(

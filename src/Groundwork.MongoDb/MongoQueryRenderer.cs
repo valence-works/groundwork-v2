@@ -99,9 +99,10 @@ public sealed class MongoQueryRenderer
             {
                 throw new QueryRenderException("GW-QUERY-013", "The keyset continuation token is invalid: " + exception.Message);
             }
-            evidence?.MarkUnsupported();
             if (!request.Result.IncludesTotalCount && request.LatestPerKey is null && !request.Distinct)
-                filter = And(filter, RenderContinuation(order, cursor, options));
+                filter = And(filter, RenderContinuation(order, cursor, options, evidence: evidence));
+            else
+                evidence?.MarkUnsupported();
         }
 
         var selectedIndex = options.FindPinnedIndex();
@@ -881,15 +882,22 @@ public sealed class MongoQueryRenderer
         IReadOnlyList<OrderTerm> order,
         IReadOnlyList<QueryConstant> cursor,
         QueryRenderOptions options,
-        Func<ColumnRef, string>? fieldPath = null)
+        Func<ColumnRef, string>? fieldPath = null,
+        MongoExecutionEvidenceEmitter? evidence = null)
     {
         var alternatives = new List<BsonDocument>();
         for (var boundary = 0; boundary < order.Count; boundary++)
         {
+            evidence?.RecordContinuationBranch();
             var conjunction = new List<BsonDocument>();
             for (var prefix = 0; prefix < boundary; prefix++)
+            {
                 conjunction.Add(RenderCursorEquality(order[prefix], cursor[prefix], options, fieldPath));
+                evidence?.RecordContinuationEquality(order[prefix], cursor[prefix].Kind == QueryConstantKind.Null);
+            }
             conjunction.Add(RenderAfter(order[boundary], cursor[boundary], options, fieldPath));
+            evidence?.RecordContinuationBoundary(order[boundary], cursor[boundary].Kind == QueryConstantKind.Null,
+                BoundaryAdmitsNull(order[boundary], options, joinedFields: fieldPath is not null));
             alternatives.Add(conjunction.Count == 1
                 ? conjunction[0]
                 : new BsonDocument("$and", new BsonArray(conjunction)));
@@ -974,7 +982,7 @@ public sealed class MongoQueryRenderer
         else
             strict = new BsonDocument(path, new BsonDocument(
                 term.Direction == OrderDirection.Ascending ? "$gt" : "$lt", ToBson(value)));
-        if (term.NullOrder == NullOrder.Last && !SelectedIndexProvesNonNull(term.Column, options, joinedFields))
+        if (BoundaryAdmitsNull(term, options, joinedFields))
             return new BsonDocument("$or", new BsonArray
             {
                 strict,
@@ -982,6 +990,10 @@ public sealed class MongoQueryRenderer
             });
         return strict;
     }
+
+    /// <summary>Whether <see cref="RenderAfter"/> emits the null alternative beside the strict bound; evidence records this fact.</summary>
+    private static bool BoundaryAdmitsNull(OrderTerm term, QueryRenderOptions options, bool joinedFields) =>
+        term.NullOrder == NullOrder.Last && !SelectedIndexProvesNonNull(term.Column, options, joinedFields);
 
     private static BsonValue ToBson(QueryConstant value)
     {

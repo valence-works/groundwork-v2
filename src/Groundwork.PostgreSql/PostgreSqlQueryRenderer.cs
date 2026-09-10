@@ -76,6 +76,8 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
 
         var comparison = order[0].Direction == OrderDirection.Ascending ? ">" : "<";
         var expressions = order.Select(term => RenderColumn(term.Column)).ToArray();
+        // Recorded after the columns render, which is where their comparison semantics enter evidence.
+        EvidenceContinuationTuple(order);
         var values = new string[order.Count];
         for (var index = 0; index < order.Count; index++)
         {
