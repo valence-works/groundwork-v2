@@ -185,6 +185,20 @@ internal static class SqlServerNativePlanMapper
                 node = new ProviderPlanNode(id, parentId, ProviderPlanOperator.Filter);
                 break;
 
+            case "Parallelism":
+                {
+                    // Gather, distribute and repartition streams move the one input's rows between threads
+                    // without changing the row set; an ordered gather merges already-ordered streams on the
+                    // keys the payload reports, which are then the exchange's native sort keys.
+                    if (!TryReadOperatorChildren(source, "Parallelism", out children) || children.Length != 1)
+                        return false;
+                    var exchange = source.Element(ShowPlanNamespace + "Parallelism");
+                    var keys = exchange is null ? null : ReadOrderBy(exchange, source, physicalTarget, logicalColumnsByPhysical);
+                    node = new ProviderPlanNode(id, parentId, ProviderPlanOperator.Exchange, null, null, null, null, null,
+                        keys is null ? null : new ProviderPlanNodeDetails(keys, ProviderPlanLimit.Unknown, null));
+                    break;
+                }
+
             case "Nested Loops":
                 {
                     // A bookmark lookup is the row fetch of its driving seek, not a second source: SQL Server
@@ -623,7 +637,7 @@ internal static class SqlServerNativePlanMapper
     }
 
     private static bool IsOperatorPayload(XElement element) =>
-        element.Name.LocalName is "IndexScan" or "TableScan" or "Sort" or "Top" or "TopSort" or "ComputeScalar" or "Filter" or "NestedLoops";
+        element.Name.LocalName is "IndexScan" or "TableScan" or "Sort" or "Top" or "TopSort" or "ComputeScalar" or "Filter" or "NestedLoops" or "Parallelism";
 
     private static bool TryReadNodeId(XElement source, out int id) =>
         int.TryParse((string?)source.Attribute("NodeId"), out id) && id >= 0;

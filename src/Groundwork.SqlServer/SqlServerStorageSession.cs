@@ -197,7 +197,7 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
         var assert = !query.IsMatchNone && ExplainAssertionMode.ShouldAssert(query.SelectedIndex);
         var collect = collectEvidence && !query.IsMatchNone && query.Statements.Length == 1 && capture is not null;
         var unavailable = collectEvidence
-            ? new ProviderPlanEvidence(ProviderEvidenceAvailability.Unsupported)
+            ? ProviderPlanEvidence.Withheld(query.Statements.Length != 1 ? ProviderPlanWithheldReason.MultipleStatements : ProviderPlanWithheldReason.NotAttempted)
             : ProviderPlanEvidence.NotRequested;
         if (!assert && !collect)
             return new(unavailable);
@@ -248,8 +248,11 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
         var evidence = !collect
             ? unavailable
             : structuredChosen is null && forest is null
-                ? new ProviderPlanEvidence(
-                    ProviderEvidenceAvailability.Unsupported,
+                ? ProviderPlanEvidence.Withheld(
+                    plans.Count != 1 ? ProviderPlanWithheldReason.NoSinglePlan
+                    : catalog is null ? ProviderPlanWithheldReason.NoCatalogWitness
+                    : ambiguousLogicalIndex ? ProviderPlanWithheldReason.AmbiguousIndexNames
+                    : ProviderPlanWithheldReason.UnmappedNativeShape,
                     collectionCommandCount: 4)
                 : new ProviderPlanEvidence(
                     ProviderEvidenceAvailability.Collected,

@@ -168,7 +168,7 @@ internal sealed class MongoExecutionEvidenceCapture
             ? ProviderEvidenceAvailability.Collected
             : ProviderEvidenceAvailability.Unsupported;
         var effectivePlan = plan ?? (Options.CollectNativePlans
-            ? new ProviderPlanEvidence(ProviderEvidenceAvailability.Unsupported)
+            ? ProviderPlanEvidence.Withheld(ProviderPlanWithheldReason.NotAttempted)
             : ProviderPlanEvidence.NotRequested);
         var identity = new ProviderExecutionIdentity(
             CaptureId,
@@ -275,7 +275,7 @@ internal sealed class MongoNativePlanCollectionResult
         new(ProviderPlanEvidence.NotRequested, null, null, false, null, false, null);
 
     internal static MongoNativePlanCollectionResult Unsupported { get; } =
-        new(new ProviderPlanEvidence(ProviderEvidenceAvailability.Unsupported), null, null, false, null, false, null);
+        new(ProviderPlanEvidence.Withheld(ProviderPlanWithheldReason.TransactionScope), null, null, false, null, false, null);
 
     internal static MongoNativePlanCollectionResult Failed(Exception failure, bool legacyAssertionRequested)
     {
@@ -369,9 +369,7 @@ internal sealed class MongoNativePlanCollectionResult
     {
         ArgumentNullException.ThrowIfNull(rawPlan);
         return new(
-            new ProviderPlanEvidence(
-                ProviderEvidenceAvailability.Unsupported,
-                collectionCommandCount: 1),
+            ProviderPlanEvidence.Withheld(ProviderPlanWithheldReason.UnmappedNativeShape, collectionCommandCount: 1),
             legacyAssertionRequested ? logicalIndex : null,
             legacyAssertionRequested ? physicalIndex : null,
             legacyAssertionRequested && hinted,

@@ -252,7 +252,15 @@ Since `0.4.0-preview.26`, the SQL Server mapper reports an index seek on the
 table's primary-key index (the `is_primary_key` index of the catalog witness) as
 `PrimaryKeySearch` with the target and no index identity, the fact SQLite's
 rowid lookup and MongoDB's `_id` search already report; a scan of that index
-stays an `IndexScan`. Since `0.4.0-preview.29`, `MergeOrdered` names a native
+stays an `IndexScan`. Since `0.4.0-preview.30`, `Exchange` names a native parallelism exchange
+(SQL Server's `Parallelism` gather, distribute or repartition streams): one
+input, no target, and an ordered gather's merge keys as native sort keys, so a
+parallel seek-plus-lookup plan maps to the same access facts as its serial
+form. Since `0.4.0-preview.30`, an `Unsupported` plan carries `WithheldReason`, a
+value-free statement of which precondition failed (no attempt, several
+statements, transaction scope, no catalog witness, ambiguous index names, no
+single plan, an unmapped native shape, unmapped columns); withholding stays
+fail-closed, but it is no longer silent. Since `0.4.0-preview.29`, `MergeOrdered` names a native
 streaming merge of ordered inputs (MongoDB's `SORT_MERGE` over the per-branch
 scans of a keyset `$or`); it carries the merge keys as native sort keys, at
 least two inputs, and no target of its own. A consumer that asked for a declared index whose key is

@@ -100,6 +100,21 @@ contradictions carry no binding identity. A consumer
 comparing pages checks the branches against the ordering it asked for and the
 binding roles, never the command text.
 
+## Parallel plans
+
+Since 0.4.0-preview.30 a SQL Server `Parallelism` operator maps to `Exchange`
+(one input, no target); an ordered gather reports its merge keys as native sort
+keys. A consumer treats an exchange as pass-through work and checks reported
+keys against the ordering it asked for, as it does for an ordered merge.
+
+## Withheld plans
+
+Since 0.4.0-preview.30 `ProviderPlanEvidence.WithheldReason` states why an
+`Unsupported` plan was withheld (no attempt, several statements, a transaction
+scope, no catalog witness, ambiguous physical index names, no single replayed
+plan, an unmapped native shape, or unmapped columns). Consumers report it
+beside the availability instead of guessing.
+
 ## Point reads
 
 Since 0.4.0-preview.28 a point read carries a collected native plan when plans

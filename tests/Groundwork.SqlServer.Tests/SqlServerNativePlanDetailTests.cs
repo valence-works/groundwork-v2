@@ -215,6 +215,60 @@ public sealed class SqlServerNativePlanDetailTests
         Assert.Single(nodes, node => node.TargetId is not null);
     }
 
+    /// <summary>
+    /// A parallel plan gathers the lookup join's streams under the Top; an ordered gather reports the
+    /// keys it merges on, which are the statement's ordering, and adds no target of its own.
+    /// </summary>
+    [Fact]
+    public void Ordered_gather_streams_over_the_lookup_join_is_an_exchange_carrying_its_merge_keys()
+    {
+        var forest = Map(Plan(
+            "<StmtSimple StatementType=\"SELECT\"><QueryPlan>" +
+            "<RelOp NodeId=\"0\" PhysicalOp=\"Top\"><Top RowCount=\"0\"><TopExpression><ScalarOperator><Identifier><ColumnReference Column=\"@p2\" /></Identifier></ScalarOperator></TopExpression>" +
+            "<RelOp NodeId=\"2\" PhysicalOp=\"Parallelism\" LogicalOp=\"Gather Streams\" Parallel=\"1\"><Parallelism><OrderBy>" +
+            "<OrderByColumn Ascending=\"1\"><ColumnReference Database=\"[records_db]\" Schema=\"[dbo]\" Table=\"[records]\" Column=\"timestamp\" /></OrderByColumn>" +
+            "<OrderByColumn Ascending=\"1\"><ColumnReference Database=\"[records_db]\" Schema=\"[dbo]\" Table=\"[records]\" Column=\"__groundwork_ordinal_id\" /></OrderByColumn>" +
+            "<OrderByColumn Ascending=\"1\"><ColumnReference Database=\"[records_db]\" Schema=\"[dbo]\" Table=\"[records]\" Column=\"sequence\" /></OrderByColumn></OrderBy>" +
+            "<RelOp NodeId=\"3\" PhysicalOp=\"Nested Loops\" LogicalOp=\"Inner Join\"><NestedLoops Optimized=\"0\" WithOrderedPrefetch=\"1\">" +
+            "<RelOp NodeId=\"5\" PhysicalOp=\"Filter\"><Filter StartupExpression=\"0\">" +
+            "<RelOp NodeId=\"6\" PhysicalOp=\"Index Seek\"><IndexScan Ordered=\"1\"><Object Database=\"[records_db]\" Schema=\"[dbo]\" Table=\"[records]\" Index=\"[PK_records]\" IndexKind=\"NonClustered\" /></IndexScan></RelOp>" +
+            "</Filter></RelOp>" +
+            Lookup(8, "RID Lookup", "<Object Database=\"[records_db]\" Schema=\"[dbo]\" Table=\"[records]\" TableReferenceId=\"-1\" IndexKind=\"Heap\" />") +
+            "</NestedLoops></RelOp></Parallelism></RelOp></Top></RelOp></QueryPlan></StmtSimple>"),
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["__groundwork_ordinal_id"] = "id" });
+
+        var nodes = Assert.IsType<ProviderPlanForest>(forest).Nodes;
+        Assert.Equal(
+            new[] { ProviderPlanOperator.Limit, ProviderPlanOperator.Exchange, ProviderPlanOperator.Materialize, ProviderPlanOperator.Filter, ProviderPlanOperator.IndexSearch, ProviderPlanOperator.Materialize },
+            nodes.Select(node => node.Operation).ToArray());
+        var exchange = nodes[1];
+        Assert.Equal(0, exchange.ParentId);
+        Assert.Null(exchange.TargetId);
+        Assert.Equal(exchange.Id, nodes[2].ParentId);
+        Assert.Collection(Assert.IsType<ProviderPlanNodeDetails>(exchange.Details).NativeSortKeys!.Value,
+            key => Assert.Equal("timestamp", key.LogicalColumn),
+            key => { Assert.Equal("id", key.LogicalColumn); Assert.Equal(new[] { ProviderOrderingTransform.PhysicalSearchKey }, key.Transforms); },
+            key => Assert.Equal("sequence", key.LogicalColumn));
+        Assert.Single(nodes, node => node.TargetId is not null);
+    }
+
+    [Fact]
+    public void Unordered_exchange_carries_no_keys_and_a_two_input_exchange_is_withheld()
+    {
+        var forest = Map(Plan(
+            "<StmtSimple StatementType=\"SELECT\"><QueryPlan>" +
+            "<RelOp NodeId=\"0\" PhysicalOp=\"Parallelism\" LogicalOp=\"Distribute Streams\"><Parallelism>" + Scan(1) + "</Parallelism></RelOp>" +
+            "</QueryPlan></StmtSimple>"));
+        var exchange = Assert.IsType<ProviderPlanForest>(forest).Nodes[0];
+        Assert.Equal(ProviderPlanOperator.Exchange, exchange.Operation);
+        Assert.Null(exchange.Details);
+
+        Assert.Null(Map(Plan(
+            "<StmtSimple StatementType=\"SELECT\"><QueryPlan>" +
+            "<RelOp NodeId=\"0\" PhysicalOp=\"Parallelism\" LogicalOp=\"Gather Streams\"><Parallelism>" + Scan(1) + Scan(2) + "</Parallelism></RelOp>" +
+            "</QueryPlan></StmtSimple>")));
+    }
+
     [Fact]
     public void Key_lookup_on_the_clustered_index_is_the_same_materialization()
     {
