@@ -64,7 +64,7 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
             UserColumns,
             VersionColumnDefinition,
             Command,
-            new SqlServerPointReadAdapter(),
+            new SqlServerPointReadAdapter(this),
             observer,
             "sqlserver",
             evidenceCapture);
@@ -2151,7 +2151,7 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
             execution.Rollback(transaction);
     }
 
-    private sealed class SqlServerPointReadAdapter : IRelationalPointReadAdapter
+    private sealed class SqlServerPointReadAdapter(SqlServerStorageSession session) : IRelationalPointReadAdapter
     {
         public string EvidenceProviderName => "SQL Server";
 
@@ -2178,6 +2178,38 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
         public object? Decode(object value, ColumnDefinition column) => FromSqlServer(value, column);
 
         public string LockingClause(bool forUpdate) => string.Empty;
+
+        public async ValueTask<ProviderPlanEvidence> InspectPointReadPlan(
+            RelationalQueryCommand query, RelationalExecution execution, RelationalEvidenceCapture capture) =>
+            (await session.InspectExecutionPlan(query, session.Unit.CreateQueryRenderOptions(), execution,
+                collectEvidence: true, capture).ConfigureAwait(false)).Evidence;
+
+        /// <summary>Every enabled, unfiltered unique index (the primary key included) on the target, with its key columns in order.</summary>
+        public async ValueTask<ProviderPointReadUniqueness> ObserveUniqueness(
+            StorageUnit unit, IReadOnlyList<string> keyColumns, RelationalExecution execution)
+        {
+            using var catalog = session.Command(
+                "SELECT i.index_id, c.name FROM sys.indexes AS i " +
+                "JOIN sys.tables AS t ON t.object_id = i.object_id " +
+                "JOIN sys.schemas AS s ON s.schema_id = t.schema_id " +
+                "JOIN sys.index_columns AS ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id " +
+                "JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id " +
+                "WHERE s.name = @schema AND t.name = @table AND i.is_unique = 1 AND i.is_disabled = 0 " +
+                "AND i.has_filter = 0 AND ic.key_ordinal > 0 ORDER BY i.index_id, ic.key_ordinal;");
+            catalog.Parameters.Add("@schema", SqlDbType.NVarChar, 128).Value = "dbo";
+            catalog.Parameters.Add("@table", SqlDbType.NVarChar, 128).Value = unit.Name;
+            var keySets = new Dictionary<int, List<string>>();
+            await using var readerScope = await execution.ExecuteReader(catalog).ConfigureAwait(false);
+            var reader = readerScope.Reader;
+            while (await execution.Read(reader).ConfigureAwait(false))
+            {
+                var index = reader.GetInt32(0);
+                if (!keySets.TryGetValue(index, out var columns))
+                    keySets[index] = columns = [];
+                columns.Add(reader.GetString(1));
+            }
+            return RelationalPointReadUniqueness.Observe(keyColumns, keySets.Values);
+        }
     }
 
     private sealed class SqlServerCrudAdapter(

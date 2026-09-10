@@ -80,8 +80,9 @@ public sealed class SqliteExecutionEvidenceTests
         Assert.DoesNotContain("no such table", JsonSerializer.Serialize(evidence), StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>#423: a point read collects its native plan through the query explain seam and the catalog's uniqueness witness.</summary>
     [Fact]
-    public void Point_read_plan_collection_is_explicitly_unsupported_and_does_not_add_legacy_commands()
+    public void Point_read_plan_collection_maps_the_key_search_and_observes_the_enforced_key()
     {
         using var fixture = new Fixture();
         fixture.Observer.EvidenceOptions = ProviderExecutionEvidenceOptions.ShapeAndPlans;
@@ -89,9 +90,17 @@ public sealed class SqliteExecutionEvidenceTests
         fixture.Session.Read(Key(Fixture.SecretKey));
 
         var evidence = Assert.Single(fixture.Observer.Executions);
-        Assert.Equal(ProviderEvidenceAvailability.Unsupported, evidence.Plan.Availability);
-        Assert.Equal(ProviderPointReadUniquenessStatus.NotObserved, evidence.PointRead!.Uniqueness.Status);
+        Assert.Equal(ProviderEvidenceAvailability.Collected, evidence.Plan.Availability);
+        Assert.Equal(ProviderPlanProvenance.EstimatedExplain, evidence.Plan.Provenance);
+        var nodes = evidence.Plan.WinningPlan!.Nodes;
+        var access = Assert.Single(nodes, node => node.TargetId is not null);
+        Assert.Contains(access.Operation, new[] { ProviderPlanOperator.PrimaryKeySearch, ProviderPlanOperator.IndexSearch });
+        var uniqueness = evidence.PointRead!.Uniqueness;
+        Assert.Equal(ProviderPointReadUniquenessStatus.Observed, uniqueness.Status);
+        Assert.Equal(new[] { "id" }, uniqueness.EnforcedKeyColumns.ToArray());
+        Assert.True(uniqueness.IncludesScopeBinding);
         Assert.Single(fixture.Observer.Commands);
+        Assert.DoesNotContain(Fixture.SecretKey, System.Text.Json.JsonSerializer.Serialize(evidence), StringComparison.Ordinal);
     }
 
     [Fact]

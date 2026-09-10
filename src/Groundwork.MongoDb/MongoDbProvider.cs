@@ -3883,7 +3883,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         ProviderPointReadEvidence? shape = null;
         try
         {
-            shape = MongoExecutionEvidenceBuilder.CreatePointRead(Unit, evidenceCapture);
+            shape = MongoExecutionEvidenceBuilder.CreatePointRead(Unit, evidenceCapture, Access.Policy == ScopePolicy.Scoped);
         }
         catch (InvalidOperationException)
         {
@@ -3891,6 +3891,15 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             // structured shape is withheld rather than being reconstructed from BSON.
         }
 
+        // The point read's plan comes through the same explain seam as bounded queries (#423).
+        ProviderPlanEvidence? plan = null;
+        if (evidenceCapture.Options.CollectNativePlans)
+        {
+            var pointReadCommand = new MongoQueryCommand(
+                new BsonDocument("_id", identity), new BsonDocument(), new BsonDocument(),
+                skip: null, limit: 1, hint: null, includesTotalCount: false, isMatchNone: false, appliedOrder: []);
+            plan = (await CollectNativePlan(pointReadCommand, Unit.CreateQueryRenderOptions(), mode).ConfigureAwait(false)).Evidence;
+        }
         BsonDocument? result;
         try
         {
@@ -3911,7 +3920,8 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                     ProviderExecutionOutcome.Cancelled,
                     ProviderExecutionFailureCategory.Cancellation,
                     boundedQuery: null,
-                    pointRead: shape);
+                    pointRead: shape,
+                    plan: plan);
             }
             catch
             {
@@ -3932,7 +3942,8 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                     ProviderExecutionOutcome.Failed,
                     ProviderExecutionFailureCategory.Provider,
                     boundedQuery: null,
-                    pointRead: shape);
+                    pointRead: shape,
+                    plan: plan);
             }
             catch
             {
@@ -3953,7 +3964,8 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             ProviderExecutionOutcome.Succeeded,
             failureCategory: null,
             boundedQuery: null,
-            pointRead: shape);
+            pointRead: shape,
+            plan: plan);
         return result;
     }
 

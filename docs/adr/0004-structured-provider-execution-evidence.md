@@ -110,8 +110,16 @@ value-free key-binding helper used by SQLite. The helper records a binding only
 when explicitly called by the native emitter; default adapter implementations
 remain unsupported. Native equality and lock clauses are unchanged. PostgreSQL
 can report an emitted `FOR UPDATE`, while SQL Server and SQLite report no such
-clause. Their native limit remains absent and enforced uniqueness remains
-unobserved. PostgreSQL also maps its actual bounded equality/range, ordinal-key
+clause. Their native limit remains absent. Since `0.4.0-preview.28` (#423) a
+point read collects its native plan through the same explain seam as bounded
+queries (SQLite `EXPLAIN QUERY PLAN`, where a search through the automatic
+index behind a composite `PRIMARY KEY` maps to `PrimaryKeySearch`; PostgreSQL
+estimated explain; SQL Server replayed showplan; MongoDB `explain`) and reports uniqueness as `Observed` only
+when the provider catalog holds a valid, unfiltered unique index or primary key
+whose columns are exactly the read's key columns, scope included; the witness
+names those enforced columns and whether scope participates. MongoDB's `_id` is
+that witness for the collection the read addresses. Anything else stays
+`NotObserved`; nothing is inferred from the declaration or the materializer. PostgreSQL also maps its actual bounded equality/range, ordinal-key
 ordering, null ranks and shared native paging emission. GUID text-cast ordering
 remains unsupported until its transform is represented. SQL Server maps its
 own equality/range and ordering branches, including the ordinal string-length

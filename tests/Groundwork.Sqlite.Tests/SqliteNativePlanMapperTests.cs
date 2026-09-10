@@ -84,6 +84,23 @@ public sealed class SqliteNativePlanMapperTests
         }
     }
 
+    /// <summary>#423: the automatic index behind a composite PRIMARY KEY is the key search, not an index identity.</summary>
+    [Fact]
+    public void Maps_automatic_primary_key_index_search_as_a_primary_key_search()
+    {
+        var target = new ProviderOpaqueIdentity(Guid.NewGuid());
+        var forest = Map([new(3, 0, "SEARCH records USING INDEX sqlite_autoindex_records_1 (__groundwork_scope=? AND id=?)")],
+            target, _ => new ProviderOpaqueIdentity(Guid.NewGuid()), new Dictionary<string, string>());
+
+        var node = Assert.Single(Assert.IsType<ProviderPlanForest>(forest).Nodes);
+        Assert.Equal(ProviderPlanOperator.PrimaryKeySearch, node.Operation);
+        Assert.Equal(target, node.TargetId);
+        Assert.Null(node.IndexId);
+        Assert.Null(node.LogicalIndexName);
+        Assert.Null(Map([new(3, 0, "SEARCH records USING INDEX sqlite_autoindex_other_1 (id=?)")],
+            target, _ => new ProviderOpaqueIdentity(Guid.NewGuid()), new Dictionary<string, string>()));
+    }
+
     [Fact]
     public void Maps_integer_primary_key_search_without_an_index_identity()
     {

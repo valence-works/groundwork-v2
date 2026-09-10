@@ -77,7 +77,7 @@ public sealed class MongoExecutionEvidenceTests
     }
 
     [Fact]
-    public void Point_read_shape_uses_native_limit_without_claiming_uniqueness()
+    public void Point_read_shape_uses_native_limit_and_reports_the_id_uniqueness_witness()
     {
         var unit = new StorageUnit
         {
@@ -96,7 +96,9 @@ public sealed class MongoExecutionEvidenceTests
 
         Assert.Equal(ProviderNativeBoundKind.Explicit, point.NativeLimit.Kind);
         Assert.Equal(1, point.NativeLimit.Value);
-        Assert.Equal(ProviderPointReadUniquenessStatus.NotObserved, point.Uniqueness.Status);
+        Assert.Equal(ProviderPointReadUniquenessStatus.Observed, point.Uniqueness.Status);
+        Assert.Equal(new[] { "id" }, point.Uniqueness.EnforcedKeyColumns.ToArray());
+        Assert.False(point.Uniqueness.IncludesScopeBinding);
         Assert.True(point.MaterializerReadsAtMostOne);
         Assert.Equal(ProviderScopeBindingMode.PhysicalTarget,
             capture.Target.ScopeBinding);

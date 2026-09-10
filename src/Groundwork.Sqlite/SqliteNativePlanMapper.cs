@@ -174,8 +174,19 @@ internal static class SqliteNativePlanMapper
         var covering = TryReadKeyword(detail, ref position, "COVERING");
         if (!TryReadKeyword(detail, ref position, "INDEX") ||
             !TryReadIdentifier(detail, ref position, out var searchIndex) ||
-            !(search ? TryReadRequiredParenthesizedTail(detail, ref position) : TryReadOptionalParenthesizedTail(detail, ref position)) ||
-            !TryResolveIndex(
+            !(search ? TryReadRequiredParenthesizedTail(detail, ref position) : TryReadOptionalParenthesizedTail(detail, ref position)))
+            return false;
+
+        // A composite PRIMARY KEY on a rowid table is enforced by SQLite's automatic index; a search
+        // through it is the key search itself, not a declared index identity (#423).
+        if (search && searchIndex.StartsWith("sqlite_autoindex_" + physicalTarget + "_", StringComparison.Ordinal))
+        {
+            node = new ProviderPlanNode(id, parentId, ProviderPlanOperator.PrimaryKeySearch, targetId: targetId);
+            isAccess = true;
+            return true;
+        }
+
+        if (!TryResolveIndex(
                 searchIndex,
                 indexIdentity,
                 logicalIndexesByPhysicalName,
