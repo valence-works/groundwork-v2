@@ -68,6 +68,41 @@ public sealed class MongoNativePlanMapperTests
         Assert.DoesNotContain("secret-native-text", string.Join(" ", forest.Nodes));
     }
 
+    /// <summary>The `_id` fast path (classic IDHACK, or the 8.0 express scan that names `_id_`) is one key search of the target.</summary>
+    [Theory]
+    [InlineData("{\"stage\":\"IDHACK\"}")]
+    [InlineData("{\"stage\":\"EXPRESS_IXSCAN\",\"indexName\":\"_id_\"}")]
+    public void Id_fast_path_maps_to_one_primary_key_search(string winningPlan)
+    {
+        var forest = Map(Explain(winningPlan));
+
+        var access = Assert.Single(Assert.IsType<ProviderPlanForest>(forest).Nodes);
+        Assert.Equal(ProviderPlanOperator.PrimaryKeySearch, access.Operation);
+        Assert.Equal(Target, access.TargetId);
+        Assert.Null(access.IndexId);
+        Assert.Null(access.LogicalIndexName);
+        Assert.Null(access.ParentId);
+    }
+
+    [Theory]
+    [InlineData("{\"stage\":\"IDHACK\",\"indexName\":\"_id_\"}")]
+    [InlineData("{\"stage\":\"IDHACK\",\"inputStage\":{\"stage\":\"COLLSCAN\"}}")]
+    [InlineData("{\"stage\":\"EXPRESS_IXSCAN\"}")]
+    public void Malformed_id_fast_path_withholds_the_forest(string winningPlan) =>
+        Assert.Null(Map(Explain(winningPlan)));
+
+    /// <summary>An express scan of another unique index is an index search, not a primary-key search.</summary>
+    [Fact]
+    public void Express_scan_of_a_secondary_index_maps_to_an_index_search()
+    {
+        var forest = Map(Explain("{\"stage\":\"EXPRESS_IXSCAN\",\"indexName\":\"status_1\"}"),
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["status_1"] = "by_status" });
+
+        var access = Assert.Single(Assert.IsType<ProviderPlanForest>(forest).Nodes);
+        Assert.Equal(ProviderPlanOperator.IndexSearch, access.Operation);
+        Assert.Equal("by_status", access.LogicalIndexName);
+    }
+
     [Fact]
     public void Collection_scan_maps_the_actual_target_without_index_claims()
     {

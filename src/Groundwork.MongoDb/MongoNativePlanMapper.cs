@@ -578,6 +578,7 @@ internal static class MongoNativePlanMapper
                 else if (Count(document, "limitAmount") != 0)
                     return false;
             }
+            // A primary-key search carries the target only; the kernel forbids an index identity on it.
             if (operation is ProviderPlanOperator.IndexScan or ProviderPlanOperator.IndexSearch)
             {
                 if (indexName is null)
@@ -613,7 +614,7 @@ internal static class MongoNativePlanMapper
             {
                 var descendants = Descendants(projection.Id).ToArray();
                 var accesses = descendants
-                    .Where(node => node.Operation is ProviderPlanOperator.IndexScan or ProviderPlanOperator.IndexSearch)
+                    .Where(node => node.Operation is ProviderPlanOperator.IndexScan or ProviderPlanOperator.IndexSearch or ProviderPlanOperator.PrimaryKeySearch)
                     .ToArray();
                 if (accesses.Length == 0 || descendants.Any(node => node.Operation == ProviderPlanOperator.Materialize))
                     return false;
@@ -684,6 +685,7 @@ internal static class MongoNativePlanMapper
         {
             ProviderPlanOperator.IndexScan or
                 ProviderPlanOperator.IndexSearch or
+                ProviderPlanOperator.PrimaryKeySearch or
                 ProviderPlanOperator.TableScan => childCount == 0,
             ProviderPlanOperator.Materialize or
                 ProviderPlanOperator.Sort or
@@ -698,7 +700,10 @@ internal static class MongoNativePlanMapper
         private static bool IsLeaf(ProviderPlanOperator operation) => operation is
             ProviderPlanOperator.IndexScan or
             ProviderPlanOperator.IndexSearch or
+            ProviderPlanOperator.PrimaryKeySearch or
             ProviderPlanOperator.TableScan;
+
+        private const string PrimaryKeyIndexName = "_id_";
 
         private static bool TryMapPlanStage(
             BsonDocument document,
@@ -711,6 +716,10 @@ internal static class MongoNativePlanMapper
             {
                 "COLLSCAN" => ProviderPlanOperator.TableScan,
                 "IXSCAN" => ProviderPlanOperator.IndexScan,
+                // The `_id` fast path: classic IDHACK carries no index name, the 8.0 express path
+                // names the index it searches. Either is one key search of the target.
+                "IDHACK" => ProviderPlanOperator.PrimaryKeySearch,
+                "EXPRESS_IXSCAN" => ProviderPlanOperator.IndexSearch,
                 "FETCH" => ProviderPlanOperator.Materialize,
                 "SORT" => ProviderPlanOperator.Sort,
                 "LIMIT" => ProviderPlanOperator.Limit,
@@ -718,7 +727,13 @@ internal static class MongoNativePlanMapper
                 "PROJECTION_SIMPLE" or "PROJECTION_DEFAULT" or "PROJECTION_COVERED" => ProviderPlanOperator.Projection,
                 _ => ProviderPlanOperator.Unknown
             };
-            if (operation is ProviderPlanOperator.IndexScan or ProviderPlanOperator.IndexSearch)
+            if (operation == ProviderPlanOperator.PrimaryKeySearch)
+            {
+                if (Count(document, "indexName") != 0)
+                    return false;
+                indexName = PrimaryKeyIndexName;
+            }
+            else if (operation is ProviderPlanOperator.IndexScan or ProviderPlanOperator.IndexSearch)
             {
                 if (Count(document, "indexName") != 1 ||
                     !document.TryGetValue("indexName", out var indexValue) ||
@@ -726,6 +741,8 @@ internal static class MongoNativePlanMapper
                     string.IsNullOrWhiteSpace(indexValue.AsString))
                     return false;
                 indexName = indexValue.AsString;
+                if (operation == ProviderPlanOperator.IndexSearch && indexName == PrimaryKeyIndexName)
+                    operation = ProviderPlanOperator.PrimaryKeySearch;
             }
 
             if (operation == ProviderPlanOperator.Sort)

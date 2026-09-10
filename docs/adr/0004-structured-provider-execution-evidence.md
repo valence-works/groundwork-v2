@@ -118,7 +118,10 @@ estimated explain; SQL Server replayed showplan; MongoDB `explain`) and reports 
 when the provider catalog holds a valid, unfiltered unique index or primary key
 whose columns are exactly the read's key columns, scope included; the witness
 names those enforced columns and whether scope participates. MongoDB's `_id` is
-that witness for the collection the read addresses. Anything else stays
+that witness for the collection the read addresses, and since `0.4.0-preview.29`
+its explain fast path (classic `IDHACK`, or the 8.0 express scan that names
+`_id_`) maps to `PrimaryKeySearch`, so the `_id` read's plan is `Collected`
+rather than withheld as an unknown stage. Anything else stays
 `NotObserved`; nothing is inferred from the declaration or the materializer. PostgreSQL also maps its actual bounded equality/range, ordinal-key
 ordering, null ranks and shared native paging emission. GUID text-cast ordering
 remains unsupported until its transform is represented. SQL Server maps its
@@ -205,7 +208,10 @@ disjunction the shared and MongoDB renderers emit (branch `i` fixes the first
 term `i` with an exclusive bound, a non-null test for a null cursor ordered
 nulls-first, or a contradiction; a bound records whether the provider emitted
 the null alternative beside it), or PostgreSQL's native row-value tuple (one
-exclusive bound per order term in one direction). Null tests and
+exclusive bound per order term in one direction; since `0.4.0-preview.29` the
+tuple path takes the first declared index exposing the ordered segment when no
+index is nominated, because the planner may answer the lexicographic `OR` with
+a bitmap-or and a sort). Null tests and
 contradictions bind no value, so their `BindingId` is null. `HasContinuation`
 is true exactly when that predicate is present; a page that asked for
 continuation but whose predicate could not be represented withholds the whole

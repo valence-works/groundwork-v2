@@ -292,6 +292,46 @@ public sealed class PostgreSqlQueryExecutionEvidenceTests
         Assert.All(emitted.TupleBounds, bound => Assert.Equal(ProviderPredicateBoundInclusivity.Exclusive, bound.BoundInclusivity));
     }
 
+    /// <summary>
+    /// Without a nominated index the tuple fast path still applies when a declared index exposes the
+    /// ordered segment; a declared index that does not carry it leaves the lexicographic form.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Tuple_continuation_uses_a_declared_index_exposing_the_segment_when_none_is_selected(bool declared)
+    {
+        var table = new TableId("records");
+        var updated = new ColumnRef(table, "updated", QueryType.Int64, isNullable: false);
+        var sequence = new ColumnRef(table, "sequence", QueryType.Int64, isNullable: false);
+        ImmutableArray<OrderTerm> order = [new OrderTerm(updated, OrderDirection.Ascending, NullOrder.Last), new OrderTerm(sequence, OrderDirection.Ascending, NullOrder.Last)];
+        var index = declared
+            ? new QueryIndexDeclaration("by_updated_sequence",
+                [new QueryIndexColumn("category", false, QueryType.String), new QueryIndexColumn("updated", false, QueryType.Int64), new QueryIndexColumn("sequence", false, QueryType.Int64)])
+            : new QueryIndexDeclaration("by_sequence_updated",
+                [new QueryIndexColumn("sequence", false, QueryType.Int64), new QueryIndexColumn("updated", false, QueryType.Int64)]);
+        var options = new QueryRenderOptions([index]);
+        var first = new QueryRequest(table, Predicate.AlwaysTrue.Instance, order, Projection.ColumnsOnly(updated, sequence), Paging.Keyset(2));
+        var token = QueryContinuationToken.Encode(first, options, [QueryConstant.Of(updated, 9876543210L), QueryConstant.Of(sequence, 1234567890L)]);
+        var page = new PostgreSqlQueryRenderer().RenderForExecution(
+            new QueryRequest(table, Predicate.AlwaysTrue.Instance, order, Projection.ColumnsOnly(updated, sequence), Paging.Continuation(token, 2)),
+            options, hasLookahead: true);
+
+        var emitted = Assert.IsType<ProviderContinuationPredicate>(Assert.IsType<ProviderBoundedQueryEvidence>(page.Shape).Continuation);
+        if (declared)
+        {
+            Assert.Contains(") > (", page.Command.CommandText, StringComparison.Ordinal);
+            Assert.Equal(ProviderContinuationForm.Tuple, emitted.Form);
+            Assert.Equal(2, emitted.TupleBounds.Length);
+        }
+        else
+        {
+            Assert.DoesNotContain(") > (", page.Command.CommandText, StringComparison.Ordinal);
+            Assert.Equal(ProviderContinuationForm.Lexicographic, emitted.Form);
+            Assert.Equal(2, emitted.Branches.Length);
+        }
+    }
+
     [Fact]
     public void Declared_non_null_columns_order_without_a_null_rank_when_no_index_is_selected()
     {
