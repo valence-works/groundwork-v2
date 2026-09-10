@@ -1,8 +1,8 @@
 # ADR 0004: Publish provider-owned structured execution evidence
 
-- Status: Proposed; contract and producer-to-consumer proof under review
+- Status: Accepted
 - Date: 2026-09-05
-- Work: #405
+- Work: #405 (shipped in #419)
 - Builds on: [0001](0001-kernel-contract-family-charter.md),
   [0002](0002-physical-storage-is-the-kernel.md),
   [0003](0003-audited-privileged-cross-scope-queries.md)
@@ -22,7 +22,7 @@ of the winning access path. It also obtains a separate plan: SQLite uses
 `EXPLAIN QUERY PLAN`; the other providers may execute a diagnostic replay. Such
 a plan must not be described as telemetry captured from the original read.
 
-## Proposed decision
+## Decision
 
 Groundwork owns a value-free execution-evidence contract. It reports facts about
 provider execution, never application routes, expected workload cardinalities,
@@ -73,8 +73,8 @@ Its `ObserveExecution(ProviderExecutionEvidence evidence)` callback receives a
 terminal immutable observation for each supported issued command, not a
 render-time promise. The observation identifies a capture, invocation and
 command ordinal. Statement-level shapes/plans have ordinals within that command.
-The concrete public signatures are accepted only after the first executable
-consumer proof; this ADR does not represent an already available API.
+The concrete public signatures shipped in #419 (#405); this ADR records that
+available API.
 
 An actual-command outcome and a plan-collection outcome are independent. A
 successful read followed by a failed explain remains a successful read with
