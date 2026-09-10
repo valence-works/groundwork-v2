@@ -169,6 +169,10 @@ public sealed class MongoQueryRenderer
         var projection = request.Projection.AllColumns
             ? new BsonDocument()
             : new BsonDocument(request.Projection.Columns.ToDictionary(column => column.Name, _ => (BsonValue)1));
+        // A total count, latest-per-key or distinct read is not a bounded query shape (ADR 0004), on
+        // MongoDB as on the relational providers; the observation is still published, shape withheld.
+        if (request.Result.IncludesTotalCount || request.LatestPerKey is not null || request.Distinct)
+            evidence?.MarkUnsupported();
         var sort = new BsonDocument(order.Select(term =>
             new BsonElement(term.Column.Name, term.Direction == OrderDirection.Ascending ? 1 : -1)));
         var pipeline = RenderPipeline(physicalCollectionName ?? request.Table.Value, baseFilter, cursor,
