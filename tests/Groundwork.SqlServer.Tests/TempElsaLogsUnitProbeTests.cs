@@ -70,7 +70,7 @@ public sealed class TempElsaLogsUnitProbeTests(SqlServerFixture database, ITestO
         Assert.Equal(127, first.Rows.Count);
         var evidence = observer.Executions.Single(e => e.Operation == ProviderExecutionOperation.BoundedQuery);
         output.WriteLine($"PLAN availability={evidence.Plan.Availability} commands={evidence.Plan.CollectionCommandCount} nodes={(evidence.Plan.WinningPlan is null ? "-" : string.Join(",", evidence.Plan.WinningPlan.Nodes.Select(n => n.Operation)))}");
-        Skip.If(true, "PROBE " + evidence.Plan.Availability);
+        Assert.Equal(ProviderEvidenceAvailability.Collected, evidence.Plan.Availability);
     }
 
     private sealed class Observer : IProviderExecutionObserver
