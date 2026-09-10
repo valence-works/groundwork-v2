@@ -501,12 +501,16 @@ internal static class MongoNativePlanMapper
                         : physical;
                 if (logical is null || logical.Contains('.', StringComparison.Ordinal))
                     return null;
+                // A computed ordinal key and an identity-preserving persisted search key both order the
+                // logical column by its ordinal comparison; only an unmapped physical field stays unknown.
                 terms.Add(new ProviderOrderTerm(
                     logical,
                     direction.Value,
                     null,
                     transforms,
-                    transforms.Contains(ProviderOrderingTransform.OrdinalStringKey) ? ProviderPredicateComparison.Ordinal : ProviderPredicateComparison.Unknown));
+                    transforms.Contains(ProviderOrderingTransform.OrdinalStringKey) || transforms.Contains(ProviderOrderingTransform.PhysicalSearchKey)
+                        ? ProviderPredicateComparison.Ordinal
+                        : ProviderPredicateComparison.Unknown));
             }
             return terms;
         }

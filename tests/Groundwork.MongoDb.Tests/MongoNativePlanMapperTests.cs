@@ -107,9 +107,13 @@ public sealed class MongoNativePlanMapperTests
     [Fact]
     public void Sort_merge_of_index_scans_maps_to_an_ordered_merge_with_its_keys()
     {
-        var forest = Map(Explain(
-            "{\"stage\":\"LIMIT\",\"limitAmount\":128,\"inputStage\":{\"stage\":\"FETCH\",\"inputStage\":{\"stage\":\"SORT_MERGE\",\"sortPattern\":{\"startTime\":1,\"sequence\":1},\"inputStages\":[{\"stage\":\"FETCH\",\"inputStage\":{\"stage\":\"IXSCAN\",\"indexName\":\"trace_1\"}},{\"stage\":\"IXSCAN\",\"indexName\":\"trace_1\"}]}}}"),
-            new Dictionary<string, string>(StringComparer.Ordinal) { ["trace_1"] = "trace_detail" });
+        var forest = MongoNativePlanMapper.Map(
+            Explain("{\"stage\":\"LIMIT\",\"limitAmount\":128,\"inputStage\":{\"stage\":\"FETCH\",\"inputStage\":{\"stage\":\"SORT_MERGE\",\"sortPattern\":{\"startTime\":1,\"__groundwork_ordinal_spanId\":1,\"sequence\":1},\"inputStages\":[{\"stage\":\"FETCH\",\"inputStage\":{\"stage\":\"IXSCAN\",\"indexName\":\"trace_1\"}},{\"stage\":\"IXSCAN\",\"indexName\":\"trace_1\"}]}}}"),
+            "db.scope",
+            Target,
+            _ => new ProviderOpaqueIdentity(Guid.NewGuid()),
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["trace_1"] = "trace_detail" },
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["__groundwork_ordinal_spanId"] = "spanId" });
 
         var nodes = Assert.IsType<ProviderPlanForest>(forest).Nodes;
         Assert.Equal(
@@ -119,7 +123,14 @@ public sealed class MongoNativePlanMapperTests
         Assert.Equal(1, merge.ParentId);
         Assert.Null(merge.TargetId);
         Assert.Collection(Assert.IsType<ProviderPlanNodeDetails>(merge.Details).NativeSortKeys!.Value,
-            key => { Assert.Equal("startTime", key.LogicalColumn); Assert.Equal(Groundwork.Query.Model.OrderDirection.Ascending, key.Direction); },
+            key => { Assert.Equal("startTime", key.LogicalColumn); Assert.Equal(Groundwork.Query.Model.OrderDirection.Ascending, key.Direction); Assert.Empty(key.Transforms); },
+            key =>
+            {
+                // The persisted identity key orders the logical column ordinally, like a computed ordinal key.
+                Assert.Equal("spanId", key.LogicalColumn);
+                Assert.Equal(new[] { ProviderOrderingTransform.PhysicalSearchKey }, key.Transforms);
+                Assert.Equal(ProviderPredicateComparison.Ordinal, key.Comparison);
+            },
             key => { Assert.Equal("sequence", key.LogicalColumn); Assert.Equal(Groundwork.Query.Model.OrderDirection.Ascending, key.Direction); });
         Assert.Equal(merge.Id, nodes[3].ParentId);
         Assert.Equal(merge.Id, nodes[5].ParentId);
