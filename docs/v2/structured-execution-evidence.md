@@ -70,7 +70,7 @@ index coverage; it carries no storage target identity.
 
 ### Native node details
 
-From `0.4.0-preview.26`, `ProviderPlanNode.Details` may carry what the provider actually
+From `0.4.0-preview.27`, `ProviderPlanNode.Details` may carry what the provider actually
 exposed on a sort, top-N sort or limit node: `NativeSortKeys` (logical columns, direction,
 null placement, supported transforms), `NativeLimit` (`Unknown`, `Absent` or `Explicit`
 with a literal value) and `Spill` (observed spilled or not, with provider-reported metrics
@@ -105,7 +105,7 @@ explain output leaves the sort unobserved.
 `ProviderExecutionEvidence.Provider` names the provider and the connected
 server's version on every provider: the relational providers stamp
 `DbConnection.ServerVersion`, and MongoDB stamps the server version resolved once
-from `buildInfo` (0.4.0-preview.26 and later;
+from `buildInfo` (0.4.0-preview.20 and later;
 earlier previews stamped the fixed schema identity `1.0`). A consumer that
 records the server version it probed can require the two to match before
 admitting a capture.
