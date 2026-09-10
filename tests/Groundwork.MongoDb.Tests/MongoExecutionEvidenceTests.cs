@@ -498,6 +498,65 @@ public sealed class MongoExecutionEvidenceTests
         Assert.Equal(1, owner.GuardCalls);
     }
 
+    /// <summary>#422: a continuation page records its lexicographic branches; a nulls-last boundary without a non-null witness admits null rows.</summary>
+    [Fact]
+    public void Renderer_records_the_continuation_branches_of_a_keyset_page()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("mongo-evidence-continuation"),
+            Name = "mongo_evidence_continuation",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "updated", Type = PortableType.Int64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        var id = new ColumnRef(new TableId(unit.Name), "id", QueryType.String, isNullable: false);
+        // Without a non-null witness in the options, MongoDB's nulls-last boundary still emits the
+        // null alternative; the evidence records that emitted fact, not the declaration.
+        var updated = new ColumnRef(new TableId(unit.Name), "updated", QueryType.Int64, isNullable: false);
+        System.Collections.Immutable.ImmutableArray<OrderTerm> order =
+            [new OrderTerm(updated, OrderDirection.Descending, NullOrder.Last), new OrderTerm(id, OrderDirection.Ascending, NullOrder.First)];
+        var first = new QueryRequest(new TableId(unit.Name), Predicate.AlwaysTrue.Instance, order, Projection.ColumnsOnly(id, updated), Paging.Keyset(3));
+        var token = QueryContinuationToken.Encode(first, QueryRenderOptions.Default, [QueryConstant.Of(updated, 4242L), QueryConstant.Of(id, "secret-cursor")]);
+        var request = new QueryRequest(new TableId(unit.Name), Predicate.AlwaysTrue.Instance, order, Projection.ColumnsOnly(id, updated), Paging.Continuation(token, 3));
+        var observer = new RecordingEvidenceObserver();
+        var capture = new MongoExecutionEvidenceCapture(observer, unit, MongoStorageAccess.Global, TestServerVersion);
+
+        var emission = new MongoQueryRenderer().RenderWithEvidence(request, QueryRenderOptions.Default, "physical_collection", capture, hasLookahead: true);
+
+        var shape = Assert.IsType<ProviderBoundedQueryEvidence>(emission.StructuredShape);
+        Assert.True(shape.HasContinuation);
+        var emitted = Assert.IsType<ProviderContinuationPredicate>(shape.Continuation);
+        Assert.Equal(ProviderContinuationForm.Lexicographic, emitted.Form);
+        Assert.Collection(emitted.Branches,
+            branch =>
+            {
+                Assert.Empty(branch.Equalities);
+                Assert.Equal("updated", branch.Boundary.LogicalColumn);
+                Assert.Equal(ProviderPredicateOperator.UpperBound, branch.Boundary.Operator);
+                Assert.Equal(ProviderPredicateComparison.Exact, branch.Boundary.Comparison);
+                Assert.True(branch.BoundaryAdmitsNull);
+            },
+            branch =>
+            {
+                var equality = Assert.Single(branch.Equalities);
+                Assert.Equal("updated", equality.LogicalColumn);
+                Assert.Equal(ProviderPredicateOperator.Equal, equality.Operator);
+                Assert.Equal("id", branch.Boundary.LogicalColumn);
+                Assert.Equal(ProviderPredicateOperator.LowerBound, branch.Boundary.Operator);
+                Assert.Equal(ProviderPredicateComparison.Ordinal, branch.Boundary.Comparison);
+                Assert.False(branch.BoundaryAdmitsNull);
+            });
+        Assert.All(emitted.Branches.SelectMany(branch => branch.Equalities.Append(branch.Boundary)),
+            fact => Assert.Equal(ProviderPredicateBindingRole.Continuation, fact.BindingRole));
+        var serialized = System.Text.Json.JsonSerializer.Serialize(shape);
+        Assert.DoesNotContain("4242", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("secret-cursor", serialized, StringComparison.Ordinal);
+    }
+
     private static StorageUnit CreateSimpleUnit(string name) => new()
     {
         Id = new StorageUnitId(name),

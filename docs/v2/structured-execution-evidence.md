@@ -83,6 +83,19 @@ explain form and `usedDisk` from `executionStats`; SQLite yields sort purpose on
 `ProviderPlanForest.ObservedRootOrder` records the observed order of sibling roots
 (MongoDB pipeline stages) without claiming parentage.
 
+## Continuation pages
+
+Since 0.4.0-preview.28 a keyset continuation page is a supported bounded shape.
+`ProviderBoundedQueryEvidence.Continuation` is the value-free predicate the
+provider emitted for the page: `Lexicographic` (one branch per order term, each
+with the prefix equalities or null tests, then an exclusive bound, a non-null
+test, or a contradiction, and whether the null alternative was emitted beside
+the bound) on SQLite, SQL Server, MongoDB and PostgreSQL's fallback, or `Tuple`
+(one exclusive bound per order term) when PostgreSQL uses its row-value fast
+path. Null tests and contradictions carry no binding identity. A consumer
+comparing pages checks the branches against the ordering it asked for and the
+binding roles, never the command text.
+
 ## Rewritten search keys
 
 A bounded query ordered by a persisted ordinal identity key (a

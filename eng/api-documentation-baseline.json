@@ -37,12 +37,12 @@
       "publicApiMembers": 97
     },
     "Groundwork.Kernel|lib/net10.0/Groundwork.Kernel.dll": {
-      "maximumUndocumentedMembers": 1958,
-      "publicApiMembers": 2343
+      "maximumUndocumentedMembers": 1981,
+      "publicApiMembers": 2377
     },
     "Groundwork.Kernel|lib/net8.0/Groundwork.Kernel.dll": {
-      "maximumUndocumentedMembers": 1958,
-      "publicApiMembers": 2343
+      "maximumUndocumentedMembers": 1981,
+      "publicApiMembers": 2377
     },
     "Groundwork.MongoDb|lib/net10.0/Groundwork.MongoDb.dll": {
       "maximumUndocumentedMembers": 183,
@@ -126,11 +126,11 @@
     },
     "Groundwork.SqlServer|lib/net10.0/Groundwork.SqlServer.dll": {
       "maximumUndocumentedMembers": 42,
-      "publicApiMembers": 48
+      "publicApiMembers": 49
     },
     "Groundwork.SqlServer|lib/net8.0/Groundwork.SqlServer.dll": {
       "maximumUndocumentedMembers": 42,
-      "publicApiMembers": 48
+      "publicApiMembers": 49
     },
     "Groundwork.Sqlite|lib/net10.0/Groundwork.Sqlite.dll": {
       "maximumUndocumentedMembers": 27,
@@ -158,11 +158,11 @@
     },
     "Groundwork.Substrate.Relational|lib/net10.0/Groundwork.Substrate.Relational.dll": {
       "maximumUndocumentedMembers": 446,
-      "publicApiMembers": 558
+      "publicApiMembers": 560
     },
     "Groundwork.Substrate.Relational|lib/net8.0/Groundwork.Substrate.Relational.dll": {
       "maximumUndocumentedMembers": 446,
-      "publicApiMembers": 558
+      "publicApiMembers": 560
     },
     "Groundwork.Testing|lib/net10.0/Groundwork.Testing.dll": {
       "maximumUndocumentedMembers": 196,
@@ -182,8 +182,8 @@
     }
   },
   "publicApiSnapshots": {
-    "net10.0": "950bafd8bdb301117bd7c87c9fd0bdc4de6a6916f26b0986b5227b1019006704",
-    "net8.0": "e6e7a039a01f533cf57d54f4282213cae20ef9c3f7deb2936c2c0906c11aac26"
+    "net10.0": "146c95c7892809cd8f4608f5fe173aa6ad9fb9b7d5c6bb04eee2224b25ede84f",
+    "net8.0": "797fa309cec815fb64851e9947917a7f0c13e230a094d70d9995a473f5a258b5"
   },
   "schemaVersion": 1
 }

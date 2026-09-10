@@ -94,7 +94,13 @@ public enum ProviderPredicateOperator
     Equal,
     In,
     LowerBound,
-    UpperBound
+    UpperBound,
+    /// <summary>A null test on the column; binds no value.</summary>
+    IsNull,
+    /// <summary>A non-null test on the column; binds no value.</summary>
+    IsNotNull,
+    /// <summary>An emitted contradiction (no row can satisfy the branch); binds no value.</summary>
+    None
 }
 
 /// <summary>The comparison or collation semantics emitted for a predicate fact.</summary>
@@ -239,11 +245,14 @@ public sealed record ProviderPredicateFact
         ProviderPredicateComparison comparison,
         ProviderPredicateBoundInclusivity boundInclusivity,
         ProviderPredicateBindingRole bindingRole,
-        ProviderOpaqueIdentity bindingId)
+        ProviderOpaqueIdentity? bindingId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(logicalColumn);
         if (!Enum.IsDefined(@operator) || @operator == ProviderPredicateOperator.Unknown)
             throw new ArgumentOutOfRangeException(nameof(@operator), @operator, "A known predicate operator is required.");
+        var bindsValue = @operator is not (ProviderPredicateOperator.IsNull or ProviderPredicateOperator.IsNotNull or ProviderPredicateOperator.None);
+        if (bindsValue != (bindingId is not null))
+            throw new ArgumentException("Value-comparing predicates carry a binding identity; null tests and contradictions carry none.", nameof(bindingId));
         if (!Enum.IsDefined(valueType))
             throw new ArgumentOutOfRangeException(nameof(valueType));
         if (!Enum.IsDefined(comparison) || comparison == ProviderPredicateComparison.Unknown)
@@ -252,10 +261,11 @@ public sealed record ProviderPredicateFact
             throw new ArgumentOutOfRangeException(nameof(boundInclusivity), boundInclusivity, "Known bound inclusivity is required.");
         if (!Enum.IsDefined(bindingRole) || bindingRole == ProviderPredicateBindingRole.Unknown)
             throw new ArgumentOutOfRangeException(nameof(bindingRole), bindingRole, "A known binding role is required.");
-        if (@operator is ProviderPredicateOperator.Equal or ProviderPredicateOperator.In)
+        if (@operator is ProviderPredicateOperator.Equal or ProviderPredicateOperator.In or
+            ProviderPredicateOperator.IsNull or ProviderPredicateOperator.IsNotNull or ProviderPredicateOperator.None)
         {
             if (boundInclusivity != ProviderPredicateBoundInclusivity.NotApplicable)
-                throw new ArgumentException("Equality and membership predicates do not have a range-bound inclusivity.", nameof(boundInclusivity));
+                throw new ArgumentException("Only range predicates have a range-bound inclusivity.", nameof(boundInclusivity));
         }
         else if (boundInclusivity == ProviderPredicateBoundInclusivity.NotApplicable)
         {
@@ -268,7 +278,7 @@ public sealed record ProviderPredicateFact
         Comparison = comparison;
         BoundInclusivity = boundInclusivity;
         BindingRole = bindingRole;
-        BindingId = bindingId ?? throw new ArgumentNullException(nameof(bindingId));
+        BindingId = bindingId;
     }
 
     public string LogicalColumn { get; }
@@ -277,7 +287,105 @@ public sealed record ProviderPredicateFact
     public ProviderPredicateComparison Comparison { get; }
     public ProviderPredicateBoundInclusivity BoundInclusivity { get; }
     public ProviderPredicateBindingRole BindingRole { get; }
-    public ProviderOpaqueIdentity BindingId { get; }
+    /// <summary>Null for null tests and contradictions, which bind no value.</summary>
+    public ProviderOpaqueIdentity? BindingId { get; }
+}
+
+/// <summary>How a keyset continuation predicate was emitted.</summary>
+public enum ProviderContinuationForm
+{
+    Unknown,
+    /// <summary>A disjunction of lexicographic branches: branch <c>i</c> fixes the first <c>i</c> order terms and bounds term <c>i</c>.</summary>
+    Lexicographic,
+    /// <summary>One native row-value (tuple) comparison over every order term.</summary>
+    Tuple
+}
+
+/// <summary>
+/// One lexicographic keyset branch: equalities on the order prefix, then the boundary on the next
+/// order term. A boundary that admits null rows records that the provider emitted the null
+/// alternative alongside the strict bound.
+/// </summary>
+public sealed record ProviderContinuationBranch
+{
+    public ProviderContinuationBranch(
+        IEnumerable<ProviderPredicateFact> equalities,
+        ProviderPredicateFact boundary,
+        bool boundaryAdmitsNull)
+    {
+        Equalities = (equalities ?? throw new ArgumentNullException(nameof(equalities))).ToImmutableArray();
+        Boundary = boundary ?? throw new ArgumentNullException(nameof(boundary));
+        if (Equalities.Any(fact => fact is null))
+            throw new ArgumentException("Branch equalities cannot contain null references.", nameof(equalities));
+        if (Equalities.Any(fact => fact.BindingRole != ProviderPredicateBindingRole.Continuation ||
+                fact.Operator is not (ProviderPredicateOperator.Equal or ProviderPredicateOperator.IsNull)))
+            throw new ArgumentException("Branch equalities are continuation-bound equalities or null tests.", nameof(equalities));
+        if (Boundary.BindingRole != ProviderPredicateBindingRole.Continuation)
+            throw new ArgumentException("The branch boundary is continuation-bound.", nameof(boundary));
+        var bounded = Boundary.Operator is ProviderPredicateOperator.LowerBound or ProviderPredicateOperator.UpperBound;
+        if (!bounded && Boundary.Operator is not (ProviderPredicateOperator.IsNotNull or ProviderPredicateOperator.None))
+            throw new ArgumentException("The branch boundary is a strict bound, a non-null test or a contradiction.", nameof(boundary));
+        if (bounded && Boundary.BoundInclusivity != ProviderPredicateBoundInclusivity.Exclusive)
+            throw new ArgumentException("A keyset boundary is exclusive.", nameof(boundary));
+        if (boundaryAdmitsNull && !bounded)
+            throw new ArgumentException("Only a bounded boundary can admit null rows.", nameof(boundaryAdmitsNull));
+        BoundaryAdmitsNull = boundaryAdmitsNull;
+    }
+
+    public ImmutableArray<ProviderPredicateFact> Equalities { get; }
+    public ProviderPredicateFact Boundary { get; }
+    public bool BoundaryAdmitsNull { get; }
+}
+
+/// <summary>
+/// The value-free keyset continuation predicate a provider emitted for a page: either the
+/// lexicographic disjunction (one branch per order term) or one native tuple comparison whose
+/// bounds are the order terms in order. Consumers never reconstruct this from the request.
+/// </summary>
+public sealed record ProviderContinuationPredicate
+{
+    private ProviderContinuationPredicate(
+        ProviderContinuationForm form,
+        ImmutableArray<ProviderContinuationBranch> branches,
+        ImmutableArray<ProviderPredicateFact> tupleBounds)
+    {
+        Form = form;
+        Branches = branches;
+        TupleBounds = tupleBounds;
+    }
+
+    public static ProviderContinuationPredicate Lexicographic(IEnumerable<ProviderContinuationBranch> branches)
+    {
+        var snapshot = (branches ?? throw new ArgumentNullException(nameof(branches))).ToImmutableArray();
+        if (snapshot.Length == 0 || snapshot.Any(branch => branch is null))
+            throw new ArgumentException("A lexicographic continuation has at least one non-null branch.", nameof(branches));
+        for (var index = 0; index < snapshot.Length; index++)
+        {
+            if (snapshot[index].Equalities.Length != index)
+                throw new ArgumentException($"Branch {index} must fix exactly {index} order terms before its boundary.", nameof(branches));
+        }
+        return new(ProviderContinuationForm.Lexicographic, snapshot, []);
+    }
+
+    public static ProviderContinuationPredicate Tuple(IEnumerable<ProviderPredicateFact> bounds)
+    {
+        var snapshot = (bounds ?? throw new ArgumentNullException(nameof(bounds))).ToImmutableArray();
+        if (snapshot.Length < 2 || snapshot.Any(bound => bound is null))
+            throw new ArgumentException("A tuple continuation bounds at least two order terms.", nameof(bounds));
+        var @operator = snapshot[0].Operator;
+        if (@operator is not (ProviderPredicateOperator.LowerBound or ProviderPredicateOperator.UpperBound) ||
+            snapshot.Any(bound => bound.Operator != @operator ||
+                bound.BoundInclusivity != ProviderPredicateBoundInclusivity.Exclusive ||
+                bound.BindingRole != ProviderPredicateBindingRole.Continuation))
+            throw new ArgumentException("Tuple bounds are exclusive continuation-bound bounds in one direction.", nameof(bounds));
+        return new(ProviderContinuationForm.Tuple, [], snapshot);
+    }
+
+    public ProviderContinuationForm Form { get; }
+    /// <summary>The lexicographic branches in emitted order; empty for the tuple form.</summary>
+    public ImmutableArray<ProviderContinuationBranch> Branches { get; }
+    /// <summary>The tuple's bounds in order-term order; empty for the lexicographic form.</summary>
+    public ImmutableArray<ProviderPredicateFact> TupleBounds { get; }
 }
 
 /// <summary>Complete conjunction-only predicate evidence. Unsupported Boolean shapes have no instance.</summary>
@@ -384,9 +492,13 @@ public sealed record ProviderBoundedQueryEvidence
         ProviderNativeBound nativeLimit,
         bool hasContinuation,
         bool hasLookahead,
-        bool includesTotalCount)
+        bool includesTotalCount,
+        ProviderContinuationPredicate? continuation = null)
     {
         Predicate = predicate ?? throw new ArgumentNullException(nameof(predicate));
+        // A represented continuation is the only continuation a bounded shape can attest to.
+        if (hasContinuation != (continuation is not null))
+            throw new ArgumentException("A continuation page carries its emitted continuation predicate, and only then.", nameof(continuation));
         Ordering = (ordering ?? throw new ArgumentNullException(nameof(ordering))).ToImmutableArray();
         if (Ordering.Any(term => term is null))
             throw new ArgumentException("Ordering terms cannot contain null references.", nameof(ordering));
@@ -401,6 +513,7 @@ public sealed record ProviderBoundedQueryEvidence
         HasContinuation = hasContinuation;
         HasLookahead = hasLookahead;
         IncludesTotalCount = includesTotalCount;
+        Continuation = continuation;
     }
 
     public ProviderConjunctionPredicate Predicate { get; }
@@ -411,6 +524,8 @@ public sealed record ProviderBoundedQueryEvidence
     public bool HasContinuation { get; }
     public bool HasLookahead { get; }
     public bool IncludesTotalCount { get; }
+    /// <summary>The emitted keyset continuation predicate; null when the page is the first page.</summary>
+    public ProviderContinuationPredicate? Continuation { get; }
 
     private static void ValidateBound(ProviderNativeBound bound, string parameterName, bool allowZero)
     {
@@ -449,7 +564,7 @@ public sealed record ProviderPointReadKeyBound
         LogicalColumn = logicalColumn;
         ValueType = valueType;
         BindingRole = bindingRole;
-        BindingId = bindingId ?? throw new ArgumentNullException(nameof(bindingId));
+        BindingId = bindingId;
     }
 
     public string? LogicalColumn { get; }

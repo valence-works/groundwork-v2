@@ -101,13 +101,18 @@ public abstract partial class RelationalQueryRenderer
         private readonly HashSet<string> withheldColumns = new(StringComparer.Ordinal);
         private ProviderNativeBound offset = ProviderNativeBound.Absent;
         private ProviderNativeBound limit = ProviderNativeBound.Absent;
+        private bool continuationRequested;
+        private readonly List<ProviderContinuationBranch> continuationBranches = [];
+        private List<ProviderPredicateFact>? branchEqualities;
+        private ProviderContinuationPredicate? continuation;
 
         internal void Begin(QueryRequest request, QueryRenderOptions options)
         {
             began = true;
+            continuationRequested = request.Paging.ContinuationToken is not null;
             if (request.Join is not null || request.Result is not ResultShape.Rows ||
                 request.Result.IncludesTotalCount || request.LatestPerKey is not null || request.Distinct ||
-                request.Paging.ContinuationToken is not null || request.Paging.Limit is null)
+                request.Paging.Limit is null)
                 Unsupported();
             // Only an ordinal identity (or ordinary) mapping orders and compares by the logical column's own
             // ordinal order, so only those are recorded as logical columns. A unit may declare other search
@@ -167,6 +172,77 @@ public abstract partial class RelationalQueryRenderer
                 new(Guid.NewGuid())));
         }
 
+        /// <summary>Opens the next lexicographic keyset branch; its equalities follow, then its boundary.</summary>
+        internal void ContinuationBranch()
+        {
+            if (branchEqualities is not null || continuation is not null)
+                Unsupported();
+            branchEqualities = [];
+        }
+
+        internal void ContinuationEquality(ColumnRef column, bool nullCursor)
+        {
+            if (branchEqualities is null || ContinuationFact(column, nullCursor ? ProviderPredicateOperator.IsNull : ProviderPredicateOperator.Equal) is not { } fact)
+            {
+                Unsupported();
+                return;
+            }
+            branchEqualities.Add(fact);
+        }
+
+        /// <summary>
+        /// Closes the open branch with its boundary: a strict bound in the term's direction (optionally
+        /// admitting null rows), a non-null test for a null cursor ordered nulls-first, or a contradiction.
+        /// </summary>
+        internal void ContinuationBoundary(OrderTerm term, bool nullCursor, bool admitsNull)
+        {
+            var @operator = nullCursor
+                ? term.NullOrder == NullOrder.First ? ProviderPredicateOperator.IsNotNull : ProviderPredicateOperator.None
+                : term.Direction == OrderDirection.Ascending ? ProviderPredicateOperator.LowerBound : ProviderPredicateOperator.UpperBound;
+            if (branchEqualities is null || ContinuationFact(term.Column, @operator) is not { } boundary)
+            {
+                Unsupported();
+                return;
+            }
+            continuationBranches.Add(new ProviderContinuationBranch(branchEqualities, boundary, admitsNull && !nullCursor));
+            branchEqualities = null;
+        }
+
+        /// <summary>Records one native tuple comparison over the order terms, in order.</summary>
+        internal void ContinuationTuple(IReadOnlyList<OrderTerm> order)
+        {
+            if (branchEqualities is not null || continuation is not null || continuationBranches.Count != 0 || order.Count < 2)
+            {
+                Unsupported();
+                return;
+            }
+            var @operator = order[0].Direction == OrderDirection.Ascending ? ProviderPredicateOperator.LowerBound : ProviderPredicateOperator.UpperBound;
+            var bounds = new List<ProviderPredicateFact>();
+            foreach (var term in order)
+            {
+                if (ContinuationFact(term.Column, @operator) is not { } bound)
+                {
+                    Unsupported();
+                    return;
+                }
+                bounds.Add(bound);
+            }
+            continuation = ProviderContinuationPredicate.Tuple(bounds);
+        }
+
+        private ProviderPredicateFact? ContinuationFact(ColumnRef column, ProviderPredicateOperator @operator)
+        {
+            var comparison = Comparison(column);
+            if (comparison == ProviderPredicateComparison.Unknown)
+                return null;
+            var bindsValue = @operator is not (ProviderPredicateOperator.IsNull or ProviderPredicateOperator.IsNotNull or ProviderPredicateOperator.None);
+            var inclusivity = @operator is ProviderPredicateOperator.LowerBound or ProviderPredicateOperator.UpperBound
+                ? ProviderPredicateBoundInclusivity.Exclusive
+                : ProviderPredicateBoundInclusivity.NotApplicable;
+            return new(LogicalColumn(column), @operator, column.Type, comparison, inclusivity,
+                ProviderPredicateBindingRole.Continuation, bindsValue ? new(Guid.NewGuid()) : null);
+        }
+
         internal void Selection(ColumnRef column)
         {
             if (!allColumns)
@@ -217,8 +293,19 @@ public abstract partial class RelationalQueryRenderer
         internal void Limit(int value) => limit = ProviderNativeBound.Explicit(value);
         internal void Offset(int value) => offset = ProviderNativeBound.Explicit(value);
 
-        internal ProviderBoundedQueryEvidence? Build() => !began || !supported || !pagingEmitted ? null : new(
-            new(predicates), ordering, new(allColumns, projection), offset, limit,
-            hasContinuation: false, hasLookahead: hasLookahead, includesTotalCount: false);
+        internal ProviderBoundedQueryEvidence? Build()
+        {
+            if (!began || !supported || !pagingEmitted || branchEqualities is not null)
+                return null;
+            if (continuation is null && continuationBranches.Count != 0)
+                continuation = ProviderContinuationPredicate.Lexicographic(continuationBranches);
+            // A page that asked for continuation but emitted no represented predicate fails closed.
+            if (continuationRequested != (continuation is not null))
+                return null;
+            return new(
+                new(predicates), ordering, new(allColumns, projection), offset, limit,
+                hasContinuation: continuation is not null, hasLookahead: hasLookahead, includesTotalCount: false,
+                continuation);
+        }
     }
 }

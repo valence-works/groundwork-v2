@@ -166,6 +166,62 @@ public sealed class SqlServerBoundedExecutionEvidenceLiveTests(SqlServerFixture 
         Assert.Contains(forest.Nodes, node => node.Operation is ProviderPlanOperator.Limit or ProviderPlanOperator.TopNSort);
     }
 
+    /// <summary>
+    /// #422: paging through the scoped catalog with keyset continuation returns every row exactly once
+    /// and the second page carries the emitted continuation predicate, value-free.
+    /// </summary>
+    [SkippableFact]
+    public void Continuation_page_reports_its_emitted_predicate_and_pages_cover_every_row_once()
+    {
+        using var fixture = new Fixture(database);
+        var options = fixture.Unit.CreateQueryRenderOptions();
+        var first = fixture.Session.Query(Query(fixture.Unit), options);
+        Assert.Equal(2, first.Rows.Count);
+        Assert.NotNull(first.NextContinuationToken);
+
+        var request = Query(fixture.Unit);
+        var second = fixture.Session.Query(
+            new QueryRequest(request.Table, request.Where, request.Order, request.Projection, Paging.Continuation(first.NextContinuationToken!, 2)),
+            options);
+        Assert.Single(second.Rows);
+        Assert.Null(second.NextContinuationToken);
+        var ids = first.Rows.Concat(second.Rows).Select(row => (string)row["id"]!).ToArray();
+        Assert.Equal(new[] { "a-null", "a-ready", "a-zulu" }, ids);
+
+        var evidence = fixture.Observer.Executions.Last();
+        Assert.Equal(ProviderExecutionOutcome.Succeeded, evidence.Outcome);
+        Assert.Equal(ProviderEvidenceAvailability.Collected, evidence.ShapeAvailability);
+        var shape = Assert.IsType<ProviderBoundedQueryEvidence>(evidence.BoundedQuery);
+        Assert.True(shape.HasContinuation);
+        var continuation = Assert.IsType<ProviderContinuationPredicate>(shape.Continuation);
+        Assert.Equal(ProviderContinuationForm.Lexicographic, continuation.Form);
+        Assert.Collection(continuation.Branches,
+            branch =>
+            {
+                Assert.Empty(branch.Equalities);
+                Assert.Equal("status", branch.Boundary.LogicalColumn);
+                Assert.Equal(ProviderPredicateOperator.LowerBound, branch.Boundary.Operator);
+                Assert.Equal(ProviderPredicateComparison.Ordinal, branch.Boundary.Comparison);
+                Assert.Equal(ProviderPredicateBindingRole.Continuation, branch.Boundary.BindingRole);
+                Assert.False(branch.BoundaryAdmitsNull);
+            },
+            branch =>
+            {
+                var equality = Assert.Single(branch.Equalities);
+                Assert.Equal("status", equality.LogicalColumn);
+                Assert.Equal(ProviderPredicateOperator.Equal, equality.Operator);
+                Assert.Equal(ProviderPredicateBindingRole.Continuation, equality.BindingRole);
+                Assert.Equal("id", branch.Boundary.LogicalColumn);
+                Assert.Equal(ProviderPredicateOperator.LowerBound, branch.Boundary.Operator);
+                Assert.False(branch.BoundaryAdmitsNull);
+            });
+        var serialized = JsonSerializer.Serialize(evidence);
+        Assert.DoesNotContain("a-ready", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("ready", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain(Fixture.ScopeA, serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain(Fixture.Category, serialized, StringComparison.Ordinal);
+    }
+
     private static QueryRequest Query(StorageUnit unit)
     {
         var table = new TableId(unit.Name);
