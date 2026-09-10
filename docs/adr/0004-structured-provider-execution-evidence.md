@@ -73,8 +73,8 @@ Its `ObserveExecution(ProviderExecutionEvidence evidence)` callback receives a
 terminal immutable observation for each supported issued command, not a
 render-time promise. The observation identifies a capture, invocation and
 command ordinal. Statement-level shapes/plans have ordinals within that command.
-The concrete public signatures are accepted only after the first executable
-consumer proof; this ADR does not represent an already available API.
+The concrete public signatures shipped in #419 (#405); this ADR records that
+available API.
 
 An actual-command outcome and a plan-collection outcome are independent. A
 successful read followed by a failed explain remains a successful read with
