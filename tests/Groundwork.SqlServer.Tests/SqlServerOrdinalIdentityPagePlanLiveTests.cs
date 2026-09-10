@@ -3,17 +3,16 @@ using Groundwork.LiveDatabases;
 using Groundwork.Query.Model;
 using Groundwork.Store;
 using Xunit;
-using Xunit.Abstractions;
 
 namespace Groundwork.SqlServer.Tests;
 
 /// <summary>
 /// A unit ordering through a persisted ordinal identity without a nominated index (#443) collects a native
 /// plan on its first page and on every keyset continuation page; the shape mirrors a consumer's log unit
-/// whose route predicate column is nullable.
+/// whose route predicate column is nullable and which declares two ordinal-identity indexes.
 /// </summary>
 [Collection(SqlServerLiveDatabase.Name)]
-public sealed class SqlServerOrdinalIdentityPagePlanLiveTests(SqlServerFixture database, ITestOutputHelper output)
+public sealed class SqlServerOrdinalIdentityPagePlanLiveTests(SqlServerFixture database)
 {
     [SkippableFact]
     public void Un_nominated_ordinal_identity_pages_collect_their_native_plans()
@@ -55,23 +54,6 @@ public sealed class SqlServerOrdinalIdentityPagePlanLiveTests(SqlServerFixture d
                 ["body"] = "body",
                 ["timestamp"] = new DateTimeOffset(2026, 9, 10, 0, 0, index, TimeSpan.Zero)
             })).Status);
-        // A consumer's fixture trace carries every retained row: the route predicate matches the whole unit.
-        var rows = int.TryParse(Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_PAGE_PLAN_ROWS"), out var parsed) ? parsed : 100_000;
-        if (rows > 0)
-        {
-            using var raw = new Microsoft.Data.SqlClient.SqlConnection(connectionString);
-            raw.Open();
-            using var seed = raw.CreateCommand();
-            seed.CommandTimeout = 1800;
-            seed.CommandText = $"""
-                WITH n AS (SELECT TOP ({rows}) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS i FROM sys.all_objects a CROSS JOIN sys.all_objects b CROSS JOIN sys.all_objects c)
-                INSERT INTO [{unit.Name}] ([id], [payload], [traceKey], [body], [timestamp], [__groundwork_ordinal_id], [__groundwork_scope])
-                SELECT CONCAT('seed-', i), 'p', 'trace-1', 'body', DATEADD(SECOND, i % 86400, CAST('2026-09-10T00:00:00+00:00' AS datetimeoffset)), CONCAT('seed-', i), '{(string)ScopeValue(session)}' FROM n;
-                UPDATE STATISTICS [{unit.Name}];
-                """;
-            seed.ExecuteNonQuery();
-        }
-
         var table = new TableId(unit.Name);
         var traceKey = new ColumnRef(table, "traceKey", QueryType.String, isNullable: true, maxLength: 64);
         var id = new ColumnRef(table, "id", QueryType.String, isNullable: false, maxLength: 128);
@@ -95,52 +77,16 @@ public sealed class SqlServerOrdinalIdentityPagePlanLiveTests(SqlServerFixture d
         var second = session.Query(
             new QueryRequest(table, request.Where, request.Order, request.Projection, Paging.Continuation(first.NextContinuationToken!, 2)),
             options);
-        Assert.NotEmpty(second.Rows);
+        Assert.Single(second.Rows);
 
-        foreach (var command in observer.Commands)
-            output.WriteLine("COMMAND " + command.Operation + ": " + command.CommandText);
         var pages = observer.Executions.Where(evidence => evidence.Operation == ProviderExecutionOperation.BoundedQuery).ToArray();
-        foreach (var evidence in pages)
-            output.WriteLine($"PLAN availability={evidence.Plan.Availability} commands={evidence.Plan.CollectionCommandCount} nodes={(evidence.Plan.WinningPlan is null ? "-" : string.Join(",", evidence.Plan.WinningPlan.Nodes.Select(node => node.Operation)))}");
-        foreach (var command in observer.Commands.Where(command => command.Operation == "sqlserver.query"))
-        {
-            try
-            {
-                using var raw = new Microsoft.Data.SqlClient.SqlConnection(connectionString);
-                raw.Open();
-                using (var on = raw.CreateCommand()) { on.CommandText = "SET SHOWPLAN_XML ON"; on.ExecuteNonQuery(); }
-                using var explain = raw.CreateCommand();
-                var text = command.CommandText;
-                string TypeOf(string parameter) =>
-                    System.Text.RegularExpressions.Regex.IsMatch(text, "FETCH NEXT " + parameter + " ROWS") ? "int = 128"
-                    : System.Text.RegularExpressions.Regex.IsMatch(text, "\\[timestamp\\] (>|=|<) " + parameter + "\\b") ? "datetimeoffset = '2026-09-10T00:00:05+00:00'"
-                    : System.Text.RegularExpressions.Regex.IsMatch(text, "\\[sequence\\] (>|=|<) " + parameter + "\\b") ? "bigint = 3"
-                    : "nvarchar(128) = N'x'";
-                var declarations = string.Join(" ", System.Text.RegularExpressions.Regex.Matches(text, "@p(\\d+)\\b")
-                    .Select(match => match.Value).Distinct()
-                    .Select(parameter => $"DECLARE {parameter} {TypeOf(parameter)};"));
-                explain.CommandText = declarations + " " + text;
-                var xml = (string)explain.ExecuteScalar()!;
-                var ops = System.Xml.Linq.XDocument.Parse(xml).Descendants().Where(element => element.Name.LocalName == "RelOp")
-                    .Select(element => element.Attribute("NodeId")?.Value + ":" + element.Attribute("PhysicalOp")?.Value + "/" + element.Attribute("LogicalOp")?.Value +
-                        "[" + string.Join(",", element.Elements().Where(child => child.Name.LocalName != "OutputList").Select(child => child.Name.LocalName)) + "]" +
-                        "(" + string.Join(",", element.Descendants().Where(child => child.Name.LocalName == "Object").Take(2).Select(o => o.Attribute("Index")?.Value ?? "-")) + ")");
-                output.WriteLine("SHOWPLAN " + string.Join(" > ", ops));
-            }
-            catch (Exception exception)
-            {
-                output.WriteLine("SHOWPLAN failed: " + exception.Message);
-            }
-        }
+        Assert.Equal(2, pages.Length);
         Assert.All(pages, evidence =>
         {
             Assert.Equal(ProviderExecutionOutcome.Succeeded, evidence.Outcome);
             Assert.Equal(ProviderEvidenceAvailability.Collected, evidence.Plan.Availability);
         });
-        Skip.If(Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_PAGE_PLAN_PROBE") is null, "PROBE: " + string.Join(" | ", observer.Executions.Where(e => e.Operation == ProviderExecutionOperation.BoundedQuery).Select(e => e.Plan.Availability.ToString())));
     }
-
-    private static object ScopeValue(IOwnedStorageSession session) => "scope-a";
 
     private sealed class Observer : IProviderExecutionObserver
     {

@@ -78,7 +78,7 @@ internal sealed class RelationalSessionQueries
                 ? ProviderScopeBindingMode.Predicate : ProviderScopeBindingMode.Unscoped);
         var provider = evidenceObserver is null ? null : new ProviderIdentity(renderer.ExecutionProviderName, connection.ServerVersion);
         var plan = evidenceOptions?.CollectNativePlans == true
-            ? new ProviderPlanEvidence(ProviderEvidenceAvailability.Unsupported) : ProviderPlanEvidence.NotRequested;
+            ? ProviderPlanEvidence.Withheld(ProviderPlanWithheldReason.NotAttempted) : ProviderPlanEvidence.NotRequested;
         Observe("query", command);
         var outcome = ProviderExecutionOutcome.Failed;
         ProviderExecutionFailureCategory? failure = ProviderExecutionFailureCategory.Provider;

@@ -212,7 +212,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         var assert = !query.IsMatchNone && ExplainAssertionMode.ShouldAssert(query.SelectedIndex);
         var collect = collectEvidence && !query.IsMatchNone && query.Statements.Length == 1;
         var unavailable = collectEvidence
-            ? new ProviderPlanEvidence(ProviderEvidenceAvailability.Unsupported)
+            ? ProviderPlanEvidence.Withheld(query.Statements.Length != 1 ? ProviderPlanWithheldReason.MultipleStatements : ProviderPlanWithheldReason.NotAttempted)
             : ProviderPlanEvidence.NotRequested;
         if (!assert && !collect)
             return new(unavailable);
@@ -277,8 +277,8 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         var evidence = !collect
             ? unavailable
             : structuredChosen is null && forest is null
-                ? new ProviderPlanEvidence(
-                    ProviderEvidenceAvailability.Unsupported,
+                ? ProviderPlanEvidence.Withheld(
+                    string.IsNullOrWhiteSpace(physicalSchema) ? ProviderPlanWithheldReason.NoCatalogWitness : ProviderPlanWithheldReason.UnmappedNativeShape,
                     collectionCommandCount: collectionCommands)
                 : new ProviderPlanEvidence(
                     ProviderEvidenceAvailability.Collected,

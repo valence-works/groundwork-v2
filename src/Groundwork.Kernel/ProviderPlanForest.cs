@@ -29,7 +29,13 @@ public enum ProviderPlanOperator
     /// <summary>A native stage retaining input rows that satisfy a predicate; no predicate values or selectivity are implied.</summary>
     Filter,
     /// <summary>A native streaming merge of already-ordered inputs on the merge keys it reports; no blocking sort is implied.</summary>
-    MergeOrdered
+    MergeOrdered,
+    /// <summary>
+    /// A native parallelism exchange that gathers, distributes or repartitions its one input's rows across
+    /// threads without changing the row set; an ordered gather merges already-ordered streams on the keys
+    /// it reports. No target and no blocking sort are implied.
+    /// </summary>
+    Exchange
 }
 
 /// <summary>The purpose of a sort when the native plan identifies it.</summary>
@@ -180,8 +186,8 @@ public sealed record ProviderPlanNode
         if (details is not null)
         {
             if (details.NativeSortKeys is not null &&
-                operation is not (ProviderPlanOperator.Sort or ProviderPlanOperator.TopNSort or ProviderPlanOperator.MergeOrdered))
-                throw new ArgumentException("Native sort keys require a sort or ordered-merge node.", nameof(details));
+                operation is not (ProviderPlanOperator.Sort or ProviderPlanOperator.TopNSort or ProviderPlanOperator.MergeOrdered or ProviderPlanOperator.Exchange))
+                throw new ArgumentException("Native sort keys require a sort, ordered-merge or exchange node.", nameof(details));
             if (details.NativeLimit.Kind != ProviderNativeBoundKind.Unknown &&
                 operation is not (ProviderPlanOperator.Limit or ProviderPlanOperator.TopNSort))
                 throw new ArgumentException("A native limit requires a limiting node.", nameof(details));

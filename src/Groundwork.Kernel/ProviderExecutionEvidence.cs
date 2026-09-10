@@ -646,6 +646,32 @@ public sealed record ProviderPointReadEvidence
 }
 
 /// <summary>Native-plan facts, intentionally limited to typed provider-owned facts.</summary>
+/// <summary>
+/// Why a provider withheld a requested native plan. Every value is a structural fact about the
+/// collection attempt, never a query value; <see cref="Unknown"/> is reserved for evidence written
+/// before the reason was recorded.
+/// </summary>
+public enum ProviderPlanWithheldReason
+{
+    Unknown,
+    /// <summary>The provider does not collect plans for this operation or key shape.</summary>
+    NotAttempted,
+    /// <summary>The rendered command carries more than one statement, so no single plan describes it.</summary>
+    MultipleStatements,
+    /// <summary>The read ran inside a transaction the provider's explain seam cannot join.</summary>
+    TransactionScope,
+    /// <summary>The provider catalog returned no witness for the statement target.</summary>
+    NoCatalogWitness,
+    /// <summary>Two logical index declarations resolve to one physical index name, so no index fact can be attributed.</summary>
+    AmbiguousIndexNames,
+    /// <summary>The explain replay returned no plan, or more than one plan, for the one statement.</summary>
+    NoSinglePlan,
+    /// <summary>The native plan tree contains an operator, shape or reference the mapper does not close over.</summary>
+    UnmappedNativeShape,
+    /// <summary>A rendered column has no logical mapping, so the plan's references could not be attributed.</summary>
+    UnmappedColumns
+}
+
 public sealed record ProviderPlanEvidence
 {
     public ProviderPlanEvidence(
@@ -656,10 +682,15 @@ public sealed record ProviderPlanEvidence
         ProviderOpaqueIdentity? chosenPhysicalIndexId = null,
         ProviderExecutionFailureCategory? failureCategory = null,
         int? collectionCommandCount = null,
-        ProviderPlanForest? winningPlan = null)
+        ProviderPlanForest? winningPlan = null,
+        ProviderPlanWithheldReason? withheldReason = null)
     {
         if (!Enum.IsDefined(availability))
             throw new ArgumentOutOfRangeException(nameof(availability));
+        if (withheldReason is { } reason && (!Enum.IsDefined(reason) || reason == ProviderPlanWithheldReason.Unknown))
+            throw new ArgumentOutOfRangeException(nameof(withheldReason));
+        if (withheldReason is not null && availability != ProviderEvidenceAvailability.Unsupported)
+            throw new ArgumentException("A withheld reason requires unsupported plan evidence.", nameof(withheldReason));
         if (provenance is { } value && (!Enum.IsDefined(value) || value == ProviderPlanProvenance.Unknown))
             throw new ArgumentOutOfRangeException(nameof(provenance));
         if ((availability is ProviderEvidenceAvailability.Unknown or ProviderEvidenceAvailability.NotRequested or ProviderEvidenceAvailability.Unsupported) && provenance is not null)
@@ -694,9 +725,14 @@ public sealed record ProviderPlanEvidence
         FailureCategory = failureCategory;
         CollectionCommandCount = collectionCommandCount;
         WinningPlan = winningPlan;
+        WithheldReason = withheldReason;
     }
 
     public static ProviderPlanEvidence NotRequested { get; } = new(ProviderEvidenceAvailability.NotRequested);
+
+    /// <summary>Unsupported plan evidence whose reason is a structural fact about the collection attempt.</summary>
+    public static ProviderPlanEvidence Withheld(ProviderPlanWithheldReason reason, int? collectionCommandCount = null) =>
+        new(ProviderEvidenceAvailability.Unsupported, collectionCommandCount: collectionCommandCount, withheldReason: reason);
 
     public ProviderEvidenceAvailability Availability { get; }
     public ProviderPlanProvenance? Provenance { get; }
@@ -711,6 +747,8 @@ public sealed record ProviderPlanEvidence
     public int? CollectionCommandCount { get; }
     /// <summary>The completely mapped native winning-plan operator structure; null means unknown, not empty.</summary>
     public ProviderPlanForest? WinningPlan { get; }
+    /// <summary>Why the plan was withheld when <see cref="Availability"/> is <see cref="ProviderEvidenceAvailability.Unsupported"/>; null on older evidence.</summary>
+    public ProviderPlanWithheldReason? WithheldReason { get; }
 }
 
 /// <summary>Options for the additive structured execution observer.</summary>

@@ -123,7 +123,7 @@ internal sealed class RelationalSessionPointReads
                     new RelationalQueryCommand(command.CommandText, renderParameters, includesTotalCount: false,
                         isMatchNone: false, selectedIndex: null, indexHintApplied: false, appliedOrder: []),
                     execution, evidenceCapture!).ConfigureAwait(false)
-                : new ProviderPlanEvidence(ProviderEvidenceAvailability.Unsupported)
+                : ProviderPlanEvidence.Withheld(ProviderPlanWithheldReason.UnmappedColumns)
             : ProviderPlanEvidence.NotRequested;
 
         observer?.Observe(new ProviderCommandEvent(
@@ -214,7 +214,7 @@ internal interface IRelationalPointReadAdapter
     /// </summary>
     ValueTask<ProviderPlanEvidence> InspectPointReadPlan(
         RelationalQueryCommand query, RelationalExecution execution, RelationalEvidenceCapture capture) =>
-        new(new ProviderPlanEvidence(ProviderEvidenceAvailability.Unsupported));
+        new(ProviderPlanEvidence.Withheld(ProviderPlanWithheldReason.NotAttempted));
 
     /// <summary>
     /// Observes from the provider catalog whether a unique index or primary key enforces exactly the

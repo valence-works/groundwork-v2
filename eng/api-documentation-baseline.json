@@ -38,11 +38,11 @@
     },
     "Groundwork.Kernel|lib/net10.0/Groundwork.Kernel.dll": {
       "maximumUndocumentedMembers": 1981,
-      "publicApiMembers": 2378
+      "publicApiMembers": 2392
     },
     "Groundwork.Kernel|lib/net8.0/Groundwork.Kernel.dll": {
       "maximumUndocumentedMembers": 1981,
-      "publicApiMembers": 2378
+      "publicApiMembers": 2392
     },
     "Groundwork.MongoDb|lib/net10.0/Groundwork.MongoDb.dll": {
       "maximumUndocumentedMembers": 183,
@@ -182,8 +182,8 @@
     }
   },
   "publicApiSnapshots": {
-    "net10.0": "0d2987f71094b98404aadefe1d17a9b7b569d78f3189a4054882e4f45f057430",
-    "net8.0": "34a2cc55fa40590ca65056a2fc7570457eab264788728d7df1ffdfa5823f8d43"
+    "net10.0": "4bb2d4aec2bde701d0760459dd18fb797bae440045435b15f32dad4739c8d5b8",
+    "net8.0": "86c477d89a4e5af1214bb9eeb7b90f63144ca7b149645f6c69e40683d8de16af"
   },
   "schemaVersion": 1
 }

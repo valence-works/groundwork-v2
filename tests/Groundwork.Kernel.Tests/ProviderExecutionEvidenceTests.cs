@@ -365,3 +365,30 @@ public sealed class ProviderExecutionEvidenceTests
         ])).ParamName);
     }
 }
+
+public sealed class ProviderPlanWithheldReasonTests
+{
+    [Fact]
+    public void Withheld_plan_evidence_names_its_structural_reason_and_command_count()
+    {
+        var evidence = ProviderPlanEvidence.Withheld(ProviderPlanWithheldReason.NoSinglePlan, collectionCommandCount: 4);
+
+        Assert.Equal(ProviderEvidenceAvailability.Unsupported, evidence.Availability);
+        Assert.Equal(ProviderPlanWithheldReason.NoSinglePlan, evidence.WithheldReason);
+        Assert.Equal(4, evidence.CollectionCommandCount);
+        Assert.Null(evidence.Provenance);
+        Assert.Null(evidence.WinningPlan);
+    }
+
+    [Fact]
+    public void A_withheld_reason_requires_unsupported_evidence_and_a_defined_value()
+    {
+        Assert.Throws<ArgumentException>(() => new ProviderPlanEvidence(
+            ProviderEvidenceAvailability.NotRequested, withheldReason: ProviderPlanWithheldReason.NotAttempted));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new ProviderPlanEvidence(
+            ProviderEvidenceAvailability.Unsupported, withheldReason: ProviderPlanWithheldReason.Unknown));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new ProviderPlanEvidence(
+            ProviderEvidenceAvailability.Unsupported, withheldReason: (ProviderPlanWithheldReason)99));
+        Assert.Null(new ProviderPlanEvidence(ProviderEvidenceAvailability.Unsupported).WithheldReason);
+    }
+}

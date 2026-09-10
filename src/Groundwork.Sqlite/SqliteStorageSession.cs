@@ -284,7 +284,8 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         var assert = !query.IsMatchNone && ExplainAssertionMode.ShouldAssert(query.SelectedIndex);
         var collect = collectEvidence && !query.IsMatchNone && query.Statements.Length == 1;
         var unavailable = collectEvidence
-            ? new ProviderPlanEvidence(ProviderEvidenceAvailability.Unsupported) : ProviderPlanEvidence.NotRequested;
+            ? ProviderPlanEvidence.Withheld(query.Statements.Length != 1 ? ProviderPlanWithheldReason.MultipleStatements : ProviderPlanWithheldReason.NotAttempted)
+            : ProviderPlanEvidence.NotRequested;
         if (!assert && !collect)
             return new(unavailable);
         var logicalIndex = query.SelectedIndex;
@@ -317,7 +318,9 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
             nativeRows, Unit.Name, capture!.Target(Unit, ProviderScopeBindingMode.Unknown).PhysicalTargetId,
             capture.Index, PhysicalIndexNames().ToDictionary(pair => pair.Value, pair => pair.Key, StringComparer.Ordinal)) : null;
         var evidence = !collect ? unavailable : chosen is null && forest is null
-            ? new ProviderPlanEvidence(ProviderEvidenceAvailability.Unsupported, collectionCommandCount: plans.Count)
+            ? ProviderPlanEvidence.Withheld(
+                !mappedColumns ? ProviderPlanWithheldReason.UnmappedColumns : ProviderPlanWithheldReason.UnmappedNativeShape,
+                collectionCommandCount: plans.Count)
             : new ProviderPlanEvidence(
                 ProviderEvidenceAvailability.Collected, ProviderPlanProvenance.EstimatedExplain,
                 choseExpectedIndex: chosen, expectedLogicalIndex: logicalIndex,
