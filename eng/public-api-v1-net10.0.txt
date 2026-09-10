@@ -621,6 +621,7 @@ Groundwork.Kernel: field [Public, Static, Literal, HasDefault] Groundwork.Kernel
 Groundwork.Kernel: field [Public, Static, Literal, HasDefault] Groundwork.Kernel.ProviderPlanOperator [nullability: NotNull/NotNull] Groundwork.Kernel.ProviderPlanOperator.IndexSearch = 1
 Groundwork.Kernel: field [Public, Static, Literal, HasDefault] Groundwork.Kernel.ProviderPlanOperator [nullability: NotNull/NotNull] Groundwork.Kernel.ProviderPlanOperator.Limit = 7
 Groundwork.Kernel: field [Public, Static, Literal, HasDefault] Groundwork.Kernel.ProviderPlanOperator [nullability: NotNull/NotNull] Groundwork.Kernel.ProviderPlanOperator.Materialize = 6
+Groundwork.Kernel: field [Public, Static, Literal, HasDefault] Groundwork.Kernel.ProviderPlanOperator [nullability: NotNull/NotNull] Groundwork.Kernel.ProviderPlanOperator.MergeOrdered = 15
 Groundwork.Kernel: field [Public, Static, Literal, HasDefault] Groundwork.Kernel.ProviderPlanOperator [nullability: NotNull/NotNull] Groundwork.Kernel.ProviderPlanOperator.Offset = 12
 Groundwork.Kernel: field [Public, Static, Literal, HasDefault] Groundwork.Kernel.ProviderPlanOperator [nullability: NotNull/NotNull] Groundwork.Kernel.ProviderPlanOperator.PrimaryKeySearch = 4
 Groundwork.Kernel: field [Public, Static, Literal, HasDefault] Groundwork.Kernel.ProviderPlanOperator [nullability: NotNull/NotNull] Groundwork.Kernel.ProviderPlanOperator.Projection = 11
