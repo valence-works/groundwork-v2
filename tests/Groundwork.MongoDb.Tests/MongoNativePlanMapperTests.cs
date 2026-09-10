@@ -103,6 +103,40 @@ public sealed class MongoNativePlanMapperTests
         Assert.Equal("by_status", access.LogicalIndexName);
     }
 
+    /// <summary>A keyset `$or` explodes into one bounded scan per branch merged on the sort pattern (SORT_MERGE): an ordered merge, not a blocking sort.</summary>
+    [Fact]
+    public void Sort_merge_of_index_scans_maps_to_an_ordered_merge_with_its_keys()
+    {
+        var forest = Map(Explain(
+            "{\"stage\":\"LIMIT\",\"limitAmount\":128,\"inputStage\":{\"stage\":\"FETCH\",\"inputStage\":{\"stage\":\"SORT_MERGE\",\"sortPattern\":{\"startTime\":1,\"sequence\":1},\"inputStages\":[{\"stage\":\"FETCH\",\"inputStage\":{\"stage\":\"IXSCAN\",\"indexName\":\"trace_1\"}},{\"stage\":\"IXSCAN\",\"indexName\":\"trace_1\"}]}}}"),
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["trace_1"] = "trace_detail" });
+
+        var nodes = Assert.IsType<ProviderPlanForest>(forest).Nodes;
+        Assert.Equal(
+            new[] { ProviderPlanOperator.Limit, ProviderPlanOperator.Materialize, ProviderPlanOperator.MergeOrdered, ProviderPlanOperator.Materialize, ProviderPlanOperator.IndexScan, ProviderPlanOperator.IndexScan },
+            nodes.Select(node => node.Operation).ToArray());
+        var merge = nodes[2];
+        Assert.Equal(1, merge.ParentId);
+        Assert.Null(merge.TargetId);
+        Assert.Collection(Assert.IsType<ProviderPlanNodeDetails>(merge.Details).NativeSortKeys!.Value,
+            key => { Assert.Equal("startTime", key.LogicalColumn); Assert.Equal(Groundwork.Query.Model.OrderDirection.Ascending, key.Direction); },
+            key => { Assert.Equal("sequence", key.LogicalColumn); Assert.Equal(Groundwork.Query.Model.OrderDirection.Ascending, key.Direction); });
+        Assert.Equal(merge.Id, nodes[3].ParentId);
+        Assert.Equal(merge.Id, nodes[5].ParentId);
+        Assert.All(nodes.Where(node => node.Operation == ProviderPlanOperator.IndexScan), scan =>
+        {
+            Assert.Equal(Target, scan.TargetId);
+            Assert.Equal("trace_detail", scan.LogicalIndexName);
+        });
+    }
+
+    [Theory]
+    [InlineData("{\"stage\":\"SORT_MERGE\",\"sortPattern\":{\"startTime\":1},\"inputStages\":[{\"stage\":\"IXSCAN\",\"indexName\":\"trace_1\"}]}")]
+    [InlineData("{\"stage\":\"SORT_MERGE\",\"inputStages\":[{\"stage\":\"IXSCAN\",\"indexName\":\"trace_1\"},{\"stage\":\"IXSCAN\",\"indexName\":\"trace_1\"}]}")]
+    [InlineData("{\"stage\":\"SORT_MERGE\",\"sortPattern\":{\"startTime\":\"asc\"},\"inputStages\":[{\"stage\":\"IXSCAN\",\"indexName\":\"trace_1\"},{\"stage\":\"IXSCAN\",\"indexName\":\"trace_1\"}]}")]
+    public void Malformed_sort_merge_withholds_the_forest(string winningPlan) =>
+        Assert.Null(Map(Explain(winningPlan), new Dictionary<string, string>(StringComparer.Ordinal) { ["trace_1"] = "trace_detail" }));
+
     [Fact]
     public void Collection_scan_maps_the_actual_target_without_index_claims()
     {

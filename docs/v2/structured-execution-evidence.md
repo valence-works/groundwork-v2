@@ -93,7 +93,9 @@ test, or a contradiction, and whether the null alternative was emitted beside
 the bound) on SQLite, SQL Server, MongoDB and PostgreSQL's fallback, or `Tuple`
 (one exclusive bound per order term) when PostgreSQL uses its row-value fast
 path; since 0.4.0-preview.29 that path no longer needs a nominated index and
-takes the first declared index exposing the ordered segment. Null tests and
+takes the first declared index exposing the ordered segment. MongoDB may plan
+the lexicographic page as a `MergeOrdered` of one index scan per branch (its
+`SORT_MERGE`), whose native sort keys are the page's ordering. Null tests and
 contradictions carry no binding identity. A consumer
 comparing pages checks the branches against the ordering it asked for and the
 binding roles, never the command text.

@@ -252,7 +252,10 @@ Since `0.4.0-preview.26`, the SQL Server mapper reports an index seek on the
 table's primary-key index (the `is_primary_key` index of the catalog witness) as
 `PrimaryKeySearch` with the target and no index identity, the fact SQLite's
 rowid lookup and MongoDB's `_id` search already report; a scan of that index
-stays an `IndexScan`. A consumer that asked for a declared index whose key is
+stays an `IndexScan`. Since `0.4.0-preview.29`, `MergeOrdered` names a native
+streaming merge of ordered inputs (MongoDB's `SORT_MERGE` over the per-branch
+scans of a keyset `$or`); it carries the merge keys as native sort keys, at
+least two inputs, and no target of its own. A consumer that asked for a declared index whose key is
 the unit's own key can therefore recognise the provider's equivalent choice.
 
 Since `0.4.0-preview.25`, the SQL Server mapper admits one join shape: a

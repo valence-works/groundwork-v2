@@ -571,6 +571,15 @@ internal static class MongoNativePlanMapper
                 }
                 node.Details = Details(keys, limit, ReadSpill(document));
             }
+            else if (operation == ProviderPlanOperator.MergeOrdered)
+            {
+                if (Count(document, "sortPattern") != 1 ||
+                    !document.TryGetValue("sortPattern", out var mergePattern) ||
+                    !mergePattern.IsBsonDocument ||
+                    ReadSortKeys(mergePattern.AsBsonDocument) is not { } mergeKeys)
+                    return false;
+                node.Details = Details(mergeKeys, ProviderPlanLimit.Unknown, ReadSpill(document));
+            }
             else if (operation == ProviderPlanOperator.Limit)
             {
                 if (TryReadPositiveLiteral(document, "limitAmount", out var literal))
@@ -694,6 +703,7 @@ internal static class MongoNativePlanMapper
                 ProviderPlanOperator.Compute or
                 ProviderPlanOperator.Projection or
                 ProviderPlanOperator.Offset => childCount == 1,
+            ProviderPlanOperator.MergeOrdered => childCount >= 2,
             _ => false
         };
 
@@ -722,6 +732,9 @@ internal static class MongoNativePlanMapper
                 "EXPRESS_IXSCAN" => ProviderPlanOperator.IndexSearch,
                 "FETCH" => ProviderPlanOperator.Materialize,
                 "SORT" => ProviderPlanOperator.Sort,
+                // The planner explodes a keyset `$or` into one bounded scan per branch and merges them
+                // on the sort pattern without a blocking sort.
+                "SORT_MERGE" => ProviderPlanOperator.MergeOrdered,
                 "LIMIT" => ProviderPlanOperator.Limit,
                 "SKIP" => ProviderPlanOperator.Offset,
                 "PROJECTION_SIMPLE" or "PROJECTION_DEFAULT" or "PROJECTION_COVERED" => ProviderPlanOperator.Projection,
