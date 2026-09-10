@@ -12,9 +12,9 @@ nuget.org run. To intentionally publish an exact version to nuget.org, dispatch 
 release tag and repeat the version in both inputs:
 
 ```bash
-gh workflow run publish-nuget.yml --ref v0.4.0-preview.28 \
-  -f version=0.4.0-preview.28 \
-  -f publish=true -f confirm=0.4.0-preview.28
+gh workflow run publish-nuget.yml --ref v0.4.0-preview.29 \
+  -f version=0.4.0-preview.29 \
+  -f publish=true -f confirm=0.4.0-preview.29
 ```
 
 The dispatch still runs the full package/test, layout, clean-room, integrity, credential, symbol,
