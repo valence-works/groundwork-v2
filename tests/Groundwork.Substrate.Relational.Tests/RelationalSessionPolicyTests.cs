@@ -84,6 +84,48 @@ public sealed class RelationalSessionPolicyTests
         Assert.Contains("Non-nullable column 'value' is required", required.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>#443: without a nomination the persisted identity is the route whenever a declared identity index carries it.</summary>
+    [Fact]
+    public void Ordinal_identity_orders_through_its_persisted_key_without_a_selected_index_when_a_declared_index_carries_it()
+    {
+        var declared = StorageUnit.Declare("policy-ordinal-free", "policy_ordinal_free")
+            .Int32("id", column => column.Required())
+            .String("name", 32, column => column.Required().OrdinalIdentity("__groundwork_ordinal_name"))
+            .Key("id")
+            .Index("by_name", index => index.UseOrdinalIdentities().Column("name"))
+            .Index("by_name_order", index => index.Column("name").Column("id"))
+            .Build();
+        var covered = SearchKeyQueryMappings.For(SearchKeyProjection.Expand(declared), selectedIndex: null)["name"];
+        Assert.Equal("__groundwork_ordinal_name", covered.PhysicalColumn);
+        Assert.True(covered.PreservesOrdinalIdentity);
+        Assert.True(covered.OrderByPhysicalColumn);
+
+        var ordinaryOnly = StorageUnit.Declare("policy-ordinal-plain", "policy_ordinal_plain")
+            .Int32("id", column => column.Required())
+            .String("name", 32, column => column.Required().OrdinalIdentity("__groundwork_ordinal_name"))
+            .Key("id")
+            .Index("by_name_order", index => index.Column("name").Column("id"))
+            .Build();
+        var plain = SearchKeyQueryMappings.For(SearchKeyProjection.Expand(ordinaryOnly), selectedIndex: null)["name"];
+        Assert.Equal("name", plain.PhysicalColumn);
+        Assert.False(plain.PreservesOrdinalIdentity);
+
+        // An ordinary selected route still keeps the logical column its index covers.
+        var ordinary = SearchKeyQueryMappings.For(SearchKeyProjection.Expand(declared), selectedIndex: "by_name_order")["name"];
+        Assert.Equal("name", ordinary.PhysicalColumn);
+
+        // Options built from the logical declaration still learn that the persisted key is non-null.
+        var name = new ColumnRef(new TableId(declared.Name), "name", QueryType.String, false, 32);
+        var prepared = RelationalSessionPolicy.PrepareQuery(
+            SearchKeyProjection.Expand(declared),
+            StorageAccess.Global,
+            new QueryRequest(new TableId(declared.Name), Predicate.AlwaysTrue.Instance, [new OrderTerm(name, OrderDirection.Ascending, NullOrder.First)], Projection.ColumnsOnly(name), Paging.None),
+            declared.CreateQueryRenderOptions(selectedIndex: null),
+            new Dictionary<string, string>());
+        Assert.Contains("__groundwork_ordinal_name", prepared.RenderOptions.NonNullColumns);
+        Assert.Equal("__groundwork_ordinal_name", prepared.RenderOptions.SearchKeyColumns["name"].PhysicalColumn);
+    }
+
     [Fact]
     public void Query_session_uses_the_schema_ordinal_identity_mapping_over_caller_options()
     {

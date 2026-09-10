@@ -11,8 +11,11 @@ public static class SearchKeyQueryMappings
         For(unit, selectedIndex: null);
 
     /// <summary>
-    /// Builds mappings for the selected physical route. Ordinal identities are exposed only when
-    /// that route contains the persisted identity; ordinary routes retain logical equality/order.
+    /// Builds mappings for the selected physical route. Ordinal identities are exposed when that
+    /// route contains the persisted identity, or, when no route is selected, when any declared
+    /// index that uses ordinal identities contains it, so the provider's optimizer can serve the
+    /// identity's equality and order from that index without a nomination (#443). An ordinary
+    /// selected route retains logical equality/order, which is what its index covers.
     /// </summary>
     public static IReadOnlyDictionary<string, QuerySearchKeyColumn> For(
         StorageUnit unit,
@@ -22,9 +25,14 @@ public static class SearchKeyQueryMappings
         var selectedPhysicalIndex = selectedIndex is null
             ? null
             : unit.Indexes.SingleOrDefault(index => string.Equals(index.Name, selectedIndex, StringComparison.Ordinal));
-        var selectedPhysicalColumns = selectedPhysicalIndex?.UseOrdinalIdentities == true
-            ? selectedPhysicalIndex.Columns.Select(column => column.Column).ToHashSet(StringComparer.Ordinal)
-            : null;
+        var identityRoutes = selectedIndex is null
+            ? unit.Indexes.Where(index => index.UseOrdinalIdentities)
+            : selectedPhysicalIndex?.UseOrdinalIdentities == true ? [selectedPhysicalIndex] : [];
+        var selectedPhysicalColumns = identityRoutes
+            .SelectMany(index => index.Columns.Select(column => column.Column))
+            .ToHashSet(StringComparer.Ordinal);
+        if (selectedPhysicalColumns.Count == 0)
+            selectedPhysicalColumns = null;
         var derived = unit.DerivedColumns
             .Where(column => column.Projection is PortableProjection.BoundarySearchKey or PortableProjection.LocaleSortKey)
             .ToDictionary(column => column.SourceColumn, StringComparer.Ordinal);
